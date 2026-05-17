@@ -444,12 +444,30 @@ For the custom channel specifically, read in order:
 3. `node_modules/chat/docs/getting-started.mdx`, `usage.mdx`, `handling-events.mdx`, `posting-messages.mdx`, `cards.mdx`, `direct-messages.mdx`, `files.mdx`.
 4. `node_modules/@chat-adapter/telegram/dist/index.d.ts` — exact factory signature and config options.
 
+### Phase 0 — Prerequisites (before any code)
+
+**Goal**: Provision every external resource the spike depends on, so Phase 1 is purely local code.
+
+| Prereq | Used for | How to get it |
+|---|---|---|
+| Telegram bot token | `@chat-adapter/telegram` auth | Talk to `@BotFather` on Telegram → `/newbot` → copy token to `TELEGRAM_BOT_TOKEN` |
+| Telegram webhook secret | Validate inbound webhooks (`X-Telegram-Bot-Api-Secret-Token`) | Generate a random 32-byte string → `TELEGRAM_WEBHOOK_SECRET_TOKEN` |
+| Upstash Redis (EU region) | Resident directory, package registry, session ↔ chatId map | Upstash console → create database in EU → copy `KV_REST_API_URL` + `KV_REST_API_TOKEN` |
+| Vercel project | Deploy target for `ash build`, env-var sync | `vercel link` in repo root → choose/create project |
+| AI Gateway API key | LLM calls via AI SDK | Vercel dashboard → AI tab → create gateway → `vercel env pull` syncs `AI_GATEWAY_API_KEY` to `.env.local` |
+| Node `24.x` + `pnpm` | Ash runtime requirement | `nvm install 24 && corepack enable` |
+
+**Where the scaffold lands**: directly inside this repo (`/Users/diegodemiguel/Development/Work/DropMate/`). The repo is currently empty aside from `PRD.md`, `PRD-ASH.md`, and `.claude/`. The `pnpm create experimental-ash-agent` wizard generates files at the current working directory and won't touch the existing markdown or `.claude/` skills.
+
+**Exit criteria**: `.env.local` populated with all six secrets above, `pnpm` + `node 24` available, the empty Vercel project linked.
+
 ### Phase 1 — Spike (1 day): Ash without a channel
 
 **Goal**: Prove the agent loop works end-to-end before paying for the channel adapter.
 
-- `pnpm create experimental-ash-agent` — scaffold the project, pick Gemini Flash as the model.
-- Write `agent/instructions.md` with the multilingual role + tone.
+- `pnpm create experimental-ash-agent` **run from this repo's root**, scaffolding the Ash app *into* `DropMate/` itself (not a subdirectory). Pick Gemini Flash as the model. The wizard creates `agent/agent.ts`, `agent/instructions.md`, `package.json`, `tsconfig.json`, and `.gitignore`; `PRD.md`, `PRD-ASH.md`, and `.claude/` survive untouched.
+- Add `@upstash/redis`, `chat`, `@chat-adapter/telegram` to the freshly scaffolded `package.json`.
+- Rewrite `agent/instructions.md` with the multilingual role + tone.
 - Implement 3 tools: `register_resident`, `register_package`, `confirm_pickup` (Redis-backed).
 - Add the built-in `agent/channels/ash.ts` so the session API is available.
 - Stand up a **separate thin webhook** at `/api/telegram` (a small Vercel function in `apps/telegram-webhook/` or inline in the same Ash app under `lib/`). This webhook receives Telegram updates via `@chat-adapter/telegram` and calls `POST http://localhost:3000/ash/v1/session` with the message text, then posts the streamed reply back via the adapter.
