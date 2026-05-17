@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Session } from "experimental-ash/channels";
 
@@ -204,6 +204,105 @@ describe("drainSessionToTelegram", () => {
     // branch. This is the same shape as the spike's original loop.
     expect(sendMessage).toHaveBeenCalledTimes(1);
     expect(logError).toHaveBeenCalledTimes(1);
+  });
+
+  describe("default sendMessage (no spy)", () => {
+    const fetchMock = vi.fn();
+    const originalToken = process.env.TELEGRAM_BOT_TOKEN;
+
+    beforeEach(() => {
+      fetchMock.mockReset();
+      vi.stubGlobal("fetch", fetchMock);
+    });
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+      if (originalToken === undefined) {
+        delete process.env.TELEGRAM_BOT_TOKEN;
+      } else {
+        process.env.TELEGRAM_BOT_TOKEN = originalToken;
+      }
+    });
+
+    it("uses deps.token when supplied, ignoring the env var", async () => {
+      process.env.TELEGRAM_BOT_TOKEN = "env-token-should-be-ignored";
+      fetchMock.mockResolvedValue(
+        new Response(JSON.stringify({ ok: true }), { status: 200 }),
+      );
+      const session = makeSession([
+        {
+          type: "message.completed",
+          data: {
+            message: "hi",
+            finishReason: "stop",
+            sequence: 0,
+            stepIndex: 0,
+            turnId: "t1",
+          },
+        },
+      ]);
+
+      await drainSessionToTelegram(session, 42, { token: "explicit-token" });
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url] = fetchMock.mock.calls[0]!;
+      expect(url).toBe(
+        "https://api.telegram.org/botexplicit-token/sendMessage",
+      );
+    });
+
+    it("falls back to TELEGRAM_BOT_TOKEN when deps.token is omitted", async () => {
+      process.env.TELEGRAM_BOT_TOKEN = "env-fallback-token";
+      fetchMock.mockResolvedValue(
+        new Response(JSON.stringify({ ok: true }), { status: 200 }),
+      );
+      const session = makeSession([
+        {
+          type: "message.completed",
+          data: {
+            message: "hi",
+            finishReason: "stop",
+            sequence: 0,
+            stepIndex: 0,
+            turnId: "t1",
+          },
+        },
+      ]);
+
+      await drainSessionToTelegram(session, 42);
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url] = fetchMock.mock.calls[0]!;
+      expect(url).toBe(
+        "https://api.telegram.org/botenv-fallback-token/sendMessage",
+      );
+    });
+
+    it("logs and swallows when neither deps.token nor env is set", async () => {
+      delete process.env.TELEGRAM_BOT_TOKEN;
+      const logError = vi.fn();
+      const session = makeSession([
+        {
+          type: "message.completed",
+          data: {
+            message: "hi",
+            finishReason: "stop",
+            sequence: 0,
+            stepIndex: 0,
+            turnId: "t1",
+          },
+        },
+      ]);
+
+      await expect(
+        drainSessionToTelegram(session, 42, { logError }),
+      ).resolves.toBeUndefined();
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(logError).toHaveBeenCalledTimes(1);
+      expect(logError.mock.calls[0]?.[0]).toBe(
+        "telegram outbound drain failed",
+      );
+    });
   });
 
   it("releases the reader lock even on a clean close", async () => {

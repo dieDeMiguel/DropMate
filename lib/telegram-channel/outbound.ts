@@ -19,14 +19,22 @@
  * are responsible for backgrounding it via `waitUntil(...)` if they
  * need to return the HTTP response before the assistant finishes.
  *
- * @see lib/telegram-api.ts — outbound primitive (`sendTelegramMessage`)
+ * Callers must supply the Telegram bot token explicitly — either via
+ * `deps.token` (preferred for tests and for the Phase 2 channel
+ * factory, which captures the token in closure) or via the
+ * `TELEGRAM_BOT_TOKEN` env var (the spike default). This mirrors the
+ * `sendMessage`/`logError` injection pattern: production behaviour is
+ * unchanged, but we no longer reach into `process.env` from inside
+ * `lib/telegram-channel/send.ts`.
+ *
+ * @see lib/telegram-channel/send.ts — `sendTelegramMessage(token, …)`
  * @see node_modules/experimental-ash/dist/src/protocol/message.d.ts —
  *      `HandleMessageStreamEvent` union (the events we narrow on)
  */
 
 import type { Session } from "experimental-ash/channels";
 
-import { sendTelegramMessage } from "../telegram-api.js";
+import { sendTelegramMessage } from "./send.js";
 
 /**
  * Generic error-reply text used when the session itself fails. Lives
@@ -37,11 +45,19 @@ export const TELEGRAM_SESSION_FAILED_REPLY =
   "Sorry, I hit an error processing that message.";
 
 /**
- * Hooks injected by the test suite. Production callers always use the
- * real `sendTelegramMessage` from `lib/telegram-api.ts`; tests pass a
- * spy so we never hit the Bot API.
+ * Hooks injected by the test suite and by the Phase 2 channel factory.
+ * Production callers in the spike webhook supply `token` from the
+ * `TELEGRAM_BOT_TOKEN` env var; the factory will pass its captured
+ * token through this same field. Tests pass a `sendMessage` spy so
+ * the real Bot API is never hit.
  */
 export interface DrainSessionDeps {
+  /**
+   * Telegram bot token used by the default `sendMessage`. Ignored
+   * when `sendMessage` is overridden — the spy is responsible for
+   * whatever auth it wants.
+   */
+  readonly token?: string;
   /** Posts a plain-text reply to the given Telegram `chatId`. */
   readonly sendMessage?: (chatId: number, text: string) => Promise<void>;
   /** Logger override (defaults to `console.error`). */
@@ -70,7 +86,8 @@ export async function drainSessionToTelegram(
   chatId: number,
   deps: DrainSessionDeps = {},
 ): Promise<void> {
-  const sendMessage = deps.sendMessage ?? sendTelegramMessage;
+  const sendMessage =
+    deps.sendMessage ?? buildDefaultSendMessage(deps.token);
   const logError = deps.logError ?? defaultLogError;
   try {
     const stream = await session.getEventStream();
@@ -101,4 +118,27 @@ export async function drainSessionToTelegram(
 
 function defaultLogError(message: string, error: unknown): void {
   console.error(message, error);
+}
+
+/**
+ * Returns a `sendMessage` closure that injects the token at call
+ * time. The lookup is deferred (rather than captured at module load)
+ * so the spike webhook keeps its current "read env on demand"
+ * behaviour without explicitly threading the token through every
+ * call site. The Phase 2 channel factory will pass an explicit
+ * `token` argument and bypass the env-var fallback entirely.
+ */
+function buildDefaultSendMessage(
+  token: string | undefined,
+): (chatId: number, text: string) => Promise<void> {
+  return async (chatId, text) => {
+    const resolved = token ?? process.env.TELEGRAM_BOT_TOKEN;
+    if (!resolved) {
+      throw new Error(
+        "Telegram bot token is missing: pass `deps.token` to drainSessionToTelegram " +
+          "or set TELEGRAM_BOT_TOKEN.",
+      );
+    }
+    await sendTelegramMessage(resolved, chatId, text);
+  };
 }

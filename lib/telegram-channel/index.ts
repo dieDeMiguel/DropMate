@@ -8,6 +8,7 @@
  *   - `verify.ts`     — webhook signature check (shared with the spike)
  *   - `inbound.ts`    — raw-update → canonical message narrowing
  *   - `outbound.ts`   — Ash session event stream → Telegram replies
+ *   - `send.ts`       — `sendMessage` Bot API primitive (token explicit)
  *
  * The remaining Phase 2 modules (`chat-instance.ts` and the
  * `telegramChannel({ ... })` factory that returns an Ash
@@ -33,3 +34,5 @@ export {
   TELEGRAM_SESSION_FAILED_REPLY,
   type DrainSessionDeps,
 } from "./outbound.js";
+
+export { sendTelegramMessage } from "./send.js";

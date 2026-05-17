@@ -94,7 +94,17 @@ export default defineChannel<
       // Drain the event stream in the background so the assistant's
       // reply gets posted back to Telegram after the HTTP response
       // returns. Telegram retries if the webhook hangs.
-      waitUntil(drainSessionToTelegram(session, inbound.chatId));
+      //
+      // The token is left as `undefined` so the drain falls back to
+      // `process.env.TELEGRAM_BOT_TOKEN` — same behaviour the spike has
+      // always had. When the Phase 2 `telegramChannel({ token, ... })`
+      // factory replaces this webhook, it will pass the captured token
+      // explicitly via `deps.token` and the env-var fallback drops out.
+      waitUntil(
+        drainSessionToTelegram(session, inbound.chatId, {
+          token: process.env.TELEGRAM_BOT_TOKEN,
+        }),
+      );
 
       return new Response(null, { status: 204 });
     }),
