@@ -188,6 +188,7 @@ export const packageCarrierSchema = z.enum([
 export type PackageCarrier = z.infer<typeof packageCarrierSchema>;
 
 export type PackageStatus =
+  | "expected"
   | "held"
   | "pickup_scheduled"
   | "picked_up"
@@ -199,13 +200,44 @@ export interface Package {
   readonly recipientResidentId: string | null;
   readonly recipientName: string;
   readonly recipientHouseNumber: string;
-  readonly holderResidentId: string;
+  /**
+   * `null` while the package is in the `"expected"` stage (the recipient
+   * has pre-announced the delivery but no neighbor has received it yet).
+   * Populated when status moves to `"held"`.
+   */
+  readonly holderResidentId: string | null;
   readonly carrier: PackageCarrier;
   readonly trackingNumber?: string;
   readonly status: PackageStatus;
   readonly receivedAt: number;
   readonly pickedUpAt: number | null;
   readonly reminded: boolean;
+  /**
+   * Unix ms (day-precision is fine — set to start-of-day UTC from a
+   * `YYYY-MM-DD` input). `null` when the resident didn't pin a date.
+   * Only meaningful while `status === "expected"`; once a Package
+   * arrives, the actual `receivedAt` is the authoritative timestamp.
+   */
+  readonly expectedAt?: number | null;
+  /**
+   * Free-form note the resident attached at registration time, e.g.
+   * "birthday gift from Zalando" or "fragile — Vase". Surfaces in
+   * status replies so the resident remembers which expected delivery
+   * the bot is talking about.
+   */
+  readonly notes?: string;
+}
+
+/**
+ * Random Package id. Not cryptographic; just unique per package. Format
+ * `pkg_<timestamp>_<rand>` so logs are scannable. Shared by every tool
+ * that creates a Package (`register_package`,
+ * `register_expected_delivery`, …) so id formats stay consistent.
+ */
+export function newPackageId(): string {
+  const ts = Date.now().toString(36);
+  const rand = Math.random().toString(36).slice(2, 8);
+  return `pkg_${ts}_${rand}`;
 }
 
 const PACKAGE_KEY_PREFIX = "package:";
