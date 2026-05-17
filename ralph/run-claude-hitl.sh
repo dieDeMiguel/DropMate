@@ -66,9 +66,17 @@ docker sandbox exec "$SANDBOX" bash -lc '
 ' >/dev/null
 
 # Launch Claude Code with auth + model injected via env vars.
+#
+# MAX_THINKING_TOKENS=0 disables extended thinking on the CLI side. Opus 4.7
+# requires the new thinking.type.adaptive schema, but Claude Code 2.1.71 still
+# emits thinking.type.enabled, so the request is rejected at the gateway.
+# Suppressing the thinking block entirely sidesteps the schema mismatch until
+# the CLI catches up; remove this once Claude Code ships adaptive thinking.
+# (Same workaround as run-claude-afk-signed.sh.)
 exec docker sandbox exec -it \
   -e ANTHROPIC_BASE_URL="$GATEWAY_URL" \
   -e ANTHROPIC_AUTH_TOKEN="$TOKEN" \
   -e ANTHROPIC_MODEL="$MODEL" \
+  -e MAX_THINKING_TOKENS=0 \
   "$SANDBOX" \
   claude "$@"
