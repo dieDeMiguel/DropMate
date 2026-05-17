@@ -2,54 +2,14 @@
  * Minimal Telegram Bot API client for the Phase 1 spike.
  *
  * Phase 2 (issue #19) replaces this with a first-class Ash channel
- * built on `@chat-adapter/telegram`. For Phase 1 we only need:
+ * built on `@chat-adapter/telegram`. For Phase 1 we only need
+ * `sendTelegramMessage(chatId, text)` to post the agent's reply back to
+ * the user/group.
  *
- *   - `sendTelegramMessage(chatId, text)` — post the agent's reply
- *     back to the user/group.
- *   - `extractInboundMessage(update)` — narrow a raw Telegram update
- *     to `{ chatId, text }` (or `null` for updates we don't handle
- *     yet, e.g. photos, edits, reactions).
+ * Inbound parsing + webhook signature verification moved to
+ * `lib/telegram-channel/` so the spike and Phase 2 channel share one
+ * implementation. See `lib/telegram-channel/index.ts`.
  */
-
-export interface TelegramInboundMessage {
-  readonly chatId: number;
-  readonly text: string;
-  readonly isGroup: boolean;
-  readonly fromUserId: number | null;
-  readonly fromLanguageCode: string | null;
-}
-
-/**
- * Telegram webhook payload shape we care about for the spike. Many
- * fields are omitted intentionally — Phase 2 handles the long tail.
- */
-export interface TelegramUpdatePayload {
-  readonly update_id?: number;
-  readonly message?: {
-    readonly chat: { readonly id: number; readonly type: string };
-    readonly text?: string;
-    readonly from?: {
-      readonly id: number;
-      readonly language_code?: string;
-    };
-  };
-}
-
-export function extractInboundMessage(
-  update: TelegramUpdatePayload,
-): TelegramInboundMessage | null {
-  const msg = update.message;
-  if (!msg || typeof msg.text !== "string" || msg.text.length === 0) {
-    return null;
-  }
-  return {
-    chatId: msg.chat.id,
-    text: msg.text,
-    isGroup: msg.chat.type !== "private",
-    fromUserId: msg.from?.id ?? null,
-    fromLanguageCode: msg.from?.language_code ?? null,
-  };
-}
 
 export async function sendTelegramMessage(
   chatId: number,
