@@ -2,8 +2,9 @@
  * Telegram Bot API file resolution.
  *
  * Resolves a `file_id` (the opaque pointer Telegram hands us on every
- * `photo[]` / `document` / `audio` update) into a downloadable HTTPS
- * URL via the two-step `getFile` dance:
+ * `photo[]` / `document` / `audio` update) into either a downloadable
+ * HTTPS URL (`getTelegramFileUrl`) or the actual bytes plus media type
+ * (`fetchTelegramFile`) via the two-step `getFile` dance:
  *
  *   1. `POST /bot<token>/getFile` with `file_id` → response has
  *      `result.file_path` (e.g. `photos/file_42.jpg`).
@@ -14,11 +15,16 @@
  * tests don't have to monkey-patch `process.env` and the Phase 2
  * `telegramChannel({ token, ... })` factory can capture it in closure.
  *
- * Note on the token-in-URL: the returned URL embeds the bot token.
- * The orchestrator hands it to the multimodal model provider, which
- * fetches it server-side — the URL never reaches the end user. If
- * production logs make this too leaky, swap to a fetch + base64
- * transform here without changing the orchestrator's call site.
+ * Why prefer `fetchTelegramFile` over `getTelegramFileUrl` for
+ * multimodal model input: the download URL embeds the bot token. Some
+ * AI Gateway routes reject credential-bearing URLs, and AI SDK 7
+ * multimodal parts work most reliably when the bytes are inline with
+ * an explicit `mediaType`, packaged as a `FilePart`
+ * ({ type: "file", data: bytes, mediaType }). The legacy `ImagePart`
+ * shape is deprecated and the Vercel AI Gateway rejects the data: URI
+ * the SDK serializes it to ("Unsupported file URI type").
+ * `getTelegramFileUrl` stays exported because `verify.ts` / future
+ * flows that DM the user a link may still need it.
  *
  * @see https://core.telegram.org/bots/api#getfile
  */
@@ -68,4 +74,42 @@ export async function getTelegramFileUrl(
   }
 
   return `https://api.telegram.org/file/bot${token}/${filePath}`;
+}
+
+/**
+ * Inlined Telegram file — the bytes plus the `content-type` header the
+ * Telegram file CDN returned. Passed straight into AI SDK 7 multimodal
+ * `FilePart` ({ type: "file", data: bytes, mediaType }) so the model
+ * provider doesn't have to fetch a credential-bearing URL.
+ */
+export interface FetchedTelegramFile {
+  readonly bytes: Uint8Array;
+  readonly mediaType: string;
+}
+
+/**
+ * Resolves a `file_id` to the file's bytes + media type by chaining
+ * `getTelegramFileUrl` with a server-side fetch. Keeps the bot token
+ * inside this module — the bytes that flow out are credential-free.
+ *
+ * Falls back to `image/jpeg` when the CDN omits `content-type`, which
+ * matches Telegram's behaviour for photos uploaded from the mobile
+ * client. Callers that need a stricter mode can read `mediaType` and
+ * reject themselves.
+ */
+export async function fetchTelegramFile(
+  token: string,
+  fileId: string,
+): Promise<FetchedTelegramFile> {
+  const url = await getTelegramFileUrl(token, fileId);
+  const res = await fetch(url);
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(
+      `Telegram file download failed: ${res.status} ${res.statusText} ${body}`,
+    );
+  }
+  const mediaType = res.headers.get("content-type") ?? "image/jpeg";
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  return { bytes, mediaType };
 }

@@ -55,7 +55,11 @@ export {
   editMessageReplyMarkup,
 } from "./keyboards.js";
 
-export { getTelegramFileUrl } from "./file.js";
+export {
+  fetchTelegramFile,
+  getTelegramFileUrl,
+  type FetchedTelegramFile,
+} from "./file.js";
 
 export { dmResident, postToGroup } from "./notify.js";
 

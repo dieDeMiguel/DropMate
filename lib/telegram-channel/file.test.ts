@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { getTelegramFileUrl } from "./file.js";
+import { fetchTelegramFile, getTelegramFileUrl } from "./file.js";
 
 const TOKEN = "111:AAA";
 
@@ -66,5 +66,87 @@ describe("getTelegramFileUrl", () => {
     const fetchSpy = vi.mocked(globalThis.fetch);
     await expect(getTelegramFileUrl(TOKEN, "")).rejects.toThrow(/file_id is empty/);
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("fetchTelegramFile", () => {
+  beforeEach(() => {
+    vi.spyOn(globalThis, "fetch");
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("resolves the file_id, downloads the bytes, and returns them with the CDN's media type", async () => {
+    const fetchSpy = vi.mocked(globalThis.fetch);
+    // 1. getFile → path
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ ok: true, result: { file_path: "photos/file_42.jpg" } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    // 2. CDN → bytes
+    const payload = new Uint8Array([0x89, 0x50, 0x4e, 0x47]); // PNG magic header
+    fetchSpy.mockResolvedValueOnce(
+      new Response(payload, {
+        status: 200,
+        headers: { "content-type": "image/png" },
+      }),
+    );
+
+    const result = await fetchTelegramFile(TOKEN, "abc");
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    const downloadCall = fetchSpy.mock.calls[1]!;
+    expect(downloadCall[0]).toBe(
+      `https://api.telegram.org/file/bot${TOKEN}/photos/file_42.jpg`,
+    );
+    expect(result.mediaType).toBe("image/png");
+    expect(result.bytes).toBeInstanceOf(Uint8Array);
+    expect(Array.from(result.bytes)).toEqual(Array.from(payload));
+  });
+
+  it("falls back to image/jpeg when the CDN omits content-type", async () => {
+    const fetchSpy = vi.mocked(globalThis.fetch);
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ ok: true, result: { file_path: "photos/file_1.jpg" } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    fetchSpy.mockResolvedValueOnce(
+      // No content-type header.
+      new Response(new Uint8Array([1, 2, 3]), { status: 200 }),
+    );
+
+    const result = await fetchTelegramFile(TOKEN, "abc");
+    expect(result.mediaType).toBe("image/jpeg");
+  });
+
+  it("throws when the CDN download returns a non-2xx", async () => {
+    const fetchSpy = vi.mocked(globalThis.fetch);
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ ok: true, result: { file_path: "photos/file_1.jpg" } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    fetchSpy.mockResolvedValueOnce(new Response("not found", { status: 404 }));
+
+    await expect(fetchTelegramFile(TOKEN, "abc")).rejects.toThrow(
+      /Telegram file download failed: 404/,
+    );
+  });
+
+  it("propagates getFile failures without attempting a download", async () => {
+    const fetchSpy = vi.mocked(globalThis.fetch);
+    fetchSpy.mockResolvedValueOnce(new Response("nope", { status: 400 }));
+
+    await expect(fetchTelegramFile(TOKEN, "abc")).rejects.toThrow(
+      /Telegram getFile failed: 400/,
+    );
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 });

@@ -110,11 +110,24 @@ export interface ProcessUpdateDeps {
   /** Starts the outbound drain for the resolved session + chat. */
   readonly drainSession: (session: Session, chatId: number) => Promise<void>;
   /**
-   * Resolves a Telegram `file_id` (from `photo[]`) into a downloadable
-   * HTTPS URL. Wired by the factory to `getTelegramFileUrl(token, id)`
-   * with the closure-captured token; tests pass a spy.
+   * Resolves a Telegram `file_id` (from `photo[]`) into the file's
+   * bytes plus media type. Wired by the factory to
+   * `fetchTelegramFile(token, id)` with the closure-captured token;
+   * tests pass a spy.
+   *
+   * We inline the bytes (rather than handing the model provider a URL
+   * with the bot token embedded) because (a) some AI Gateway routes
+   * reject credential-bearing URLs and (b) AI SDK 7 multimodal parts
+   * are most reliable with explicit `mediaType` + bytes packaged as a
+   * `FilePart` ({ type: "file", data: bytes, mediaType }). The legacy
+   * `ImagePart` shape ({ type: "image", image: bytes }) is deprecated
+   * in AI SDK 7 and the Vercel AI Gateway rejects the data: URI it
+   * serializes to with "Unsupported file URI type".
    */
-  readonly getFileUrl: (fileId: string) => Promise<string>;
+  readonly fetchFile: (fileId: string) => Promise<{
+    readonly bytes: Uint8Array;
+    readonly mediaType: string;
+  }>;
   /**
    * Acks a `callback_query` so the Telegram client clears the tap
    * spinner. Optional `text` shows a brief toast to the tapper —
@@ -249,7 +262,7 @@ async function handleCallbackQuery(
     },
   });
 
-  if (!existingSessionId) {
+  if (session.id !== existingSessionId) {
     await deps.setSessionIdForChat(cb.chatId, session.id);
   }
 
@@ -314,11 +327,11 @@ export async function processInboundTelegramUpdate(
 
   let message: string | UserContent;
   if (inbound.photoFileId !== null) {
-    const url = await deps.getFileUrl(inbound.photoFileId);
+    const { bytes, mediaType } = await deps.fetchFile(inbound.photoFileId);
     const captionText =
       inbound.text.length > 0 ? inbound.text : "(photo, no caption)";
     message = [
-      { type: "image", image: new URL(url) },
+      { type: "file", data: bytes, mediaType },
       { type: "text", text: captionText },
     ];
   } else {
@@ -336,9 +349,14 @@ export async function processInboundTelegramUpdate(
     },
   });
 
-  if (!existingSessionId) {
+  if (session.id !== existingSessionId) {
     // Persist immediately so a concurrent retry doesn't open a
-    // second session for the same chat.
+    // second session for the same chat. We re-pin on *every* id
+    // change (not just the no-prior-id case) because the Ash channel
+    // silently spawns a fresh session when delivery to the stored
+    // continuation fails — without re-pinning, the stale id stays in
+    // Redis for the 7d TTL and every subsequent turn restarts a
+    // context-free session.
     await deps.setSessionIdForChat(inbound.chatId, session.id);
   }
 

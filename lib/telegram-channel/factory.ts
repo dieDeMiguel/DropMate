@@ -40,7 +40,7 @@ import {
   getSessionIdForChat,
   setSessionIdForChat,
 } from "../redis.js";
-import { getTelegramFileUrl } from "./file.js";
+import { fetchTelegramFile } from "./file.js";
 import {
   answerCallbackQuery,
   editMessageReplyMarkup,
@@ -104,7 +104,7 @@ export function telegramChannel(config: TelegramChannelConfig) {
             setSessionIdForChat,
             drainSession: (session, chatId) =>
               drainSessionToTelegram(session, chatId, { token }),
-            getFileUrl: (fileId) => getTelegramFileUrl(token, fileId),
+            fetchFile: (fileId) => fetchTelegramFile(token, fileId),
             answerCallback: (callbackId, text) =>
               answerCallbackQuery(token, callbackId, text),
             stripKeyboard: (chatId, messageId) =>

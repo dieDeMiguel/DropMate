@@ -63,7 +63,7 @@ interface BuiltDeps {
   getSessionIdForChat: ReturnType<typeof vi.fn>;
   setSessionIdForChat: ReturnType<typeof vi.fn>;
   drainSession: ReturnType<typeof vi.fn>;
-  getFileUrl: ReturnType<typeof vi.fn>;
+  fetchFile: ReturnType<typeof vi.fn>;
   answerCallback: ReturnType<typeof vi.fn>;
   stripKeyboard: ReturnType<typeof vi.fn>;
   getPackageRecipientId: ReturnType<typeof vi.fn>;
@@ -73,7 +73,7 @@ function buildDeps(overrides: {
   existingSessionId?: string | null;
   session?: Session;
   expectedSecret?: string | undefined;
-  fileUrl?: string;
+  fetchedFile?: { bytes: Uint8Array; mediaType: string };
   packageRecipientId?: string | null;
 } = {}): BuiltDeps {
   const session = overrides.session ?? makeSession("sess_new");
@@ -84,10 +84,13 @@ function buildDeps(overrides: {
     .mockResolvedValue(overrides.existingSessionId ?? null);
   const setSessionIdForChat = vi.fn().mockResolvedValue(undefined);
   const drainSession = vi.fn().mockResolvedValue(undefined);
-  const getFileUrl = vi
+  const fetchFile = vi
     .fn()
     .mockResolvedValue(
-      overrides.fileUrl ?? "https://api.telegram.org/file/bot/photos/file_42.jpg",
+      overrides.fetchedFile ?? {
+        bytes: new Uint8Array([0xff, 0xd8, 0xff, 0xe0]),
+        mediaType: "image/jpeg",
+      },
     );
   const answerCallback = vi.fn().mockResolvedValue(undefined);
   const stripKeyboard = vi.fn().mockResolvedValue(undefined);
@@ -102,7 +105,7 @@ function buildDeps(overrides: {
     getSessionIdForChat,
     setSessionIdForChat,
     drainSession,
-    getFileUrl,
+    fetchFile,
     answerCallback,
     stripKeyboard,
     getPackageRecipientId,
@@ -114,7 +117,7 @@ function buildDeps(overrides: {
       getSessionIdForChat,
       setSessionIdForChat,
       drainSession,
-      getFileUrl,
+      fetchFile,
       answerCallback,
       stripKeyboard,
       getPackageRecipientId,
@@ -221,6 +224,28 @@ describe("processInboundTelegramUpdate", () => {
     expect(setSessionIdForChat).not.toHaveBeenCalled();
   });
 
+  it("re-pins the chatId→sessionId mapping when the Ash channel returns a new session id (zombie eviction)", async () => {
+    // Reproduces the production bug: Redis holds a stale sessionId from a
+    // failed turn; the Ash channel silently spawns a new session via
+    // runtime.run(...) and returns the new id. Without re-pinning, every
+    // subsequent turn restarts a context-free session.
+    const replacement = makeSession("sess_fresh");
+    const { deps, sendToAsh, setSessionIdForChat } = buildDeps({
+      existingSessionId: "sess_zombie",
+      session: replacement,
+    });
+
+    const res = await processInboundTelegramUpdate(
+      makeRequest(dmUpdate({ chatId: 7, text: "follow-up", fromUserId: 99 })),
+      deps,
+    );
+
+    expect(res.status).toBe(204);
+    const options = sendToAsh.mock.calls[0]![1];
+    expect(options.continuationToken).toBe("sess_zombie");
+    expect(setSessionIdForChat).toHaveBeenCalledWith(7, "sess_fresh");
+  });
+
   it("omits auth when the inbound message has no sender", async () => {
     const { deps, sendToAsh } = buildDeps();
 
@@ -252,9 +277,10 @@ describe("processInboundTelegramUpdate", () => {
     });
   });
 
-  it("resolves a photo file_id and forwards multimodal UserContent with caption", async () => {
-    const { deps, sendToAsh, getFileUrl } = buildDeps({
-      fileUrl: "https://api.telegram.org/file/bot/photos/file_99.jpg",
+  it("resolves a photo file_id and forwards a FilePart with inline bytes + mediaType and caption", async () => {
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+    const { deps, sendToAsh, fetchFile } = buildDeps({
+      fetchedFile: { bytes, mediaType: "image/png" },
     });
 
     const update = {
@@ -275,18 +301,16 @@ describe("processInboundTelegramUpdate", () => {
     const res = await processInboundTelegramUpdate(makeRequest(update), deps);
     expect(res.status).toBe(204);
 
-    expect(getFileUrl).toHaveBeenCalledWith("large");
+    expect(fetchFile).toHaveBeenCalledWith("large");
 
     const [message, options] = sendToAsh.mock.calls[0]!;
     expect(Array.isArray(message)).toBe(true);
     expect(message).toHaveLength(2);
 
-    const imagePart = message[0];
-    expect(imagePart.type).toBe("image");
-    expect(imagePart.image).toBeInstanceOf(URL);
-    expect((imagePart.image as URL).toString()).toBe(
-      "https://api.telegram.org/file/bot/photos/file_99.jpg",
-    );
+    const filePart = message[0];
+    expect(filePart.type).toBe("file");
+    expect(filePart.data).toBe(bytes);
+    expect(filePart.mediaType).toBe("image/png");
 
     const textPart = message[1];
     expect(textPart).toEqual({ type: "text", text: "Paket für Meyer" });
@@ -300,9 +324,7 @@ describe("processInboundTelegramUpdate", () => {
   });
 
   it("substitutes a placeholder caption when a photo arrives without text", async () => {
-    const { deps, sendToAsh, getFileUrl } = buildDeps({
-      fileUrl: "https://api.telegram.org/file/bot/photos/file_77.jpg",
-    });
+    const { deps, sendToAsh, fetchFile } = buildDeps();
 
     const update = {
       update_id: 2,
@@ -317,21 +339,21 @@ describe("processInboundTelegramUpdate", () => {
 
     await processInboundTelegramUpdate(makeRequest(update), deps);
 
-    expect(getFileUrl).toHaveBeenCalledWith("only");
+    expect(fetchFile).toHaveBeenCalledWith("only");
 
     const [message] = sendToAsh.mock.calls[0]!;
     expect(message[1]).toEqual({ type: "text", text: "(photo, no caption)" });
   });
 
-  it("does not call getFileUrl on text-only updates", async () => {
-    const { deps, getFileUrl } = buildDeps();
+  it("does not call fetchFile on text-only updates", async () => {
+    const { deps, fetchFile } = buildDeps();
 
     await processInboundTelegramUpdate(
       makeRequest(dmUpdate({ chatId: 5, text: "hi", fromUserId: 99 })),
       deps,
     );
 
-    expect(getFileUrl).not.toHaveBeenCalled();
+    expect(fetchFile).not.toHaveBeenCalled();
   });
 });
 
@@ -422,6 +444,23 @@ describe("processInboundTelegramUpdate — callback_query", () => {
     );
 
     expect(setSessionIdForChat).toHaveBeenCalledWith(42, "sess_new_cb");
+  });
+
+  it("re-pins the chatId→sessionId mapping on a callback tap when the Ash channel returns a fresh session id", async () => {
+    const replacement = makeSession("sess_fresh_cb");
+    const { deps, setSessionIdForChat } = buildDeps({
+      existingSessionId: "sess_zombie_cb",
+      session: replacement,
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        cbUpdate({ chatId: 42, messageId: 1, fromUserId: 99, data: "confirm_pickup:pkg_1" }),
+      ),
+      deps,
+    );
+
+    expect(setSessionIdForChat).toHaveBeenCalledWith(42, "sess_fresh_cb");
   });
 
   it("synthesizes an accept_reception_request message when 'accept_reception_request:req_99' is tapped", async () => {
