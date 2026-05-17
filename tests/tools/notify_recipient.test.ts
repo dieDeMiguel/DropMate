@@ -106,4 +106,41 @@ describe("notify_recipient", () => {
     ).rejects.toThrow(/TELEGRAM_BOT_TOKEN is not set/);
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it("forwards inline-keyboard buttons as reply_markup with snake_case callback_data", async () => {
+    seedResident({ platformId: "987654", language: "de" });
+
+    await runExecute({
+      recipientResidentId: "987654",
+      text: "Dein Paket ist da.",
+      buttons: [
+        [
+          { text: "Abgeholt", callbackData: "confirm_pickup:pkg_42" },
+          { text: "Später erinnern", callbackData: "remind_later:pkg_42" },
+        ],
+      ],
+    });
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect(JSON.parse(init?.body as string)).toEqual({
+      chat_id: 987654,
+      text: "Dein Paket ist da.",
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "Abgeholt", callback_data: "confirm_pickup:pkg_42" },
+            { text: "Später erinnern", callback_data: "remind_later:pkg_42" },
+          ],
+        ],
+      },
+    });
+  });
+
+  it("omits reply_markup when buttons not supplied", async () => {
+    seedResident({ platformId: "987654", language: "de" });
+    await runExecute({ recipientResidentId: "987654", text: "plain" });
+    const [, init] = fetchMock.mock.calls[0]!;
+    const body = JSON.parse(init?.body as string);
+    expect(body.reply_markup).toBeUndefined();
+  });
 });

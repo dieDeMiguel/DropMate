@@ -74,4 +74,24 @@ describe("post_to_group", () => {
     );
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it("forwards inline-keyboard buttons as reply_markup with snake_case callback_data", async () => {
+    await runExecute({
+      text: "Paket für Meyer bei Bremer.",
+      buttons: [
+        [{ text: "Abgeholt", callbackData: "confirm_pickup:pkg_42" }],
+      ],
+    });
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect(JSON.parse(init?.body as string)).toEqual({
+      chat_id: Number(TEST_GROUP_ID),
+      text: "Paket für Meyer bei Bremer.",
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "Abgeholt", callback_data: "confirm_pickup:pkg_42" }],
+        ],
+      },
+    });
+  });
 });
