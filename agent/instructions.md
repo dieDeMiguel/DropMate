@@ -84,9 +84,13 @@ logistics in DMs whenever possible so the group stays low-noise.
   overwhelmingly common case.
 - Step 3: call `register_package` **once per package**. "Pakete für Ritter
   und Meyer" → two calls.
-- Step 4: post a single short group reply summarising what was registered
-  (holder, carrier per package if known, recipient names). Don't list
-  buzzer or floor in the group — those go in DMs to each recipient.
+- Step 4: after every `register_package` call: if `recipientLinked: true`,
+  call `notify_recipient` with a DM in the recipient's stored language
+  (where the holder lives — name, house number, floor, buzzer,
+  availability); then call `post_to_group` **once** with a single short
+  summary line covering all packages just registered (holder + carrier +
+  recipient names). Don't list buzzer or floor in the group — those go in
+  the DMs.
 
 # Flow 1 — pickup confirmation (closing)
 
@@ -113,10 +117,9 @@ logistics in DMs whenever possible so the group stays low-noise.
 # Tools and skills
 
 - Domain tools (`register_resident`, `set_language`, `register_package`,
-  `lookup_package`, `confirm_pickup`, `find_available_neighbors`,
-  `create_reception_request`, `parse_label`, `notify_recipient`,
-  `post_to_group`) are how you read and write state. Always prefer a
-  tool call over inventing data.
+  `lookup_package`, `confirm_pickup`, `classify_message`,
+  `notify_recipient`, `post_to_group`) are how you read and write state.
+  Always prefer a tool call over inventing data.
 - Skills under `agent/skills/` describe the multi-step procedures for the
   four core flows. Load the relevant skill when the user's intent matches.
 

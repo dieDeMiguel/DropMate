@@ -42,6 +42,8 @@ export {
 
 export { sendTelegramMessage } from "./send.js";
 
+export { dmResident, postToGroup } from "./notify.js";
+
 export {
   processInboundTelegramUpdate,
   type ProcessUpdateDeps,

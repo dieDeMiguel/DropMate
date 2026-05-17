@@ -1,0 +1,77 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+async function loadTool() {
+  const mod = await import("../../agent/tools/post_to_group.js");
+  return mod.default;
+}
+
+async function runExecute(input: Record<string, unknown>) {
+  const tool = await loadTool();
+  const execute = tool.execute as (
+    input: unknown,
+    options: unknown,
+  ) => Promise<unknown>;
+  return execute(input, { toolCallId: "call-1", messages: [] });
+}
+
+const TEST_TOKEN = "111222:abcdef";
+const TEST_GROUP_ID = "-1001234567890";
+
+describe("post_to_group", () => {
+  const fetchMock = vi.fn();
+
+  beforeEach(() => {
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    process.env.TELEGRAM_BOT_TOKEN = TEST_TOKEN;
+    process.env.TELEGRAM_GROUP_CHAT_ID = TEST_GROUP_ID;
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete process.env.TELEGRAM_BOT_TOKEN;
+    delete process.env.TELEGRAM_GROUP_CHAT_ID;
+  });
+
+  it("POSTs to the group chat id from TELEGRAM_GROUP_CHAT_ID", async () => {
+    const result = (await runExecute({
+      text: "2 Pakete bei Bremer (Hs.92) für Ritter und Meyer.",
+    })) as { delivered: boolean };
+
+    expect(result).toEqual({ delivered: true });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe(`https://api.telegram.org/bot${TEST_TOKEN}/sendMessage`);
+    expect(JSON.parse(init?.body as string)).toEqual({
+      chat_id: Number(TEST_GROUP_ID),
+      text: "2 Pakete bei Bremer (Hs.92) für Ritter und Meyer.",
+    });
+  });
+
+  it("throws when TELEGRAM_BOT_TOKEN is unset", async () => {
+    delete process.env.TELEGRAM_BOT_TOKEN;
+    await expect(runExecute({ text: "hi" })).rejects.toThrow(
+      /TELEGRAM_BOT_TOKEN is not set/,
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("throws when TELEGRAM_GROUP_CHAT_ID is unset", async () => {
+    delete process.env.TELEGRAM_GROUP_CHAT_ID;
+    await expect(runExecute({ text: "hi" })).rejects.toThrow(
+      /TELEGRAM_GROUP_CHAT_ID is not set/,
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("throws when TELEGRAM_GROUP_CHAT_ID is not a valid number", async () => {
+    process.env.TELEGRAM_GROUP_CHAT_ID = "not-a-number";
+    await expect(runExecute({ text: "hi" })).rejects.toThrow(
+      /TELEGRAM_GROUP_CHAT_ID=not-a-number is not a valid number/,
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
