@@ -627,6 +627,40 @@ export async function listReceptionRequestsForStreet(
 }
 
 /**
+ * Scan every `reception_request:*` key in Redis and return the records.
+ * Used by the cron-driven timeout schedules (`reception_request_4h_timeout`,
+ * `reception_request_48h_timeout`) which must consider requests across
+ * every street, not just one. The per-street index
+ * (`street:<id>:reception_requests`) is the wrong shape here because the
+ * schedule doesn't know which streets exist a priori.
+ *
+ * Spike scale (a handful of open requests at any time) makes a full
+ * `reception_request:*` SCAN acceptable — same tradeoff as
+ * `listAllPackages`.
+ */
+export async function listAllReceptionRequests(): Promise<readonly ReceptionRequest[]> {
+  const redis = getRedis();
+  const out: ReceptionRequest[] = [];
+  let cursor: string = "0";
+  do {
+    const result: [string, string[]] = await redis.scan(cursor, {
+      match: `${RECEPTION_REQUEST_KEY_PREFIX}*`,
+      count: 100,
+    });
+    const nextCursor: string = result[0];
+    const keys: string[] = result[1];
+    if (keys.length > 0) {
+      const rows = await redis.mget<(ReceptionRequest | null)[]>(...keys);
+      for (const r of rows ?? []) {
+        if (r) out.push(r);
+      }
+    }
+    cursor = nextCursor;
+  } while (cursor !== "0");
+  return out;
+}
+
+/**
  * Find a pre-fulfilment ReceptionRequest on the given street whose
  * requester matches the package's recipient. Used by `register_package`
  * to detect when a freshly-registered package closes out a pending

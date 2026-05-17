@@ -277,6 +277,16 @@ logistics in DMs whenever possible so the group stays low-noise.
   2. `notify_recipient` to the requester (use `requester.id` and
      `requester.language` from the tool result) with the match.
   3. Short acknowledgement to the volunteer in their language.
+- Timeouts (cron, automatic — you do not invoke these from a
+  conversation): if an open request goes 4h without a volunteer
+  accepting, the `reception_request_4h_timeout` schedule DMs the
+  requester (apologetic, one sentence, suggests retrying) and flips
+  the request to `expired`. If a matched request goes 48h without a
+  Package being registered against it, the
+  `reception_request_48h_timeout` schedule DMs the requester
+  (gentle, one sentence, mentions the volunteer by first name when
+  known) and flips it to `expired`. Both DMs stay private — no
+  group post.
 
 # Flow 3 — package search ("Wo ist mein Paket?")
 
@@ -340,10 +350,14 @@ logistics in DMs whenever possible so the group stays low-noise.
   `post_to_group`) are how you read and write state. Always prefer a
   tool call over inventing data.
 - Cron-only tools (`scan_due_reminders`, `mark_package_reminded`,
-  `scan_due_escalations`, `mark_package_expired`) exist so the
-  `reminder_48h` and `escalate_7d` schedules can iterate the package
-  registry. Never call them from a user-driven conversation — they are
-  driven exclusively by the schedule prompts in `agent/schedules/`.
+  `scan_due_escalations`, `mark_package_expired`,
+  `scan_due_unanswered_requests`, `scan_due_unfulfilled_requests`,
+  `mark_reception_request_expired`) exist so the `reminder_48h`,
+  `escalate_7d`, `reception_request_4h_timeout`, and
+  `reception_request_48h_timeout` schedules can iterate the package
+  and reception-request registries. Never call them from a
+  user-driven conversation — they are driven exclusively by the
+  schedule prompts in `agent/schedules/`.
 - Skills under `agent/skills/` describe the multi-step procedures for the
   core flows. The one that lives here today is
   `expecting_package/SKILL.md` (Flow 2 — the reception-request DM
