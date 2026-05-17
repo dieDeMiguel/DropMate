@@ -15,6 +15,15 @@
  * `Number(resident.platformId)` — Telegram's 1:1 chat id and user id
  * are identical for DMs.
  *
+ * Optional `buttons` arg (#24): when supplied, the DM is sent with an
+ * inline keyboard. The model uses this to attach quick-action buttons
+ * to pickup notifications ("Mark as picked up") and reception-request
+ * candidate DMs ("Yes, I can receive" / "No"). Each button carries
+ * `callback_data` formatted as `"<action>:<id>"` — e.g.
+ * `"confirm_pickup:pkg_42"`, `"accept_reception_request:req_99"`. The
+ * orchestrator parses this on tap to route the action through the
+ * agent. Button text MUST already be in the recipient's language.
+ *
  * Bot token comes from `TELEGRAM_BOT_TOKEN`; the tool throws clearly if
  * it's unset rather than silently sending with `undefined`.
  */
@@ -23,7 +32,28 @@ import { defineTool } from "experimental-ash/tools";
 import { z } from "zod";
 
 import { dmResident } from "../../lib/telegram-channel/notify.js";
+import type { InlineKeyboardMarkup } from "../../lib/telegram-channel/send.js";
 import { getResident } from "../../lib/redis.js";
+
+const buttonSchema = z.object({
+  text: z
+    .string()
+    .min(1)
+    .describe(
+      "Button label in the recipient's language. Keep short — Telegram " +
+        "wraps long labels poorly.",
+    ),
+  callbackData: z
+    .string()
+    .min(1)
+    .max(64)
+    .describe(
+      "Encoded action to fire when the button is tapped. Convention: " +
+        '"<action>:<id>" — e.g. "confirm_pickup:pkg_42", ' +
+        '"accept_reception_request:req_99", ' +
+        '"decline_reception_request:req_99". Max 64 bytes per Bot API spec.',
+    ),
+});
 
 const inputSchema = z.object({
   recipientResidentId: z
@@ -40,6 +70,17 @@ const inputSchema = z.object({
       "Localised message in the recipient's language. The model is " +
         "responsible for translation — this tool sends the text verbatim.",
     ),
+  buttons: z
+    .array(z.array(buttonSchema).min(1).max(3))
+    .min(1)
+    .max(3)
+    .optional()
+    .describe(
+      "Optional inline-keyboard rows attached to the DM. Each inner " +
+        'array is one row; up to 3 rows of up to 3 buttons. Use for ' +
+        "quick actions like pickup confirmation or reception-request " +
+        "yes/no. Omit for plain text DMs.",
+    ),
 });
 
 export default defineTool({
@@ -47,9 +88,11 @@ export default defineTool({
     "Send a 1:1 Telegram DM to a registered resident. Use after a " +
     "`register_package` call that linked the recipient (or any time a " +
     "private message is appropriate). The text must already be in the " +
-    "recipient's language. Returns `{ delivered: true, language }`.",
+    "recipient's language. Optionally attach inline-keyboard `buttons` " +
+    "for quick actions (pickup confirmation, reception-request yes/no). " +
+    "Returns `{ delivered: true, language }`.",
   inputSchema,
-  async execute({ recipientResidentId, text }) {
+  async execute({ recipientResidentId, text, buttons }) {
     const token = process.env.TELEGRAM_BOT_TOKEN;
     if (!token) {
       throw new Error(
@@ -63,7 +106,14 @@ export default defineTool({
           "the recipient may not be registered yet.",
       );
     }
-    await dmResident(token, recipient, text);
+    const replyMarkup: InlineKeyboardMarkup | undefined = buttons
+      ? {
+          inline_keyboard: buttons.map((row) =>
+            row.map((btn) => ({ text: btn.text, callback_data: btn.callbackData })),
+          ),
+        }
+      : undefined;
+    await dmResident(token, recipient, text, replyMarkup);
     return { delivered: true, language: recipient.language ?? null };
   },
 });

@@ -14,6 +14,12 @@
  * back to the last entry when `file_size` is absent on every variant)
  * to maximise label legibility for the multimodal model.
  *
+ * Callback queries (#24): an update with `callback_query` (a tap on an
+ * inline-keyboard button) is admitted by `extractInboundCallback`. It
+ * surfaces the originating message id + chat id so the orchestrator
+ * can edit / strip the keyboard, and the callback `id` so it can `answerCallbackQuery`
+ * to clear the client-side spinner.
+ *
  * @see https://core.telegram.org/bots/api#update
  */
 
@@ -33,6 +39,24 @@ export interface TelegramInboundMessage {
 }
 
 /**
+ * Canonical shape for a button-tap update. The orchestrator turns this
+ * into a synthetic user message into the same Ash session and uses the
+ * `messageId` / `callbackId` fields to clean up the originating
+ * keyboard and ack the tap.
+ *
+ * @see https://core.telegram.org/bots/api#callbackquery
+ */
+export interface TelegramInboundCallback {
+  readonly callbackId: string;
+  readonly chatId: number;
+  readonly messageId: number;
+  readonly fromUserId: number;
+  readonly fromLanguageCode: string | null;
+  readonly isGroup: boolean;
+  readonly data: string;
+}
+
+/**
  * Telegram photo variant — Telegram returns several down-scaled copies
  * of the same image; `photo[]` is ordered small → large. We persist the
  * fields we actually use to pick the best variant.
@@ -48,12 +72,13 @@ export interface TelegramPhotoSize {
 
 /**
  * Telegram webhook payload shape we currently care about. Many optional
- * fields are intentionally omitted — extending the type is a Phase 2
- * concern (#24 for callback queries, …).
+ * fields (edited_message, channel_post, reactions, …) are intentionally
+ * omitted — adding them is just more `extract*` branches when needed.
  */
 export interface TelegramUpdatePayload {
   readonly update_id?: number;
   readonly message?: {
+    readonly message_id?: number;
     readonly chat: { readonly id: number; readonly type: string };
     readonly text?: string;
     readonly caption?: string;
@@ -61,6 +86,18 @@ export interface TelegramUpdatePayload {
     readonly from?: {
       readonly id: number;
       readonly language_code?: string;
+    };
+  };
+  readonly callback_query?: {
+    readonly id: string;
+    readonly data?: string;
+    readonly from: {
+      readonly id: number;
+      readonly language_code?: string;
+    };
+    readonly message?: {
+      readonly message_id: number;
+      readonly chat: { readonly id: number; readonly type: string };
     };
   };
 }
@@ -86,6 +123,30 @@ function pickLargestPhoto(
     }
   }
   return best;
+}
+
+/**
+ * Narrow a `callback_query` update into our canonical shape. Returns
+ * `null` if the payload has no `callback_query`, no `data`, or no
+ * originating `message` (the rare "inline mode" tap from an inline
+ * query — we don't post those, so we ignore taps on them).
+ */
+export function extractInboundCallback(
+  update: TelegramUpdatePayload,
+): TelegramInboundCallback | null {
+  const cb = update.callback_query;
+  if (!cb) return null;
+  if (typeof cb.data !== "string" || cb.data.length === 0) return null;
+  if (!cb.message) return null;
+  return {
+    callbackId: cb.id,
+    chatId: cb.message.chat.id,
+    messageId: cb.message.message_id,
+    fromUserId: cb.from.id,
+    fromLanguageCode: cb.from.language_code ?? null,
+    isGroup: cb.message.chat.type !== "private",
+    data: cb.data,
+  };
 }
 
 export function extractInboundMessage(

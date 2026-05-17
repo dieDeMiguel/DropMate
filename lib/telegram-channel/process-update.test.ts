@@ -64,6 +64,9 @@ interface BuiltDeps {
   setSessionIdForChat: ReturnType<typeof vi.fn>;
   drainSession: ReturnType<typeof vi.fn>;
   getFileUrl: ReturnType<typeof vi.fn>;
+  answerCallback: ReturnType<typeof vi.fn>;
+  stripKeyboard: ReturnType<typeof vi.fn>;
+  getPackageRecipientId: ReturnType<typeof vi.fn>;
 }
 
 function buildDeps(overrides: {
@@ -71,6 +74,7 @@ function buildDeps(overrides: {
   session?: Session;
   expectedSecret?: string | undefined;
   fileUrl?: string;
+  packageRecipientId?: string | null;
 } = {}): BuiltDeps {
   const session = overrides.session ?? makeSession("sess_new");
   const sendToAsh = vi.fn().mockResolvedValue(session);
@@ -85,6 +89,13 @@ function buildDeps(overrides: {
     .mockResolvedValue(
       overrides.fileUrl ?? "https://api.telegram.org/file/bot/photos/file_42.jpg",
     );
+  const answerCallback = vi.fn().mockResolvedValue(undefined);
+  const stripKeyboard = vi.fn().mockResolvedValue(undefined);
+  const getPackageRecipientId = vi
+    .fn()
+    .mockResolvedValue(
+      "packageRecipientId" in overrides ? overrides.packageRecipientId : null,
+    );
   return {
     sendToAsh,
     waitUntil,
@@ -92,6 +103,9 @@ function buildDeps(overrides: {
     setSessionIdForChat,
     drainSession,
     getFileUrl,
+    answerCallback,
+    stripKeyboard,
+    getPackageRecipientId,
     deps: {
       expectedSecret:
         "expectedSecret" in overrides ? overrides.expectedSecret : SECRET,
@@ -101,6 +115,9 @@ function buildDeps(overrides: {
       setSessionIdForChat,
       drainSession,
       getFileUrl,
+      answerCallback,
+      stripKeyboard,
+      getPackageRecipientId,
     },
   };
 }
@@ -315,5 +332,268 @@ describe("processInboundTelegramUpdate", () => {
     );
 
     expect(getFileUrl).not.toHaveBeenCalled();
+  });
+});
+
+describe("processInboundTelegramUpdate — callback_query", () => {
+  function cbUpdate(opts: {
+    chatId: number;
+    messageId: number;
+    fromUserId: number;
+    data: string;
+    chatType?: string;
+    languageCode?: string;
+  }): Record<string, unknown> {
+    return {
+      update_id: 100,
+      callback_query: {
+        id: "cb_abc",
+        data: opts.data,
+        from: {
+          id: opts.fromUserId,
+          is_bot: false,
+          first_name: "T",
+          language_code: opts.languageCode,
+        },
+        message: {
+          message_id: opts.messageId,
+          chat: { id: opts.chatId, type: opts.chatType ?? "private" },
+        },
+      },
+    };
+  }
+
+  it("acks, strips the keyboard, and synthesizes a confirm_pickup message into the session (DM)", async () => {
+    const session = makeSession("sess_cb");
+    const { deps, sendToAsh, answerCallback, stripKeyboard, waitUntil, drainSession } =
+      buildDeps({ existingSessionId: "sess_cb", session });
+
+    const res = await processInboundTelegramUpdate(
+      makeRequest(
+        cbUpdate({
+          chatId: 42,
+          messageId: 555,
+          fromUserId: 99,
+          data: "confirm_pickup:pkg_42",
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(res.status).toBe(204);
+    expect(answerCallback).toHaveBeenCalledWith("cb_abc");
+    expect(stripKeyboard).toHaveBeenCalledWith(42, 555);
+
+    expect(sendToAsh).toHaveBeenCalledTimes(1);
+    const [text, options] = sendToAsh.mock.calls[0]!;
+    expect(text).toMatch(/confirm.*pickup.*pkg_42/i);
+    expect(options.continuationToken).toBe("sess_cb");
+    expect(options.auth).toEqual<TelegramSessionAuth>({
+      principalId: "99",
+      principalType: "user",
+      authenticator: "telegram",
+      attributes: { languageCode: "de" },
+    });
+    expect(options.state).toEqual<TelegramChannelState>({
+      chatId: 42,
+      isGroup: false,
+      fromUserId: 99,
+      fromLanguageCode: "de",
+    });
+
+    expect(waitUntil).toHaveBeenCalledTimes(1);
+    await waitUntil.mock.calls[0]![0];
+    expect(drainSession).toHaveBeenCalledWith(session, 42);
+  });
+
+  it("persists a new session id when no session existed for the chat", async () => {
+    const session = makeSession("sess_new_cb");
+    const { deps, setSessionIdForChat } = buildDeps({
+      existingSessionId: null,
+      session,
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        cbUpdate({ chatId: 42, messageId: 1, fromUserId: 99, data: "confirm_pickup:pkg_1" }),
+      ),
+      deps,
+    );
+
+    expect(setSessionIdForChat).toHaveBeenCalledWith(42, "sess_new_cb");
+  });
+
+  it("synthesizes an accept_reception_request message when 'accept_reception_request:req_99' is tapped", async () => {
+    const { deps, sendToAsh } = buildDeps({ existingSessionId: "sess_x" });
+    await processInboundTelegramUpdate(
+      makeRequest(
+        cbUpdate({
+          chatId: 42,
+          messageId: 1,
+          fromUserId: 99,
+          data: "accept_reception_request:req_99",
+        }),
+      ),
+      deps,
+    );
+    const [text] = sendToAsh.mock.calls[0]!;
+    expect(text).toMatch(/accept.*reception.*req_99/i);
+  });
+
+  it("synthesizes a decline message that tells the agent to acknowledge briefly", async () => {
+    const { deps, sendToAsh } = buildDeps({ existingSessionId: "sess_x" });
+    await processInboundTelegramUpdate(
+      makeRequest(
+        cbUpdate({
+          chatId: 42,
+          messageId: 1,
+          fromUserId: 99,
+          data: "decline_reception_request:req_99",
+        }),
+      ),
+      deps,
+    );
+    const [text] = sendToAsh.mock.calls[0]!;
+    expect(text).toMatch(/declin/i);
+    expect(text).toMatch(/req_99/);
+  });
+
+  it("gates group confirm_pickup on recipient scope — wrong tapper gets a toast and no agent invocation", async () => {
+    const { deps, sendToAsh, answerCallback, stripKeyboard, getPackageRecipientId } =
+      buildDeps({ packageRecipientId: "200" });
+
+    const res = await processInboundTelegramUpdate(
+      makeRequest(
+        cbUpdate({
+          chatId: -100123,
+          messageId: 1,
+          fromUserId: 99, // not 200
+          data: "confirm_pickup:pkg_42",
+          chatType: "supergroup",
+        }),
+      ),
+      deps,
+    );
+
+    expect(res.status).toBe(204);
+    expect(getPackageRecipientId).toHaveBeenCalledWith("pkg_42");
+    expect(answerCallback).toHaveBeenCalledWith(
+      "cb_abc",
+      expect.stringMatching(/only the recipient/i),
+    );
+    expect(stripKeyboard).not.toHaveBeenCalled();
+    expect(sendToAsh).not.toHaveBeenCalled();
+  });
+
+  it("admits group confirm_pickup when the tapper IS the recipient", async () => {
+    const { deps, sendToAsh, stripKeyboard } = buildDeps({
+      packageRecipientId: "99",
+      existingSessionId: "sess_grp",
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        cbUpdate({
+          chatId: -100123,
+          messageId: 1,
+          fromUserId: 99,
+          data: "confirm_pickup:pkg_42",
+          chatType: "supergroup",
+        }),
+      ),
+      deps,
+    );
+
+    expect(stripKeyboard).toHaveBeenCalledWith(-100123, 1);
+    expect(sendToAsh).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects group confirm_pickup when the package is unknown (recipient lookup returns null)", async () => {
+    const { deps, sendToAsh, stripKeyboard } = buildDeps({
+      packageRecipientId: null,
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        cbUpdate({
+          chatId: -100123,
+          messageId: 1,
+          fromUserId: 99,
+          data: "confirm_pickup:pkg_missing",
+          chatType: "supergroup",
+        }),
+      ),
+      deps,
+    );
+
+    expect(stripKeyboard).not.toHaveBeenCalled();
+    expect(sendToAsh).not.toHaveBeenCalled();
+  });
+
+  it("does NOT apply the recipient-scope check in a DM (1:1 already scoped to the tapper)", async () => {
+    const { deps, sendToAsh, getPackageRecipientId } = buildDeps({
+      existingSessionId: "sess_dm",
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        cbUpdate({
+          chatId: 42,
+          messageId: 1,
+          fromUserId: 99,
+          data: "confirm_pickup:pkg_42",
+        }),
+      ),
+      deps,
+    );
+
+    expect(getPackageRecipientId).not.toHaveBeenCalled();
+    expect(sendToAsh).toHaveBeenCalledTimes(1);
+  });
+
+  it("continues to drive the agent even if answerCallback or stripKeyboard throw", async () => {
+    const { deps, sendToAsh, answerCallback, stripKeyboard } = buildDeps({
+      existingSessionId: "sess_x",
+    });
+    answerCallback.mockRejectedValueOnce(new Error("ack failed"));
+    stripKeyboard.mockRejectedValueOnce(new Error("edit failed"));
+
+    const res = await processInboundTelegramUpdate(
+      makeRequest(
+        cbUpdate({ chatId: 42, messageId: 1, fromUserId: 99, data: "confirm_pickup:pkg_42" }),
+      ),
+      deps,
+    );
+
+    expect(res.status).toBe(204);
+    expect(sendToAsh).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls through to message handling when the update has no callback_query", async () => {
+    const { deps, sendToAsh, answerCallback } = buildDeps();
+    await processInboundTelegramUpdate(
+      makeRequest(dmUpdate({ chatId: 5, text: "hi", fromUserId: 99 })),
+      deps,
+    );
+    expect(answerCallback).not.toHaveBeenCalled();
+    expect(sendToAsh).toHaveBeenCalledTimes(1);
+  });
+
+  it("handles an unknown action by synthesizing a permissive message", async () => {
+    const { deps, sendToAsh } = buildDeps({ existingSessionId: "sess_x" });
+    await processInboundTelegramUpdate(
+      makeRequest(
+        cbUpdate({
+          chatId: 42,
+          messageId: 1,
+          fromUserId: 99,
+          data: "weird_action:42",
+        }),
+      ),
+      deps,
+    );
+    const [text] = sendToAsh.mock.calls[0]!;
+    expect(text).toMatch(/weird_action/);
   });
 });
