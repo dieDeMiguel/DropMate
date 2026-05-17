@@ -27,6 +27,7 @@
  * @see lib/telegram-channel/outbound.ts — `drainSessionToTelegram`
  */
 
+import type { UserContent } from "ai";
 import type { Session } from "experimental-ash/channels";
 
 import { extractInboundMessage, type TelegramUpdatePayload } from "./inbound.js";
@@ -72,7 +73,7 @@ export interface ProcessUpdateDeps {
    * passes the real function through verbatim.
    */
   readonly sendToAsh: (
-    text: string,
+    message: string | UserContent,
     options: {
       readonly auth: TelegramSessionAuth | null;
       readonly continuationToken: string;
@@ -90,6 +91,12 @@ export interface ProcessUpdateDeps {
   ) => Promise<void>;
   /** Starts the outbound drain for the resolved session + chat. */
   readonly drainSession: (session: Session, chatId: number) => Promise<void>;
+  /**
+   * Resolves a Telegram `file_id` (from `photo[]`) into a downloadable
+   * HTTPS URL. Wired by the factory to `getTelegramFileUrl(token, id)`
+   * with the closure-captured token; tests pass a spy.
+   */
+  readonly getFileUrl: (fileId: string) => Promise<string>;
 }
 
 /**
@@ -138,7 +145,20 @@ export async function processInboundTelegramUpdate(
             : {},
         };
 
-  const session = await deps.sendToAsh(inbound.text, {
+  let message: string | UserContent;
+  if (inbound.photoFileId !== null) {
+    const url = await deps.getFileUrl(inbound.photoFileId);
+    const captionText =
+      inbound.text.length > 0 ? inbound.text : "(photo, no caption)";
+    message = [
+      { type: "image", image: new URL(url) },
+      { type: "text", text: captionText },
+    ];
+  } else {
+    message = inbound.text;
+  }
+
+  const session = await deps.sendToAsh(message, {
     auth,
     continuationToken,
     state: {

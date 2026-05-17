@@ -92,6 +92,22 @@ logistics in DMs whenever possible so the group stays low-noise.
   recipient names). Don't list buzzer or floor in the group — those go in
   the DMs.
 
+# Flow 1 — package received (photo path)
+
+- Trigger: an inbound message includes a photo (with or without a caption).
+  Treat it as a package label or a package photo.
+- Read the image directly — extract what you can see: carrier (DHL,
+  Hermes, DPD, GLS, UPS, Amazon, …), tracking number, and recipient
+  name. The caption, when present, is the holder's own free-text
+  context — use it to disambiguate ("für Ritter und Meyer" + two
+  labels in the photo = two packages, one per recipient).
+- Call `register_package` **once per package visible in the image**,
+  then continue with Step 4 of the text path (notify the recipient,
+  post a single group summary).
+- If the recipient name is illegible or you genuinely cannot tell who
+  a package is for, ask one short clarifying question in the same chat
+  the photo arrived in. Don't guess.
+
 # Flow 1 — pickup confirmation (closing)
 
 - Trigger: a recipient sends "Picked up, thanks!" / "Hab abgeholt" /

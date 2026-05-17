@@ -36,6 +36,7 @@
 import { defineChannel, POST } from "experimental-ash/channels";
 
 import { getSessionIdForChat, setSessionIdForChat } from "../redis.js";
+import { getTelegramFileUrl } from "./file.js";
 import { drainSessionToTelegram } from "./outbound.js";
 import {
   processInboundTelegramUpdate,
@@ -95,6 +96,7 @@ export function telegramChannel(config: TelegramChannelConfig) {
             setSessionIdForChat,
             drainSession: (session, chatId) =>
               drainSessionToTelegram(session, chatId, { token }),
+            getFileUrl: (fileId) => getTelegramFileUrl(token, fileId),
           });
         },
       ),

@@ -42,6 +42,8 @@ export {
 
 export { sendTelegramMessage } from "./send.js";
 
+export { getTelegramFileUrl } from "./file.js";
+
 export { dmResident, postToGroup } from "./notify.js";
 
 export {

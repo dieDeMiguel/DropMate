@@ -63,12 +63,14 @@ interface BuiltDeps {
   getSessionIdForChat: ReturnType<typeof vi.fn>;
   setSessionIdForChat: ReturnType<typeof vi.fn>;
   drainSession: ReturnType<typeof vi.fn>;
+  getFileUrl: ReturnType<typeof vi.fn>;
 }
 
 function buildDeps(overrides: {
   existingSessionId?: string | null;
   session?: Session;
   expectedSecret?: string | undefined;
+  fileUrl?: string;
 } = {}): BuiltDeps {
   const session = overrides.session ?? makeSession("sess_new");
   const sendToAsh = vi.fn().mockResolvedValue(session);
@@ -78,12 +80,18 @@ function buildDeps(overrides: {
     .mockResolvedValue(overrides.existingSessionId ?? null);
   const setSessionIdForChat = vi.fn().mockResolvedValue(undefined);
   const drainSession = vi.fn().mockResolvedValue(undefined);
+  const getFileUrl = vi
+    .fn()
+    .mockResolvedValue(
+      overrides.fileUrl ?? "https://api.telegram.org/file/bot/photos/file_42.jpg",
+    );
   return {
     sendToAsh,
     waitUntil,
     getSessionIdForChat,
     setSessionIdForChat,
     drainSession,
+    getFileUrl,
     deps: {
       expectedSecret:
         "expectedSecret" in overrides ? overrides.expectedSecret : SECRET,
@@ -92,6 +100,7 @@ function buildDeps(overrides: {
       getSessionIdForChat,
       setSessionIdForChat,
       drainSession,
+      getFileUrl,
     },
   };
 }
@@ -224,5 +233,87 @@ describe("processInboundTelegramUpdate", () => {
       authenticator: "telegram",
       attributes: {},
     });
+  });
+
+  it("resolves a photo file_id and forwards multimodal UserContent with caption", async () => {
+    const { deps, sendToAsh, getFileUrl } = buildDeps({
+      fileUrl: "https://api.telegram.org/file/bot/photos/file_99.jpg",
+    });
+
+    const update = {
+      update_id: 1,
+      message: {
+        message_id: 1,
+        date: 1,
+        caption: "Paket für Meyer",
+        chat: { id: 42, type: "private" },
+        from: { id: 99, is_bot: false, first_name: "T", language_code: "de" },
+        photo: [
+          { file_id: "small", file_size: 100, width: 90, height: 90 },
+          { file_id: "large", file_size: 5000, width: 1280, height: 1280 },
+        ],
+      },
+    };
+
+    const res = await processInboundTelegramUpdate(makeRequest(update), deps);
+    expect(res.status).toBe(204);
+
+    expect(getFileUrl).toHaveBeenCalledWith("large");
+
+    const [message, options] = sendToAsh.mock.calls[0]!;
+    expect(Array.isArray(message)).toBe(true);
+    expect(message).toHaveLength(2);
+
+    const imagePart = message[0];
+    expect(imagePart.type).toBe("image");
+    expect(imagePart.image).toBeInstanceOf(URL);
+    expect((imagePart.image as URL).toString()).toBe(
+      "https://api.telegram.org/file/bot/photos/file_99.jpg",
+    );
+
+    const textPart = message[1];
+    expect(textPart).toEqual({ type: "text", text: "Paket für Meyer" });
+
+    expect(options.state).toEqual<TelegramChannelState>({
+      chatId: 42,
+      isGroup: false,
+      fromUserId: 99,
+      fromLanguageCode: "de",
+    });
+  });
+
+  it("substitutes a placeholder caption when a photo arrives without text", async () => {
+    const { deps, sendToAsh, getFileUrl } = buildDeps({
+      fileUrl: "https://api.telegram.org/file/bot/photos/file_77.jpg",
+    });
+
+    const update = {
+      update_id: 2,
+      message: {
+        message_id: 2,
+        date: 1,
+        chat: { id: 42, type: "private" },
+        from: { id: 99, is_bot: false, first_name: "T" },
+        photo: [{ file_id: "only", file_size: 100, width: 90, height: 90 }],
+      },
+    };
+
+    await processInboundTelegramUpdate(makeRequest(update), deps);
+
+    expect(getFileUrl).toHaveBeenCalledWith("only");
+
+    const [message] = sendToAsh.mock.calls[0]!;
+    expect(message[1]).toEqual({ type: "text", text: "(photo, no caption)" });
+  });
+
+  it("does not call getFileUrl on text-only updates", async () => {
+    const { deps, getFileUrl } = buildDeps();
+
+    await processInboundTelegramUpdate(
+      makeRequest(dmUpdate({ chatId: 5, text: "hi", fromUserId: 99 })),
+      deps,
+    );
+
+    expect(getFileUrl).not.toHaveBeenCalled();
   });
 });
