@@ -11,33 +11,39 @@ vi.mock("experimental-ash/context", () => ({
   getSession: () => sessionMock.value,
 }));
 
-vi.mock("../../lib/redis.js", () => ({
-  async getResident(platformId: string) {
-    return residentStore.get(platformId) ?? null;
-  },
-  async setResident(resident: Resident) {
-    residentStore.set(resident.platformId, resident);
-  },
-  async findResidentByNameAndHouse(name: string, houseNumber: string) {
-    const needle = name.trim().toLowerCase();
-    if (needle === "") return null;
-    for (const r of residentStore.values()) {
-      if (r.houseNumber !== houseNumber) continue;
-      const hay = r.name.toLowerCase();
-      if (hay.includes(needle) || needle.includes(hay)) return r;
-    }
-    return null;
-  },
-  async getPackage(id: string) {
-    return packageStore.get(id) ?? null;
-  },
-  async setPackage(pkg: Package) {
-    packageStore.set(pkg.id, pkg);
-    const key = pkg.streetId;
-    if (!streetIndex.has(key)) streetIndex.set(key, new Set());
-    streetIndex.get(key)!.add(pkg.id);
-  },
-}));
+vi.mock("../../lib/redis.js", async () => {
+  const actual = await vi.importActual<typeof import("../../lib/redis.js")>(
+    "../../lib/redis.js",
+  );
+  return {
+    ...actual,
+    async getResident(platformId: string) {
+      return residentStore.get(platformId) ?? null;
+    },
+    async setResident(resident: Resident) {
+      residentStore.set(resident.platformId, resident);
+    },
+    async findResidentByNameAndHouse(name: string, houseNumber: string) {
+      const needle = name.trim().toLowerCase();
+      if (needle === "") return null;
+      for (const r of residentStore.values()) {
+        if (r.houseNumber !== houseNumber) continue;
+        const hay = r.name.toLowerCase();
+        if (hay.includes(needle) || needle.includes(hay)) return r;
+      }
+      return null;
+    },
+    async getPackage(id: string) {
+      return packageStore.get(id) ?? null;
+    },
+    async setPackage(pkg: Package) {
+      packageStore.set(pkg.id, pkg);
+      const key = pkg.streetId;
+      if (!streetIndex.has(key)) streetIndex.set(key, new Set());
+      streetIndex.get(key)!.add(pkg.id);
+    },
+  };
+});
 
 async function loadTool() {
   const mod = await import("../../agent/tools/register_package.js");

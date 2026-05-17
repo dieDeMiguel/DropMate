@@ -2,6 +2,20 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Package, Resident } from "../../lib/redis.js";
 
+interface HolderSummary {
+  readonly id: string;
+  readonly name: string;
+  readonly houseNumber: string;
+  readonly floor: string | null;
+  readonly buzzerName: string | null;
+  readonly availabilityPatterns: readonly string[];
+}
+
+interface LookupMatch {
+  readonly package: Package;
+  readonly holder: HolderSummary | null;
+}
+
 const sessionMock = vi.hoisted(() => ({ value: null as unknown }));
 const residentStore = vi.hoisted(() => new Map<string, Resident>());
 const packageStore = vi.hoisted(() => new Map<string, Package>());
@@ -141,10 +155,10 @@ describe("lookup_package", () => {
     const result = (await runExecute({
       recipientName: "Meyer",
       recipientHouseNumber: "92",
-    })) as { matches: Package[]; count: number };
+    })) as { matches: LookupMatch[]; count: number };
 
     expect(result.count).toBe(1);
-    expect(result.matches[0].id).toBe("pkg-1");
+    expect(result.matches[0].package.id).toBe("pkg-1");
   });
 
   it("ignores packages that are already picked up", async () => {
@@ -237,10 +251,10 @@ describe("lookup_package", () => {
       recipientName: "Meyer",
       recipientHouseNumber: "92",
       carrier: "DHL",
-    })) as { matches: Package[]; count: number };
+    })) as { matches: LookupMatch[]; count: number };
 
     expect(result.count).toBe(1);
-    expect(result.matches[0].id).toBe("pkg-a");
+    expect(result.matches[0].package.id).toBe("pkg-a");
   });
 
   it("throws when caller is not a registered resident", async () => {
@@ -248,5 +262,127 @@ describe("lookup_package", () => {
     await expect(
       runExecute({ recipientName: "Meyer", recipientHouseNumber: "92" }),
     ).rejects.toThrow(/not a registered resident/);
+  });
+
+  it("enriches each match with a summary of the holder Resident", async () => {
+    seedResident({
+      platformId: "caller-1",
+      name: "Anna-Sophie Meyer",
+      houseNumber: "92",
+    });
+    seedResident({
+      platformId: "holder-1",
+      name: "Annemarie Bremer",
+      houseNumber: "92",
+      floor: "V. Etage",
+      buzzerName: "Bremer",
+      availabilityPatterns: ["weekdays before 14:00", "after 20:00"],
+    });
+    seedPackage({
+      id: "pkg-1",
+      streetId: "Methfesselstraße",
+      recipientName: "Anna-Sophie Meyer",
+      recipientHouseNumber: "92",
+      holderResidentId: "holder-1",
+      carrier: "Hermes",
+    });
+    withTelegramSession("caller-1");
+
+    const result = (await runExecute({
+      recipientName: "Meyer",
+      recipientHouseNumber: "92",
+    })) as { matches: LookupMatch[]; count: number };
+
+    expect(result.count).toBe(1);
+    const match = result.matches[0];
+    expect(match.package.id).toBe("pkg-1");
+    expect(match.holder).toEqual({
+      id: "holder-1",
+      name: "Annemarie Bremer",
+      houseNumber: "92",
+      floor: "V. Etage",
+      buzzerName: "Bremer",
+      availabilityPatterns: ["weekdays before 14:00", "after 20:00"],
+    });
+  });
+
+  it("returns holder: null when the holder Resident is missing from Redis", async () => {
+    seedResident({ platformId: "caller-1", houseNumber: "92" });
+    seedPackage({
+      id: "pkg-1",
+      streetId: "Methfesselstraße",
+      recipientName: "Meyer",
+      recipientHouseNumber: "92",
+      holderResidentId: "ghost-holder",
+    });
+    withTelegramSession("caller-1");
+
+    const result = (await runExecute({
+      recipientName: "Meyer",
+      recipientHouseNumber: "92",
+    })) as { matches: LookupMatch[]; count: number };
+
+    expect(result.count).toBe(1);
+    expect(result.matches[0].holder).toBeNull();
+  });
+
+  it("returns holder: null when holderResidentId is null (expected delivery edge case)", async () => {
+    seedResident({ platformId: "caller-1", houseNumber: "92" });
+    // status remains "held" — exercises the null-holderResidentId guard
+    // without crossing the "expected"-status filter inside the tool.
+    seedPackage({
+      id: "pkg-1",
+      streetId: "Methfesselstraße",
+      recipientName: "Meyer",
+      recipientHouseNumber: "92",
+      holderResidentId: null,
+    });
+    withTelegramSession("caller-1");
+
+    const result = (await runExecute({
+      recipientName: "Meyer",
+      recipientHouseNumber: "92",
+    })) as { matches: LookupMatch[]; count: number };
+
+    expect(result.count).toBe(1);
+    expect(result.matches[0].holder).toBeNull();
+  });
+
+  it("defaults missing floor and buzzer to null in the holder summary", async () => {
+    seedResident({
+      platformId: "caller-1",
+      name: "Anna-Sophie Meyer",
+      houseNumber: "92",
+    });
+    seedResident({
+      platformId: "holder-1",
+      name: "Annemarie Bremer",
+      houseNumber: "92",
+      // floor + buzzerName intentionally omitted — exercises the
+      // `holder.floor ?? null` and `holder.buzzerName ?? null` fallbacks.
+    });
+    seedPackage({
+      id: "pkg-1",
+      streetId: "Methfesselstraße",
+      recipientName: "Anna-Sophie Meyer",
+      recipientHouseNumber: "92",
+      holderResidentId: "holder-1",
+    });
+    withTelegramSession("caller-1");
+
+    const result = (await runExecute({
+      recipientName: "Meyer",
+      recipientHouseNumber: "92",
+    })) as { matches: LookupMatch[]; count: number };
+
+    expect(result.count).toBe(1);
+    expect(result.matches[0].holder).toEqual({
+      id: "holder-1",
+      name: "Annemarie Bremer",
+      houseNumber: "92",
+      floor: null,
+      buzzerName: null,
+      availabilityPatterns: [],
+    });
   });
 });

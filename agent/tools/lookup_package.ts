@@ -31,10 +31,46 @@ import { z } from "zod";
 
 import { requireRegisteredTelegramCaller } from "../../lib/auth.js";
 import {
+  getResident,
   listHeldPackagesForStreet,
   packageCarrierSchema,
   type Package,
+  type Resident,
 } from "../../lib/redis.js";
+
+/**
+ * Holder summary returned alongside each match so the model can compose a
+ * Flow 3 reply ("Wo ist mein Paket?") without a follow-up tool call. Only
+ * the fields the recipient needs to find the package are exposed —
+ * `platformId`, `availabilityPatterns`, `language` etc. stay private to
+ * the Resident record. `null` when the holder Resident is missing from
+ * Redis (shouldn't happen post-`register_package`, but we degrade
+ * gracefully rather than crashing the lookup).
+ */
+export interface HolderSummary {
+  readonly id: string;
+  readonly name: string;
+  readonly houseNumber: string;
+  readonly floor: string | null;
+  readonly buzzerName: string | null;
+  readonly availabilityPatterns: readonly string[];
+}
+
+export interface LookupMatch {
+  readonly package: Package;
+  readonly holder: HolderSummary | null;
+}
+
+function summariseHolder(holder: Resident): HolderSummary {
+  return {
+    id: holder.id,
+    name: holder.name,
+    houseNumber: holder.houseNumber,
+    floor: holder.floor ?? null,
+    buzzerName: holder.buzzerName ?? null,
+    availabilityPatterns: holder.availabilityPatterns,
+  };
+}
 
 const inputSchema = z.object({
   recipientName: z
@@ -64,15 +100,21 @@ export default defineTool({
     "Find held packages on the caller's street addressed to a given " +
     "recipient. Use before `confirm_pickup` so you know the package id, " +
     "and use as the first step of a 'Wo ist mein Paket?' query. " +
-    "Returns 0..N matches — the model is responsible for handling " +
-    "the empty / single / ambiguous cases.",
+    "Returns `{ matches, count }` where each match is " +
+    "`{ package, holder }` — `package` is the Package record (pass " +
+    "`package.id` to `confirm_pickup`), `holder` is a summary of the " +
+    "neighbor holding it (name, house number, floor, buzzer, " +
+    "availability patterns) or `null` if the holder's Resident is " +
+    "missing. Lets you compose pickup directions in one turn. The " +
+    "model is responsible for handling the empty / single / ambiguous " +
+    "cases.",
   inputSchema,
   async execute({ recipientName, recipientHouseNumber, carrier }) {
     const caller = await requireRegisteredTelegramCaller("lookup_package");
 
     const needle = recipientName.trim().toLowerCase();
     const held = await listHeldPackagesForStreet(caller.street);
-    const matches = held.filter((pkg) => {
+    const packages = held.filter((pkg) => {
       if (pkg.recipientHouseNumber !== recipientHouseNumber) return false;
       const hay = pkg.recipientName.toLowerCase();
       if (!hay.includes(needle) && !needle.includes(hay)) return false;
@@ -80,8 +122,21 @@ export default defineTool({
       return true;
     });
 
+    const matches: LookupMatch[] = await Promise.all(
+      packages.map(async (pkg) => {
+        if (pkg.holderResidentId === null) {
+          return { package: pkg, holder: null };
+        }
+        const holder = await getResident(pkg.holderResidentId);
+        return {
+          package: pkg,
+          holder: holder ? summariseHolder(holder) : null,
+        };
+      }),
+    );
+
     return {
-      matches: matches as readonly Package[],
+      matches: matches as readonly LookupMatch[],
       count: matches.length,
     };
   },
