@@ -433,10 +433,10 @@ The implementing agent should follow three phases. Each phase is independently s
 
 ### Skills to consult
 
-The agent has two skills available and should read both before writing code:
+Skills live **in the repo** at `.claude/skills/<name>/SKILL.md` (symlinks to `.agents/skills/<name>/` which is the canonical source). Claude Code auto-discovers them from the working directory, so the bind-mounted sandbox sees the same skills as the host with no extra setup. The agent should read both before writing code:
 
-- **`use-ash`** (`~/.agents/skills/use-ash/SKILL.md`) — Ash project layout, `defineAgent` / `defineTool` / `defineSchedule` / `defineHook`, channel adapter interface, CLI, sessions, streaming. Authoritative docs: <https://ash.labs.vercel.dev/docs/getting-started>.
-- **`chat-sdk`** (`.claude/skills/chat-sdk/SKILL.md`) — Chat SDK `Chat` class, adapters, event handlers (`onNewMention`, `onDirectMessage`, `onSubscribedMessage`, `onSlashCommand`, `onAction`), JSX cards, modals, streaming, file handling. Includes pointers to `node_modules/chat/docs/*.mdx` for every API surface.
+- **`use-ash`** (`.claude/skills/use-ash/SKILL.md`) — Ash project layout, `defineAgent` / `defineTool` / `defineSchedule` / `defineHook`, channel adapter interface, CLI, sessions, streaming. Authoritative docs: <https://ash.labs.vercel.dev/docs/getting-started>.
+- **`chat-sdk`** (`.claude/skills/chat-sdk/SKILL.md`) — Chat SDK `Chat` class, adapters, event handlers (`onNewMention`, `onDirectMessage`, `onSubscribedMessage`, `onSlashCommand`, `onAction`), JSX cards, modals, streaming, file handling. Sourced from `vercel/chat`'s `skills/chat/SKILL.md` (tracked in `skills-lock.json`) — includes pointers to `node_modules/chat/docs/*.mdx` for every API surface.
 
 For the custom channel specifically, read in order:
 1. `node_modules/experimental-ash/dist/src/channel/adapter.d.ts` — the `ChannelAdapter` interface DropMate's channel must implement.
@@ -453,13 +453,13 @@ For the custom channel specifically, read in order:
 | Telegram bot token | `@chat-adapter/telegram` auth | Talk to `@BotFather` on Telegram → `/newbot` → copy token to `TELEGRAM_BOT_TOKEN` |
 | Telegram webhook secret | Validate inbound webhooks (`X-Telegram-Bot-Api-Secret-Token`) | Generate a random 32-byte string → `TELEGRAM_WEBHOOK_SECRET_TOKEN` |
 | Upstash Redis (EU region) | Resident directory, package registry, session ↔ chatId map | Upstash console → create database in EU → copy `KV_REST_API_URL` + `KV_REST_API_TOKEN` |
-| Vercel project | Deploy target for `ash build`, env-var sync | `vercel link` in repo root → choose/create project |
-| AI Gateway API key | LLM calls via AI SDK | Vercel dashboard → AI tab → create gateway → `vercel env pull` syncs `AI_GATEWAY_API_KEY` to `.env.local` |
+| Vercel project | Deploy target for `ash build`, env-var sync, and AI Gateway auth | `vercel link` in repo root → choose/create project → `vercel env pull .env.local` (pulls `VERCEL_OIDC_TOKEN` + any Marketplace-provisioned vars like `KV_REST_API_*`) |
+| AI Gateway auth | LLM calls via AI SDK | **Default for V1**: the `VERCEL_OIDC_TOKEN` from `vercel env pull` is auto-detected by `@ai-sdk/gateway` — no extra step. **Alternative**: if running outside Vercel infrastructure or you want a long-lived token (OIDC expires ~12h), create an API key via Vercel dashboard → AI tab → Create Gateway → set `AI_GATEWAY_API_KEY` in `.env.local`. AI SDK prefers `AI_GATEWAY_API_KEY` when present, falls back to OIDC otherwise. |
 | Node `24.x` + `pnpm` | Ash runtime requirement | `nvm install 24 && corepack enable` |
 
-**Where the scaffold lands**: directly inside this repo (`/Users/diegodemiguel/Development/Work/DropMate/`). The repo is currently empty aside from `PRD.md`, `PRD-ASH.md`, and `.claude/`. The `pnpm create experimental-ash-agent` wizard generates files at the current working directory and won't touch the existing markdown or `.claude/` skills.
+**Where the scaffold lands**: directly inside this repo (`/Users/diegodemiguel/Development/Work/DropMate/`). The repo currently contains `PRD-ASH.md`, `docs/archive/PRD-v0.2.md`, and `.claude/`. The `pnpm create experimental-ash-agent` wizard generates files at the current working directory and won't touch the existing markdown or `.claude/` skills.
 
-**Exit criteria**: `.env.local` populated with all six secrets above, `pnpm` + `node 24` available, the empty Vercel project linked.
+**Exit criteria**: `.env.local` populated with `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET_TOKEN`, Upstash KV vars, and `VERCEL_OIDC_TOKEN` (or an explicit `AI_GATEWAY_API_KEY` if you opted for the long-lived alternative). `pnpm` + `node 24` available. Vercel project linked.
 
 ### Phase 1 — Spike (1 day): Ash without a channel
 
