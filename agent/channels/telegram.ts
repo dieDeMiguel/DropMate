@@ -1,52 +1,31 @@
 /**
- * Phase 1 spike: thin Telegram webhook.
+ * Phase 2 Telegram channel — mount point.
  *
- * Mounts a single `POST /api/telegram` route. The full inbound
- * pipeline (verify → parse → narrow → resolve session → send → drain)
- * lives in `lib/telegram-channel/process-update.ts`; this route's
- * job is just to wire the route args + env-derived config + Redis
- * helpers into that orchestrator and return the response it builds.
+ * The full implementation lives under `lib/telegram-channel/`:
  *
- * Phase 2 (issue #19) replaces this with a first-class Ash channel
- * built on `@chat-adapter/telegram` (Chat SDK). The factory will
- * reuse `processInboundTelegramUpdate` with its captured `token` /
- * `webhookSecret` instead of the env-var fallbacks the spike uses.
+ *   - `verify.ts`         — webhook signature check
+ *   - `inbound.ts`        — raw-update → canonical message narrowing
+ *   - `outbound.ts`       — Ash session event stream → Telegram replies
+ *   - `send.ts`           — Bot API `sendMessage` primitive
+ *   - `process-update.ts` — full inbound pipeline orchestrator
+ *   - `factory.ts`        — `telegramChannel({ token, webhookSecret })`
+ *
+ * Ash discovers channels via the default export of files under
+ * `agent/channels/`, so this file's only job is to construct the
+ * channel with the deployment's bot token + webhook secret and
+ * export it. Multi-bot deployments mount additional `telegramChannel(...)`
+ * factories at other paths from sibling files in this directory.
+ *
+ * Env vars are read at module load time. A missing
+ * `TELEGRAM_WEBHOOK_SECRET_TOKEN` surfaces at request time as a 500
+ * with a named reason (see `verifyTelegramSecretHeader`); a missing
+ * `TELEGRAM_BOT_TOKEN` surfaces inside `buildDefaultSendMessage`'s
+ * drain when the first outbound reply fires.
  */
 
-import { defineChannel, POST } from "experimental-ash/channels";
+import { telegramChannel } from "../../lib/telegram-channel/index.js";
 
-import { getSessionIdForChat, setSessionIdForChat } from "../../lib/redis.js";
-import {
-  drainSessionToTelegram,
-  processInboundTelegramUpdate,
-  type TelegramChannelState,
-} from "../../lib/telegram-channel/index.js";
-
-export default defineChannel<
-  TelegramChannelState,
-  { chatId: number; fromUserId: number | null }
->({
-  state: undefined as unknown as TelegramChannelState,
-  context: (state) => ({ chatId: state.chatId, fromUserId: state.fromUserId }),
-  routes: [
-    POST<TelegramChannelState>("/api/telegram", async (req, { send, waitUntil }) => {
-      return processInboundTelegramUpdate(req, {
-        expectedSecret: process.env.TELEGRAM_WEBHOOK_SECRET_TOKEN,
-        sendToAsh: send,
-        waitUntil,
-        getSessionIdForChat,
-        setSessionIdForChat,
-        // Token is left implicit so the drain falls back to
-        // `process.env.TELEGRAM_BOT_TOKEN` — same behaviour the
-        // spike has always had. When the Phase 2 channel factory
-        // replaces this route, it will pass `{ token: capturedToken }`
-        // explicitly and the env-var fallback in `outbound.ts`'s
-        // `buildDefaultSendMessage` drops out of the codebase.
-        drainSession: (session, chatId) =>
-          drainSessionToTelegram(session, chatId, {
-            token: process.env.TELEGRAM_BOT_TOKEN,
-          }),
-      });
-    }),
-  ],
+export default telegramChannel({
+  token: process.env.TELEGRAM_BOT_TOKEN!,
+  webhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET_TOKEN!,
 });
