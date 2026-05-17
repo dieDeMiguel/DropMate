@@ -25,6 +25,7 @@ import { z } from "zod";
 import {
   findResidentByNameAndHouse,
   getResident,
+  newPackageId,
   setPackage,
   type Package,
   type PackageCarrier,
@@ -128,13 +129,3 @@ export default defineTool({
     };
   },
 });
-
-/**
- * Random id. Not cryptographic; just unique per package. Format
- * `pkg_<timestamp>_<rand>` so logs are scannable.
- */
-function newPackageId(): string {
-  const ts = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `pkg_${ts}_${rand}`;
-}
