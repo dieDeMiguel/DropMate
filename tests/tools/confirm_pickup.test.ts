@@ -20,6 +20,14 @@ vi.mock("../../lib/redis.js", async () => {
     async getResident(platformId: string) {
       return residentStore.get(platformId) ?? null;
     },
+    async getPackage(id: string) {
+      return packageStore.get(id) ?? null;
+    },
+    async setPackage(pkg: Package) {
+      packageStore.set(pkg.id, pkg);
+      if (!streetIndex.has(pkg.streetId)) streetIndex.set(pkg.streetId, new Set());
+      streetIndex.get(pkg.streetId)!.add(pkg.id);
+    },
     async listPackagesForStreet(streetId: string) {
       const ids = streetIndex.get(streetId);
       if (!ids) return [];
@@ -44,7 +52,7 @@ vi.mock("../../lib/redis.js", async () => {
 });
 
 async function loadTool() {
-  const mod = await import("./lookup_package.js");
+  const mod = await import("../../agent/tools/confirm_pickup.js");
   return mod.default;
 }
 
@@ -119,134 +127,105 @@ async function runExecute(input: Record<string, unknown>) {
   return execute(input, { toolCallId: "call-1", messages: [] });
 }
 
-describe("lookup_package", () => {
+describe("confirm_pickup", () => {
   beforeEach(() => {
     residentStore.clear();
     packageStore.clear();
     streetIndex.clear();
     sessionMock.value = null;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-17T14:00:00Z"));
   });
 
-  it("returns the single held package matching name + house", async () => {
-    seedResident({ platformId: "caller-1", name: "Anna-Sophie Meyer", houseNumber: "92" });
+  it("flips a held package to picked_up and records the timestamp", async () => {
+    seedResident({ platformId: "caller-1" });
     seedPackage({
       id: "pkg-1",
       streetId: "Methfesselstraße",
-      recipientName: "Anna-Sophie Meyer",
-      recipientHouseNumber: "92",
-      carrier: "Hermes",
+      status: "held",
+      pickedUpAt: null,
     });
     withTelegramSession("caller-1");
 
-    const result = (await runExecute({
-      recipientName: "Meyer",
-      recipientHouseNumber: "92",
-    })) as { matches: Package[]; count: number };
+    const result = (await runExecute({ packageId: "pkg-1" })) as {
+      package: Package;
+      alreadyPickedUp: boolean;
+      remainingHeldOnStreet: number;
+    };
 
-    expect(result.count).toBe(1);
-    expect(result.matches[0].id).toBe("pkg-1");
+    expect(result.alreadyPickedUp).toBe(false);
+    expect(result.package.status).toBe("picked_up");
+    expect(result.package.pickedUpAt).toBe(
+      new Date("2026-05-17T14:00:00Z").getTime(),
+    );
+    expect(packageStore.get("pkg-1")?.status).toBe("picked_up");
   });
 
-  it("ignores packages that are already picked up", async () => {
-    seedResident({ platformId: "caller-1", houseNumber: "92" });
-    seedPackage({
-      id: "pkg-old",
-      streetId: "Methfesselstraße",
-      recipientName: "Meyer",
-      recipientHouseNumber: "92",
-      status: "picked_up",
-      pickedUpAt: 1,
-    });
+  it("returns remaining held count on the same street", async () => {
+    seedResident({ platformId: "caller-1" });
+    seedPackage({ id: "pkg-1", streetId: "Methfesselstraße", status: "held" });
+    seedPackage({ id: "pkg-2", streetId: "Methfesselstraße", status: "held" });
+    seedPackage({ id: "pkg-3", streetId: "Methfesselstraße", status: "held" });
     withTelegramSession("caller-1");
 
-    const result = (await runExecute({
-      recipientName: "Meyer",
-      recipientHouseNumber: "92",
-    })) as { count: number };
+    const result = (await runExecute({ packageId: "pkg-1" })) as {
+      remainingHeldOnStreet: number;
+    };
 
-    expect(result.count).toBe(0);
+    expect(result.remainingHeldOnStreet).toBe(2);
   });
 
-  it("ignores packages on a different street", async () => {
-    seedResident({
-      platformId: "caller-1",
-      street: "Methfesselstraße",
-      houseNumber: "92",
-    });
+  it("is idempotent — second call returns alreadyPickedUp without bumping timestamp", async () => {
+    seedResident({ platformId: "caller-1" });
     seedPackage({
-      id: "pkg-elsewhere",
-      streetId: "Bismarckstraße",
-      recipientName: "Meyer",
-      recipientHouseNumber: "92",
+      id: "pkg-1",
+      streetId: "Methfesselstraße",
+      status: "held",
     });
     withTelegramSession("caller-1");
 
-    const result = (await runExecute({
-      recipientName: "Meyer",
-      recipientHouseNumber: "92",
-    })) as { count: number };
+    const first = (await runExecute({ packageId: "pkg-1" })) as {
+      package: Package;
+      alreadyPickedUp: boolean;
+    };
+    expect(first.alreadyPickedUp).toBe(false);
+    const stampedAt = first.package.pickedUpAt;
 
-    expect(result.count).toBe(0);
+    // Advance time so we'd notice a stomp
+    vi.setSystemTime(new Date("2026-05-17T15:00:00Z"));
+
+    const second = (await runExecute({ packageId: "pkg-1" })) as {
+      package: Package;
+      alreadyPickedUp: boolean;
+    };
+    expect(second.alreadyPickedUp).toBe(true);
+    expect(second.package.pickedUpAt).toBe(stampedAt);
   });
 
-  it("returns multiple matches when several held packages fit", async () => {
-    seedResident({ platformId: "caller-1", houseNumber: "92" });
-    seedPackage({
-      id: "pkg-a",
-      streetId: "Methfesselstraße",
-      recipientName: "Anna-Sophie Meyer",
-      recipientHouseNumber: "92",
-      carrier: "DHL",
-    });
-    seedPackage({
-      id: "pkg-b",
-      streetId: "Methfesselstraße",
-      recipientName: "Anna-Sophie Meyer",
-      recipientHouseNumber: "92",
-      carrier: "Amazon",
-    });
+  it("throws when the package id does not exist", async () => {
+    seedResident({ platformId: "caller-1" });
     withTelegramSession("caller-1");
-
-    const result = (await runExecute({
-      recipientName: "Meyer",
-      recipientHouseNumber: "92",
-    })) as { count: number };
-
-    expect(result.count).toBe(2);
-  });
-
-  it("narrows by carrier when provided", async () => {
-    seedResident({ platformId: "caller-1", houseNumber: "92" });
-    seedPackage({
-      id: "pkg-a",
-      streetId: "Methfesselstraße",
-      recipientName: "Meyer",
-      recipientHouseNumber: "92",
-      carrier: "DHL",
-    });
-    seedPackage({
-      id: "pkg-b",
-      streetId: "Methfesselstraße",
-      recipientName: "Meyer",
-      recipientHouseNumber: "92",
-      carrier: "Amazon",
-    });
-    withTelegramSession("caller-1");
-
-    const result = (await runExecute({
-      recipientName: "Meyer",
-      recipientHouseNumber: "92",
-      carrier: "DHL",
-    })) as { matches: Package[]; count: number };
-
-    expect(result.count).toBe(1);
-    expect(result.matches[0].id).toBe("pkg-a");
+    await expect(runExecute({ packageId: "pkg-missing" })).rejects.toThrow(
+      /no package with id=pkg-missing/,
+    );
   });
 
   it("throws when caller is not a registered resident", async () => {
+    seedPackage({ id: "pkg-1", streetId: "Methfesselstraße", status: "held" });
     withTelegramSession("ghost");
-    await expect(
-      runExecute({ recipientName: "Meyer", recipientHouseNumber: "92" }),
-    ).rejects.toThrow(/not a registered resident/);
+    await expect(runExecute({ packageId: "pkg-1" })).rejects.toThrow(
+      /not a registered resident/,
+    );
+  });
+
+  it("throws when there is no Telegram-authenticated caller", async () => {
+    sessionMock.value = {
+      sessionId: "sess-test",
+      turn: { id: "turn-1", index: 0 },
+      auth: { current: null, initiator: null },
+    };
+    await expect(runExecute({ packageId: "pkg-1" })).rejects.toThrow(
+      /Telegram-authenticated caller/,
+    );
   });
 });

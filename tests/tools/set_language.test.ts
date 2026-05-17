@@ -40,7 +40,7 @@ vi.mock("../../lib/redis.js", async () => {
 });
 
 async function loadTool() {
-  const mod = await import("./set_language.js");
+  const mod = await import("../../agent/tools/set_language.js");
   return mod.default;
 }
 

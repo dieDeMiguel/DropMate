@@ -40,7 +40,7 @@ vi.mock("../../lib/redis.js", () => ({
 }));
 
 async function loadTool() {
-  const mod = await import("./register_package.js");
+  const mod = await import("../../agent/tools/register_package.js");
   return mod.default;
 }
 

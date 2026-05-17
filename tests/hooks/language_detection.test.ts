@@ -38,7 +38,7 @@ vi.mock("../../lib/redis.js", async () => {
 });
 
 async function loadHook() {
-  const mod = await import("./language_detection.js");
+  const mod = await import("../../agent/hooks/language_detection.js");
   return { hook: mod.default };
 }
 

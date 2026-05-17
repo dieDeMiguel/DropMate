@@ -7,7 +7,7 @@ vi.mock("ai", () => ({
 }));
 
 async function loadTool() {
-  const mod = await import("./classify_message.js");
+  const mod = await import("../../agent/tools/classify_message.js");
   return mod.default;
 }
 

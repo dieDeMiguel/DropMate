@@ -20,7 +20,7 @@ vi.mock("../../lib/redis.js", () => ({
 
 async function loadTool() {
   // Dynamically import so the mocks are applied first.
-  const mod = await import("./register_resident.js");
+  const mod = await import("../../agent/tools/register_resident.js");
   return mod.default;
 }
 
