@@ -7,3 +7,5 @@ node_modules
 .workflow-data
 .DS_Store
 dist
+.pnpm-store
+.claude/settings.local.json

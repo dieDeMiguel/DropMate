@@ -46,3 +46,43 @@ export async function setSessionIdForChat(
   const redis = getRedis();
   await redis.set(`${SESSION_KEY_PREFIX}${chatId}`, sessionId, { ex: ttlSeconds });
 }
+
+/**
+ * Resident directory entry. Mirrors the Resident shape from PRD-ASH §7.
+ *
+ * `platformId` is the messenger-side user id (Telegram user id today,
+ * portable to WhatsApp later) and is the primary key. `confirmed: true`
+ * and `source: "explicit"` mark records created via `/register`;
+ * passively-learned ones (V2) will land with `confirmed: false`.
+ */
+export interface Resident {
+  readonly id: string;
+  readonly name: string;
+  readonly street: string;
+  readonly houseNumber: string;
+  readonly floor?: string;
+  readonly buzzerName?: string;
+  readonly platformId: string;
+  readonly platform: "telegram" | "whatsapp";
+  readonly language?: string;
+  readonly availabilityPatterns: readonly string[];
+  readonly registeredAt: number;
+  readonly source: "explicit" | "learned";
+  readonly confirmed: boolean;
+}
+
+const RESIDENT_KEY_PREFIX = "resident:";
+
+function residentKey(platformId: string): string {
+  return `${RESIDENT_KEY_PREFIX}${platformId}`;
+}
+
+export async function getResident(platformId: string): Promise<Resident | null> {
+  const redis = getRedis();
+  return (await redis.get<Resident>(residentKey(platformId))) ?? null;
+}
+
+export async function setResident(resident: Resident): Promise<void> {
+  const redis = getRedis();
+  await redis.set(residentKey(resident.platformId), resident);
+}

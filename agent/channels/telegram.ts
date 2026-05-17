@@ -26,11 +26,16 @@ import {
 interface TelegramChannelState {
   readonly chatId: number;
   readonly isGroup: boolean;
+  readonly fromUserId: number | null;
+  readonly fromLanguageCode: string | null;
 }
 
-export default defineChannel<TelegramChannelState, { chatId: number }>({
+export default defineChannel<
+  TelegramChannelState,
+  { chatId: number; fromUserId: number | null }
+>({
   state: undefined as unknown as TelegramChannelState,
-  context: (state) => ({ chatId: state.chatId }),
+  context: (state) => ({ chatId: state.chatId, fromUserId: state.fromUserId }),
   routes: [
     POST<TelegramChannelState>("/api/telegram", async (req, { send, waitUntil }) => {
       const expectedSecret = process.env.TELEGRAM_WEBHOOK_SECRET_TOKEN;
@@ -60,9 +65,24 @@ export default defineChannel<TelegramChannelState, { chatId: number }>({
       const continuationToken = existingSessionId ?? `tg:${inbound.chatId}`;
 
       const session = await send(inbound.text, {
-        auth: null,
+        auth:
+          inbound.fromUserId === null
+            ? null
+            : {
+                principalId: String(inbound.fromUserId),
+                principalType: "user",
+                authenticator: "telegram",
+                attributes: inbound.fromLanguageCode
+                  ? { languageCode: inbound.fromLanguageCode }
+                  : {},
+              },
         continuationToken,
-        state: { chatId: inbound.chatId, isGroup: inbound.isGroup },
+        state: {
+          chatId: inbound.chatId,
+          isGroup: inbound.isGroup,
+          fromUserId: inbound.fromUserId,
+          fromLanguageCode: inbound.fromLanguageCode,
+        },
       });
 
       if (!existingSessionId) {
