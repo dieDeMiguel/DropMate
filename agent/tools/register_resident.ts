@@ -18,6 +18,7 @@ import { defineTool } from "experimental-ash/tools";
 import { getSession } from "experimental-ash/context";
 import { z } from "zod";
 
+import { normaliseLanguageCode } from "../../lib/language.js";
 import { getResident, setResident, type Resident } from "../../lib/redis.js";
 
 const inputSchema = z.object({
@@ -64,7 +65,11 @@ export default defineTool({
       );
     }
     const platformId = principal.principalId;
-    const languageCode = pickLanguageCode(principal.attributes.languageCode);
+    // Normalise to the ISO 639-1 prefix so "de-AT" / "EN" never land
+    // on Resident.language verbatim. Shared with the language_detection
+    // hook so both write paths agree on the stored form.
+    const languageCode =
+      normaliseLanguageCode(principal.attributes.languageCode) ?? undefined;
 
     const existing = await getResident(platformId);
     const resident: Resident = {
@@ -87,11 +92,3 @@ export default defineTool({
     return { resident, updated: existing !== null };
   },
 });
-
-function pickLanguageCode(
-  attr: string | readonly string[] | undefined,
-): string | undefined {
-  if (typeof attr === "string") return attr;
-  if (Array.isArray(attr) && attr.length > 0) return attr[0];
-  return undefined;
-}

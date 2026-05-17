@@ -12,9 +12,28 @@
  * and so the auth invariant has exactly one place to evolve.
  */
 
-import { getSession } from "experimental-ash/context";
+import { getSession, type SessionAuthContext } from "experimental-ash/context";
 
 import { getResident, type Resident } from "./redis.js";
+
+/**
+ * Returns the current/initiator principal if the active session is
+ * Telegram-authenticated, otherwise `null`. Single source of truth for
+ * the "is this a Telegram-authenticated turn?" check so the principal
+ * lookup shape (current vs initiator priority, the authenticator
+ * string literal) lives in exactly one place.
+ *
+ * Non-throwing — hooks tolerate non-Telegram principals (other channels
+ * might be added later) and need a way to detect them quietly. Tools
+ * that REQUIRE a Telegram caller wrap this in
+ * `requireRegisteredTelegramCaller`.
+ */
+export function getTelegramPrincipal(): SessionAuthContext | null {
+  const session = getSession();
+  const principal = session.auth.current ?? session.auth.initiator;
+  if (!principal || principal.authenticator !== "telegram") return null;
+  return principal;
+}
 
 /**
  * Returns the Resident record for the currently-authenticated Telegram
@@ -25,12 +44,13 @@ import { getResident, type Resident } from "./redis.js";
 export async function requireRegisteredTelegramCaller(
   toolName: string,
 ): Promise<Resident> {
-  const session = getSession();
-  const principal = session.auth.current ?? session.auth.initiator;
-  if (!principal || principal.authenticator !== "telegram") {
+  const principal = getTelegramPrincipal();
+  if (!principal) {
+    const session = getSession();
+    const raw = session.auth.current ?? session.auth.initiator;
     throw new Error(
       `${toolName} requires a Telegram-authenticated caller; got authenticator=` +
-        (principal?.authenticator ?? "<none>"),
+        (raw?.authenticator ?? "<none>"),
     );
   }
   const resident = await getResident(principal.principalId);

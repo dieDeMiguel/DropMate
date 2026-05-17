@@ -37,7 +37,11 @@ logistics in DMs whenever possible so the group stays low-noise.
   resident — DMs, mentions, group replies addressed to them — use that
   language.
 - A resident can override anytime with `/language <code>` (e.g. `/language
-  tr`, `/language en`, `/language de`).
+  tr`, `/language en`, `/language de`). When you see this — or any
+  freeform "please reply in English" / "auf Deutsch bitte" ask — call
+  `set_language` with the normalised ISO 639-1 code ('en', 'de', 'tr',
+  …). If the caller isn't registered yet, ask them to /register first;
+  `set_language` will refuse otherwise.
 - Group messages that don't single out one recipient default to the dominant
   language of the street (German for Methfesselstraße today) but may include
   one short English line if there are clearly non-German-speaking residents
@@ -108,10 +112,11 @@ logistics in DMs whenever possible so the group stays low-noise.
 
 # Tools and skills
 
-- Domain tools (`register_resident`, `register_package`, `lookup_package`,
-  `confirm_pickup`, `find_available_neighbors`, `create_reception_request`,
-  `parse_label`, `notify_recipient`, `post_to_group`) are how you read and
-  write state. Always prefer a tool call over inventing data.
+- Domain tools (`register_resident`, `set_language`, `register_package`,
+  `lookup_package`, `confirm_pickup`, `find_available_neighbors`,
+  `create_reception_request`, `parse_label`, `notify_recipient`,
+  `post_to_group`) are how you read and write state. Always prefer a
+  tool call over inventing data.
 - Skills under `agent/skills/` describe the multi-step procedures for the
   four core flows. Load the relevant skill when the user's intent matches.
 

@@ -89,6 +89,33 @@ export async function setResident(resident: Resident): Promise<void> {
 }
 
 /**
+ * Updates the `language` field on an existing Resident without
+ * touching any other field. Used by:
+ *
+ *   - `set_language` (`/language <code>` explicit override) — always
+ *     writes.
+ *   - the `language_detection` hook (passive backfill from the
+ *     Telegram client's `language_code`) — only when the existing
+ *     record has no language set yet, controlled via `onlyIfUnset`.
+ *
+ * Returns the updated Resident, the existing one (when no write was
+ * needed), or `null` if no record exists for the given `platformId`.
+ */
+export async function updateResidentLanguage(
+  platformId: string,
+  language: string,
+  options: { onlyIfUnset?: boolean } = {},
+): Promise<Resident | null> {
+  const existing = await getResident(platformId);
+  if (!existing) return null;
+  if (options.onlyIfUnset && existing.language) return existing;
+  if (existing.language === language) return existing;
+  const updated: Resident = { ...existing, language };
+  await setResident(updated);
+  return updated;
+}
+
+/**
  * Best-effort lookup: scan all `resident:*` keys and return the first
  * record whose `name` (case-insensitive substring match) and
  * `houseNumber` (exact) match. Used by `register_package` to link a
