@@ -35,8 +35,16 @@
 
 import { defineChannel, POST } from "experimental-ash/channels";
 
-import { getSessionIdForChat, setSessionIdForChat } from "../redis.js";
+import {
+  getPackage,
+  getSessionIdForChat,
+  setSessionIdForChat,
+} from "../redis.js";
 import { getTelegramFileUrl } from "./file.js";
+import {
+  answerCallbackQuery,
+  editMessageReplyMarkup,
+} from "./keyboards.js";
 import { drainSessionToTelegram } from "./outbound.js";
 import {
   processInboundTelegramUpdate,
@@ -97,6 +105,14 @@ export function telegramChannel(config: TelegramChannelConfig) {
             drainSession: (session, chatId) =>
               drainSessionToTelegram(session, chatId, { token }),
             getFileUrl: (fileId) => getTelegramFileUrl(token, fileId),
+            answerCallback: (callbackId, text) =>
+              answerCallbackQuery(token, callbackId, text),
+            stripKeyboard: (chatId, messageId) =>
+              editMessageReplyMarkup(token, chatId, messageId),
+            getPackageRecipientId: async (packageId) => {
+              const pkg = await getPackage(packageId);
+              return pkg?.recipientResidentId ?? null;
+            },
           });
         },
       ),

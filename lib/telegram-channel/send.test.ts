@@ -71,4 +71,45 @@ describe("sendTelegramMessage", () => {
       /500 Internal Server Error/,
     );
   });
+
+  it("forwards reply_markup when supplied", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    );
+
+    await sendTelegramMessage(TEST_TOKEN, 42, "Pick up?", {
+      inline_keyboard: [
+        [{ text: "Mark as picked up", callback_data: "confirm_pickup:pkg_42" }],
+      ],
+    });
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect(JSON.parse(init?.body as string)).toEqual({
+      chat_id: 42,
+      text: "Pick up?",
+      reply_markup: {
+        inline_keyboard: [
+          [
+            {
+              text: "Mark as picked up",
+              callback_data: "confirm_pickup:pkg_42",
+            },
+          ],
+        ],
+      },
+    });
+  });
+
+  it("omits reply_markup when not supplied", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    );
+
+    await sendTelegramMessage(TEST_TOKEN, 42, "plain");
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    const body = JSON.parse(init?.body as string);
+    expect(body).toEqual({ chat_id: 42, text: "plain" });
+    expect(body.reply_markup).toBeUndefined();
+  });
 });

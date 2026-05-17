@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  extractInboundCallback,
   extractInboundMessage,
   type TelegramUpdatePayload,
 } from "./inbound.js";
@@ -141,5 +142,121 @@ describe("extractInboundMessage", () => {
       },
     };
     expect(extractInboundMessage(update)?.photoFileId).toBe("large");
+  });
+
+  it("returns null when the update is a callback_query (handled by extractInboundCallback)", () => {
+    const update: TelegramUpdatePayload = {
+      update_id: 8,
+      callback_query: {
+        id: "cb1",
+        data: "confirm_pickup:pkg_42",
+        from: { id: 200, language_code: "de" },
+        message: {
+          message_id: 555,
+          chat: { id: 100, type: "private" },
+        },
+      },
+    };
+    expect(extractInboundMessage(update)).toBeNull();
+  });
+});
+
+describe("extractInboundCallback", () => {
+  it("narrows a private callback_query into the canonical shape", () => {
+    const update: TelegramUpdatePayload = {
+      update_id: 1,
+      callback_query: {
+        id: "cb_abc",
+        data: "confirm_pickup:pkg_42",
+        from: { id: 200, language_code: "de" },
+        message: {
+          message_id: 555,
+          chat: { id: 100, type: "private" },
+        },
+      },
+    };
+    expect(extractInboundCallback(update)).toEqual({
+      callbackId: "cb_abc",
+      chatId: 100,
+      messageId: 555,
+      fromUserId: 200,
+      fromLanguageCode: "de",
+      isGroup: false,
+      data: "confirm_pickup:pkg_42",
+    });
+  });
+
+  it("flags supergroup callback_query as group", () => {
+    const update: TelegramUpdatePayload = {
+      update_id: 2,
+      callback_query: {
+        id: "cb_grp",
+        data: "confirm_pickup:pkg_42",
+        from: { id: 200 },
+        message: {
+          message_id: 5,
+          chat: { id: -100123, type: "supergroup" },
+        },
+      },
+    };
+    expect(extractInboundCallback(update)).toMatchObject({
+      isGroup: true,
+      fromLanguageCode: null,
+    });
+  });
+
+  it("returns null when there is no callback_query (regular message)", () => {
+    const update: TelegramUpdatePayload = {
+      update_id: 3,
+      message: {
+        chat: { id: 100, type: "private" },
+        text: "hi",
+        from: { id: 200 },
+      },
+    };
+    expect(extractInboundCallback(update)).toBeNull();
+  });
+
+  it("returns null when callback_query has no data", () => {
+    const update: TelegramUpdatePayload = {
+      update_id: 4,
+      callback_query: {
+        id: "cb_nodata",
+        from: { id: 200 },
+        message: {
+          message_id: 5,
+          chat: { id: 100, type: "private" },
+        },
+      },
+    };
+    expect(extractInboundCallback(update)).toBeNull();
+  });
+
+  it("returns null when callback_query has empty data string", () => {
+    const update: TelegramUpdatePayload = {
+      update_id: 5,
+      callback_query: {
+        id: "cb_empty",
+        data: "",
+        from: { id: 200 },
+        message: {
+          message_id: 5,
+          chat: { id: 100, type: "private" },
+        },
+      },
+    };
+    expect(extractInboundCallback(update)).toBeNull();
+  });
+
+  it("returns null when callback_query has no originating message (inline mode tap)", () => {
+    const update: TelegramUpdatePayload = {
+      update_id: 6,
+      callback_query: {
+        id: "cb_inline",
+        data: "foo",
+        from: { id: 200 },
+      },
+    };
+    expect(extractInboundCallback(update)).toBeNull();
   });
 });
