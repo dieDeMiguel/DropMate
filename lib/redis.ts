@@ -315,6 +315,40 @@ export async function listHeldPackagesForStreet(
 }
 
 /**
+ * Scan every `package:*` key in Redis and return the records. Used by
+ * the cron-driven schedules (`reminder_48h`, `escalate_7d`) which
+ * must consider held packages across every street, not just one. The
+ * per-street index (`street:<id>:packages`) is the wrong shape here
+ * because the schedule doesn't know which streets exist a priori.
+ *
+ * Spike scale (< a few hundred packages total across the building) makes
+ * a full `package:*` SCAN acceptable. Per PRD §13.6, V2 will replace
+ * this with a sorted-set keyed by `(receivedAt + 48h, packageId)` so
+ * the schedule scans O(due-items) instead of O(all-packages).
+ */
+export async function listAllPackages(): Promise<readonly Package[]> {
+  const redis = getRedis();
+  const out: Package[] = [];
+  let cursor: string = "0";
+  do {
+    const result: [string, string[]] = await redis.scan(cursor, {
+      match: `${PACKAGE_KEY_PREFIX}*`,
+      count: 100,
+    });
+    const nextCursor: string = result[0];
+    const keys: string[] = result[1];
+    if (keys.length > 0) {
+      const rows = await redis.mget<(Package | null)[]>(...keys);
+      for (const p of rows ?? []) {
+        if (p) out.push(p);
+      }
+    }
+    cursor = nextCursor;
+  } while (cursor !== "0");
+  return out;
+}
+
+/**
  * Scan every resident on the given street. Excludes nothing; callers
  * filter (e.g. `find_available_neighbors` removes the requester
  * themselves). Used only by the reception-request flow today; resident
