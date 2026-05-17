@@ -18,11 +18,11 @@ import { defineChannel, POST } from "experimental-ash/channels";
 
 import { getSessionIdForChat, setSessionIdForChat } from "../../lib/redis.js";
 import {
+  drainSessionToTelegram,
   extractInboundMessage,
   verifyTelegramSecretHeader,
   type TelegramUpdatePayload,
 } from "../../lib/telegram-channel/index.js";
-import { sendTelegramMessage } from "../../lib/telegram-api.js";
 
 interface TelegramChannelState {
   readonly chatId: number;
@@ -94,32 +94,16 @@ export default defineChannel<
       // Drain the event stream in the background so the assistant's
       // reply gets posted back to Telegram after the HTTP response
       // returns. Telegram retries if the webhook hangs.
+      //
+      // The token is left as `undefined` so the drain falls back to
+      // `process.env.TELEGRAM_BOT_TOKEN` — same behaviour the spike has
+      // always had. When the Phase 2 `telegramChannel({ token, ... })`
+      // factory replaces this webhook, it will pass the captured token
+      // explicitly via `deps.token` and the env-var fallback drops out.
       waitUntil(
-        (async () => {
-          try {
-            const stream = await session.getEventStream();
-            const reader = stream.getReader();
-            try {
-              while (true) {
-                const { value, done } = await reader.read();
-                if (done) break;
-                if (value.type === "message.completed" && value.data.message) {
-                  await sendTelegramMessage(inbound.chatId, value.data.message);
-                }
-                if (value.type === "session.failed") {
-                  await sendTelegramMessage(
-                    inbound.chatId,
-                    "Sorry, I hit an error processing that message.",
-                  );
-                }
-              }
-            } finally {
-              reader.releaseLock();
-            }
-          } catch (err) {
-            console.error("telegram webhook drain failed", err);
-          }
-        })(),
+        drainSessionToTelegram(session, inbound.chatId, {
+          token: process.env.TELEGRAM_BOT_TOKEN,
+        }),
       );
 
       return new Response(null, { status: 204 });

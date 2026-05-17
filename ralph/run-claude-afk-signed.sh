@@ -256,11 +256,17 @@ fi
 # error, and Ctrl+C — anywhere the script terminates with new commits in
 # the working tree.
 #
-# Sequence in cleanup matters: sign FIRST (against the tree as the loop
-# left it), THEN do pnpm reconciliation (which may regenerate
-# pnpm-lock.yaml and definitely rewrites node_modules). Signing only
-# touches commit metadata, not the worktree, so the reconciliation runs
-# against the same tree it would have otherwise.
+# Sequence in cleanup matters: pnpm reconciliation runs FIRST so the host
+# `node_modules/` has macOS-native binaries by the time the re-sign step
+# fires. We pass `--no-verify` to the amend below because hooks already
+# ran inside the sandbox when Claude originally produced the commit —
+# re-running them on amend is redundant and previously corrupted the
+# rebase whenever host node_modules still contained Linux binaries from
+# the sandbox (rollup/lightningcss/etc. exploding the moment husky tried
+# `pnpm typecheck`). The amend touches only commit metadata against an
+# already-validated tree, so skipping hooks here is safe; reconciliation
+# can still update `pnpm-lock.yaml` in rare cases, but that risk is
+# strictly smaller than the certainty of broken hooks pre-fix.
 # -----------------------------------------------------------------------------
 sign_new_commits() {
   if [[ "$SKIP_SIGN" == "1" ]]; then
@@ -299,16 +305,21 @@ EOF
   echo "Signing $commit_count new commit(s) (${SIGNING_FORMAT:-openpgp} → $SIGNING_KEY)…"
 
   # GIT_EDITOR=true makes --amend non-interactive even if EDITOR is set
-  # to something that opens a buffer.
-  if GIT_EDITOR=true git rebase --exec 'git commit --amend --no-edit -S' "$LOOP_START_SHA" >/dev/null 2>&1; then
+  # to something that opens a buffer. --no-verify skips pre-commit hooks
+  # on the amend — the original commit already passed hooks inside the
+  # sandbox and we're only changing commit metadata (signature) here, not
+  # the tree. stderr is intentionally NOT redirected: previous silent
+  # failures (hook crash on wrong-arch node_modules) wasted hours; if
+  # this fails again we want git's real error visible in the terminal.
+  if GIT_EDITOR=true git rebase --exec 'git commit --amend --no-edit --no-verify -S' "$LOOP_START_SHA"; then
     echo "  ✓ All $commit_count commit(s) signed."
   else
     cat >&2 <<EOF
-  ✗ Rebase failed. Repo may be mid-rebase.
+  ✗ Rebase failed. See git output above for the underlying error.
 
-To recover, run:
+If the repo is mid-rebase, recover with:
   git rebase --abort
-  git rebase --exec 'git commit --amend --no-edit -S' $LOOP_START_SHA
+  git rebase --exec 'git commit --amend --no-edit --no-verify -S' $LOOP_START_SHA
 EOF
     return 1
   fi
@@ -317,8 +328,6 @@ EOF
 TMPFILES=()
 cleanup() {
   for f in "${TMPFILES[@]}"; do rm -f "$f"; done
-
-  sign_new_commits || true
 
   if [ -f "$PWD/package.json" ] && command -v pnpm >/dev/null 2>&1; then
     echo ""
@@ -340,6 +349,12 @@ cleanup() {
       pnpm rebuild 2>&1 | tail -5
     ) || true
   fi
+
+  # Sign AFTER pnpm reconcile so any host-side tooling the user has
+  # installed in hooks (or that we re-run with --no-verify disabled in
+  # the future) sees a valid macOS node_modules. See the comment block
+  # above sign_new_commits() for the full rationale.
+  sign_new_commits || true
 }
 trap cleanup EXIT
 
