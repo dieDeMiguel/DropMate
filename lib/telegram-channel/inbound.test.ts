@@ -25,6 +25,7 @@ describe("extractInboundMessage", () => {
       isGroup: false,
       fromUserId: 200,
       fromLanguageCode: "en",
+      photoFileId: null,
     });
   });
 
@@ -47,7 +48,7 @@ describe("extractInboundMessage", () => {
     expect(extractInboundMessage({ update_id: 2 })).toBeNull();
   });
 
-  it("returns null when the message has no text (photos, stickers, …)", () => {
+  it("returns null when the message has no text and no photo (stickers, …)", () => {
     const update: TelegramUpdatePayload = {
       update_id: 3,
       message: {
@@ -58,7 +59,7 @@ describe("extractInboundMessage", () => {
     expect(extractInboundMessage(update)).toBeNull();
   });
 
-  it("returns null when the text is empty", () => {
+  it("returns null when the text is empty and there is no photo", () => {
     const update = makeUpdate({ text: "" });
     expect(extractInboundMessage(update)).toBeNull();
   });
@@ -78,11 +79,67 @@ describe("extractInboundMessage", () => {
       isGroup: false,
       fromUserId: null,
       fromLanguageCode: null,
+      photoFileId: null,
     });
   });
 
   it("preserves leading slash so the model sees the raw slash command", () => {
     const update = makeUpdate({ text: "/register Anna" });
     expect(extractInboundMessage(update)?.text).toBe("/register Anna");
+  });
+
+  it("admits a photo-only update and exposes the largest variant's file_id", () => {
+    const update: TelegramUpdatePayload = {
+      update_id: 5,
+      message: {
+        chat: { id: 100, type: "private" },
+        from: { id: 200, language_code: "de" },
+        photo: [
+          { file_id: "small", file_size: 1234, width: 90, height: 90 },
+          { file_id: "medium", file_size: 5678, width: 320, height: 320 },
+          { file_id: "large", file_size: 9999, width: 1280, height: 1280 },
+        ],
+      },
+    };
+    expect(extractInboundMessage(update)).toEqual({
+      chatId: 100,
+      text: "",
+      isGroup: false,
+      fromUserId: 200,
+      fromLanguageCode: "de",
+      photoFileId: "large",
+    });
+  });
+
+  it("uses caption text alongside a photo", () => {
+    const update: TelegramUpdatePayload = {
+      update_id: 6,
+      message: {
+        chat: { id: 100, type: "private" },
+        from: { id: 200 },
+        caption: "Paket für Meyer",
+        photo: [{ file_id: "only", file_size: 100, width: 90, height: 90 }],
+      },
+    };
+    expect(extractInboundMessage(update)).toMatchObject({
+      text: "Paket für Meyer",
+      photoFileId: "only",
+    });
+  });
+
+  it("falls back to the last photo variant when file_size is missing on every variant", () => {
+    const update: TelegramUpdatePayload = {
+      update_id: 7,
+      message: {
+        chat: { id: 100, type: "private" },
+        from: { id: 200 },
+        photo: [
+          { file_id: "small", width: 90, height: 90 },
+          { file_id: "medium", width: 320, height: 320 },
+          { file_id: "large", width: 1280, height: 1280 },
+        ],
+      },
+    };
+    expect(extractInboundMessage(update)?.photoFileId).toBe("large");
   });
 });

@@ -226,6 +226,16 @@ export interface Package {
    * the bot is talking about.
    */
   readonly notes?: string;
+  /**
+   * Set by `register_package` when the new Package fulfills a pending
+   * `ReceptionRequest` (the recipient pre-announced they wouldn't be
+   * home; the bot matched a volunteer; the volunteer is now registering
+   * the actually-arrived package). Stays `undefined` for ordinary
+   * walk-up registrations — Flow 1 doesn't write it. Wires the Package
+   * back to the request so future status queries can answer "did the
+   * thing Patricia was waiting for ever arrive?".
+   */
+  readonly receptionRequestId?: string;
 }
 
 /**
@@ -302,4 +312,181 @@ export async function listHeldPackagesForStreet(
 ): Promise<readonly Package[]> {
   const all = await listPackagesForStreet(streetId);
   return all.filter((p) => p.status === "held");
+}
+
+/**
+ * Scan every resident on the given street. Excludes nothing; callers
+ * filter (e.g. `find_available_neighbors` removes the requester
+ * themselves). Used only by the reception-request flow today; resident
+ * directory lookups elsewhere either go by `platformId` or by
+ * `name + houseNumber`.
+ *
+ * Phase 1 spike scale (≤ a few dozen residents per street) makes a
+ * SCAN acceptable. V2 should add a `street:<id>:residents` set keyed
+ * the same way the package index is, so the scan disappears.
+ */
+export async function listResidentsForStreet(
+  street: string,
+): Promise<readonly Resident[]> {
+  const redis = getRedis();
+  const out: Resident[] = [];
+  let cursor: string = "0";
+  do {
+    const result: [string, string[]] = await redis.scan(cursor, {
+      match: `${RESIDENT_KEY_PREFIX}*`,
+      count: 100,
+    });
+    const nextCursor: string = result[0];
+    const keys: string[] = result[1];
+    if (keys.length > 0) {
+      const residents = await redis.mget<(Resident | null)[]>(...keys);
+      for (const r of residents ?? []) {
+        if (!r) continue;
+        if (r.street === street) out.push(r);
+      }
+    }
+    cursor = nextCursor;
+  } while (cursor !== "0");
+  return out;
+}
+
+/**
+ * Reception request record. A resident DMs the bot "I'm not home
+ * tomorrow, expecting a DHL package" — the bot writes one of these,
+ * DMs candidate neighbors, and updates it when a volunteer accepts.
+ *
+ * Lifecycle: `"open"` (created, candidates DM'd, no volunteer yet) →
+ * `"matched"` (a volunteer accepted) → `"fulfilled"` (the matching
+ * Package arrived — handled in slice #23, not here) OR `"expired"`
+ * (no volunteer accepted within the configured window — handled by
+ * a future schedule, not this slice).
+ *
+ * `volunteerAvailability` is the volunteer's own free-form window
+ * (e.g. "bis 15 Uhr", "until 6pm") — kept as a string because the
+ * resident's own phrasing is what the requester needs to read.
+ *
+ * `candidateResidentIds` snapshots who the bot asked, so the slice
+ * #25 timeout schedule can DM "no one was available" to the
+ * requester without re-running the candidate scan.
+ */
+export type ReceptionRequestStatus =
+  | "open"
+  | "matched"
+  | "fulfilled"
+  | "expired";
+
+export interface ReceptionRequest {
+  readonly id: string;
+  readonly streetId: string;
+  readonly requesterResidentId: string;
+  readonly requesterName: string;
+  readonly requesterHouseNumber: string;
+  readonly carrier: PackageCarrier;
+  readonly expectedAt: number | null;
+  readonly notes?: string;
+  readonly candidateResidentIds: readonly string[];
+  readonly volunteerResidentId: string | null;
+  readonly volunteerAvailability: string | null;
+  readonly status: ReceptionRequestStatus;
+  readonly createdAt: number;
+  readonly respondedAt: number | null;
+}
+
+const RECEPTION_REQUEST_KEY_PREFIX = "reception_request:";
+
+function receptionRequestKey(id: string): string {
+  return `${RECEPTION_REQUEST_KEY_PREFIX}${id}`;
+}
+
+function streetReceptionRequestsKey(streetId: string): string {
+  return `street:${streetId}:reception_requests`;
+}
+
+/**
+ * Random ReceptionRequest id, same format pattern as `newPackageId` so
+ * logs stay scannable across record types.
+ */
+export function newReceptionRequestId(): string {
+  const ts = Date.now().toString(36);
+  const rand = Math.random().toString(36).slice(2, 8);
+  return `req_${ts}_${rand}`;
+}
+
+export async function getReceptionRequest(
+  id: string,
+): Promise<ReceptionRequest | null> {
+  const redis = getRedis();
+  return (
+    (await redis.get<ReceptionRequest>(receptionRequestKey(id))) ?? null
+  );
+}
+
+/**
+ * Writes the ReceptionRequest record and adds its id to the per-street
+ * index. Mirrors `setPackage` semantics so callers can iterate every
+ * open request on a street without scanning every key in Redis.
+ */
+export async function setReceptionRequest(
+  req: ReceptionRequest,
+): Promise<void> {
+  const redis = getRedis();
+  await redis.set(receptionRequestKey(req.id), req);
+  await redis.sadd(streetReceptionRequestsKey(req.streetId), req.id);
+}
+
+/**
+ * Loads every ReceptionRequest indexed under the given street. Caller
+ * filters by `status` (open vs fulfilled). Same spike-scale tradeoff
+ * as `listPackagesForStreet`.
+ */
+export async function listReceptionRequestsForStreet(
+  streetId: string,
+): Promise<readonly ReceptionRequest[]> {
+  const redis = getRedis();
+  const ids = await redis.smembers(streetReceptionRequestsKey(streetId));
+  if (ids.length === 0) return [];
+  const keys = ids.map(receptionRequestKey);
+  const rows = await redis.mget<(ReceptionRequest | null)[]>(...keys);
+  return (rows ?? []).filter((r): r is ReceptionRequest => r !== null);
+}
+
+/**
+ * Find a pre-fulfilment ReceptionRequest on the given street whose
+ * requester matches the package's recipient. Used by `register_package`
+ * to detect when a freshly-registered package closes out a pending
+ * "I won't be home" ask (Flow 2b).
+ *
+ * "Pre-fulfilment" = `status` ∈ {`"open"`, `"matched"`}. `"fulfilled"`
+ * is already closed (don't double-link); `"expired"` is a no-show
+ * (the requester has already been told no one was available).
+ *
+ * Match rule mirrors `lookup_package` so a register / lookup pair on
+ * the same recipient string agree on what counts as a hit:
+ *   - `requesterHouseNumber` must equal `recipientHouseNumber` exactly.
+ *   - `requesterName` must overlap `recipientName` case-insensitively
+ *     in either direction ("Meyer" matches "Anna-Sophie Meyer" and
+ *     vice versa).
+ *
+ * If multiple eligible requests match (uncommon today — a resident
+ * rarely has more than one open ask), pick the most recently created.
+ * That maps onto the real-world case: the request the requester has
+ * actively in mind is the latest one.
+ */
+export async function findOpenReceptionRequestForRecipient(
+  streetId: string,
+  recipientName: string,
+  recipientHouseNumber: string,
+): Promise<ReceptionRequest | null> {
+  const needle = recipientName.trim().toLowerCase();
+  if (needle === "") return null;
+  const all = await listReceptionRequestsForStreet(streetId);
+  const eligible = all
+    .filter((r) => r.status === "open" || r.status === "matched")
+    .filter((r) => r.requesterHouseNumber === recipientHouseNumber)
+    .filter((r) => {
+      const hay = r.requesterName.toLowerCase();
+      return hay.includes(needle) || needle.includes(hay);
+    })
+    .sort((a, b) => b.createdAt - a.createdAt);
+  return eligible[0] ?? null;
 }

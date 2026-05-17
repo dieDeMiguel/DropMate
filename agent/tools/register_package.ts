@@ -23,12 +23,16 @@ import { getSession } from "experimental-ash/context";
 import { z } from "zod";
 
 import {
+  findOpenReceptionRequestForRecipient,
   findResidentByNameAndHouse,
   getResident,
   newPackageId,
   setPackage,
+  setReceptionRequest,
   type Package,
   type PackageCarrier,
+  type ReceptionRequest,
+  type Resident,
 } from "../../lib/redis.js";
 
 const CARRIERS: readonly PackageCarrier[] = [
@@ -40,6 +44,49 @@ const CARRIERS: readonly PackageCarrier[] = [
   "Amazon",
   "unknown",
 ];
+
+/**
+ * Summary of the resident who pre-announced the package (Flow 2a). Only
+ * the fields the model needs to DM them are exposed — the language is
+ * load-bearing so the follow-up `notify_recipient` text lands in the
+ * right language.
+ */
+export interface FulfillmentRequesterSummary {
+  readonly id: string;
+  readonly name: string;
+  readonly houseNumber: string;
+  readonly language: string | null;
+}
+
+/**
+ * Summary of the resident now holding the package. Same shape as
+ * `lookup_package`'s `HolderSummary` minus `availabilityPatterns` — the
+ * requester needs the address + buzzer to come pick the package up,
+ * not the holder's general schedule.
+ */
+export interface FulfillmentHolderSummary {
+  readonly id: string;
+  readonly name: string;
+  readonly houseNumber: string;
+  readonly floor: string | null;
+  readonly buzzerName: string | null;
+}
+
+export interface ReceptionRequestFulfillment {
+  readonly requestId: string;
+  readonly requester: FulfillmentRequesterSummary;
+  readonly holder: FulfillmentHolderSummary;
+}
+
+function summariseHolder(holder: Resident): FulfillmentHolderSummary {
+  return {
+    id: holder.id,
+    name: holder.name,
+    houseNumber: holder.houseNumber,
+    floor: holder.floor ?? null,
+    buzzerName: holder.buzzerName ?? null,
+  };
+}
 
 const inputSchema = z.object({
   recipientName: z
@@ -80,8 +127,11 @@ export default defineTool({
     "Meyer' is two calls. The holder is identified by session auth, so " +
     "do not ask for an id. The holder must be registered (via " +
     "`register_resident`) before calling this. Returns the stored " +
-    "Package record plus whether the recipient could be linked to an " +
-    "existing Resident.",
+    "Package record, whether the recipient could be linked to an " +
+    "existing Resident, and — if this package fulfils a pending " +
+    "'I won't be home' reception request — a `receptionRequestFulfilled` " +
+    "block with the requester + holder summary so you can DM the " +
+    "requester their pickup directions.",
   inputSchema,
   async execute({ recipientName, recipientHouseNumber, carrier, trackingNumber }) {
     const session = getSession();
@@ -106,6 +156,12 @@ export default defineTool({
       recipientHouseNumber,
     );
 
+    const openRequest = await findOpenReceptionRequestForRecipient(
+      holder.street,
+      recipientName,
+      recipientHouseNumber,
+    );
+
     const pkg: Package = {
       id: newPackageId(),
       streetId: holder.street,
@@ -119,13 +175,37 @@ export default defineTool({
       receivedAt: Date.now(),
       pickedUpAt: null,
       reminded: false,
+      receptionRequestId: openRequest?.id,
     };
 
     await setPackage(pkg);
 
+    let fulfillment: ReceptionRequestFulfillment | null = null;
+    if (openRequest) {
+      const fulfilledRequest: ReceptionRequest = {
+        ...openRequest,
+        status: "fulfilled",
+      };
+      await setReceptionRequest(fulfilledRequest);
+      const requesterResident = await getResident(
+        openRequest.requesterResidentId,
+      );
+      fulfillment = {
+        requestId: openRequest.id,
+        requester: {
+          id: openRequest.requesterResidentId,
+          name: openRequest.requesterName,
+          houseNumber: openRequest.requesterHouseNumber,
+          language: requesterResident?.language ?? null,
+        },
+        holder: summariseHolder(holder),
+      };
+    }
+
     return {
       package: pkg,
       recipientLinked: recipient !== null,
+      receptionRequestFulfilled: fulfillment,
     };
   },
 });
