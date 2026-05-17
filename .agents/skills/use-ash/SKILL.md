@@ -95,8 +95,49 @@ export default slackChannel({ botName: "my-bot" });
 
 - `agent.ts` stays minimal (model + runtime config). Behavior goes in `instructions.md` and skills.
 - Tool `description` is the model's only signal — state what, when, examples, return shape. Add `.describe()` on Zod fields that need hints.
-- `tools/` is auto-discovered; keep it free of tests. Put import-only helpers in `lib/`; integration tests for tools go elsewhere (e.g. `lib/__integration__/`).
 - For long-running tools, stream progress and return a continuation token for follow-ups.
+
+## Test placement (hard requirement, not a style preference)
+
+**Never put `.test.ts` files inside `agent/tools/`, `agent/hooks/`, `agent/channels/`, `agent/schedules/`, or `agent/subagents/`.** Discovery treats every `.ts` file in those slots as a tool/hook/channel/etc. source and uses the file stem as the runtime slug. The slug validator rejects dots, so `register_package.test.ts` → slug `register_package.test` → **fatal `ash build` error**:
+
+```
+Error: Tool filename "register_package.test" is not a legal tool name.
+Expected ASCII letters, digits, underscores, and dashes only,
+starting with a letter, up to 64 characters.
+```
+
+This blocks Vercel deploys, not just local builds. The colocated-tests pattern from `src/**/*.test.ts` that Ash itself uses **does not work in user agent projects** because `src/` isn't a scanned slot but `agent/tools/` is.
+
+**Canonical layout** — mirror the agent structure under a top-level `tests/` directory:
+
+```
+my-agent/
+  agent/
+    tools/
+      register_resident.ts
+    hooks/
+      language_detection.ts
+  tests/
+    tools/
+      register_resident.test.ts   # ← here, not agent/tools/
+    hooks/
+      language_detection.test.ts
+  lib/
+    redis.ts
+    redis.test.ts                 # ← colocated is FINE in lib/ (not scanned)
+  vitest.config.ts                # include: ["tests/**/*.test.ts", "lib/**/*.test.ts"]
+```
+
+**What is safe vs. unsafe:**
+- ✅ `lib/foo.test.ts` — `lib/` at the repo root is not an Ash-scanned slot
+- ✅ `agent/agent.test.ts` — `agent.test.ts` doesn't match the `agent.ts` slot pattern, silently ignored
+- ✅ `tests/**/*.test.ts` — outside all slots
+- ❌ `agent/tools/foo.test.ts` — fatal slug validation error
+- ❌ `agent/hooks/foo.test.ts` — same, and `hooks/` walks recursively so `agent/hooks/__tests__/` doesn't help either
+- ❌ `agent/tools/__tests__/` — slug validation still rejects `__tests__` (starts with underscore, not a letter)
+
+**Dynamic import paths in moved tests:** `await import("./foo.js")` becomes `await import("../../agent/tools/foo.js")`. The `"../../lib/redis.js"` mocks usually survive verbatim because both `agent/tools/` and `tests/tools/` sit 2 levels below the repo root.
 
 ## Deeper reference
 
