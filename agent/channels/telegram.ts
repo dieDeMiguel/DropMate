@@ -19,9 +19,10 @@ import { defineChannel, POST } from "experimental-ash/channels";
 import { getSessionIdForChat, setSessionIdForChat } from "../../lib/redis.js";
 import {
   extractInboundMessage,
-  sendTelegramMessage,
+  verifyTelegramSecretHeader,
   type TelegramUpdatePayload,
-} from "../../lib/telegram-api.js";
+} from "../../lib/telegram-channel/index.js";
+import { sendTelegramMessage } from "../../lib/telegram-api.js";
 
 interface TelegramChannelState {
   readonly chatId: number;
@@ -38,13 +39,12 @@ export default defineChannel<
   context: (state) => ({ chatId: state.chatId, fromUserId: state.fromUserId }),
   routes: [
     POST<TelegramChannelState>("/api/telegram", async (req, { send, waitUntil }) => {
-      const expectedSecret = process.env.TELEGRAM_WEBHOOK_SECRET_TOKEN;
-      if (!expectedSecret) {
-        return new Response("server misconfigured", { status: 500 });
-      }
-      const headerSecret = req.headers.get("x-telegram-bot-api-secret-token");
-      if (headerSecret !== expectedSecret) {
-        return new Response("unauthorized", { status: 401 });
+      const verified = verifyTelegramSecretHeader(
+        req,
+        process.env.TELEGRAM_WEBHOOK_SECRET_TOKEN,
+      );
+      if (!verified.ok) {
+        return new Response(verified.reason, { status: verified.status });
       }
 
       let update: TelegramUpdatePayload;
