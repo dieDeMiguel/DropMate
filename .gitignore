@@ -1,2 +1,9 @@
 .vercel
 .env*.local
+node_modules
+.ash
+.swc
+.output
+.workflow-data
+.DS_Store
+dist

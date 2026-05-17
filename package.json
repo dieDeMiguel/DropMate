@@ -1,0 +1,28 @@
+{
+  "name": "dropmate",
+  "version": "0.0.0",
+  "type": "module",
+  "imports": {
+    "#*": "./agent/*",
+    "#evals/*": "./evals/*"
+  },
+  "scripts": {
+    "build": "ash build",
+    "dev": "ash dev",
+    "typecheck": "tsgo",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@chat-adapter/telegram": "^4.28.1",
+    "@upstash/redis": "^1.38.0",
+    "ai": "7.0.0-canary.136",
+    "chat": "^4.28.1",
+    "experimental-ash": "^0.14.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@typescript/native-preview": "7.0.0-dev.20260331.1",
+    "vitest": "^3.0.0"
+  }
+}
