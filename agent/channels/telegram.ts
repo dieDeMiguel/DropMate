@@ -1,17 +1,16 @@
 /**
  * Phase 1 spike: thin Telegram webhook.
  *
- * Mounts a single `POST /api/telegram` route. For each inbound update
- * it validates the secret-token header, looks up the Ash session id
- * for that chat in Redis (creating one if absent), drives a turn via
- * `send(...)`, and posts the assistant's reply back through the
- * Telegram Bot API.
+ * Mounts a single `POST /api/telegram` route. The full inbound
+ * pipeline (verify → parse → narrow → resolve session → send → drain)
+ * lives in `lib/telegram-channel/process-update.ts`; this route's
+ * job is just to wire the route args + env-derived config + Redis
+ * helpers into that orchestrator and return the response it builds.
  *
  * Phase 2 (issue #19) replaces this with a first-class Ash channel
- * built on `@chat-adapter/telegram` (Chat SDK) — keyboards, photos,
- * group mention routing, etc. For now we cover plain text DMs/groups
- * end-to-end so flows #16/#17/#18 can be developed against a real
- * Telegram bot.
+ * built on `@chat-adapter/telegram` (Chat SDK). The factory will
+ * reuse `processInboundTelegramUpdate` with its captured `token` /
+ * `webhookSecret` instead of the env-var fallbacks the spike uses.
  */
 
 import { defineChannel, POST } from "experimental-ash/channels";
@@ -19,17 +18,9 @@ import { defineChannel, POST } from "experimental-ash/channels";
 import { getSessionIdForChat, setSessionIdForChat } from "../../lib/redis.js";
 import {
   drainSessionToTelegram,
-  extractInboundMessage,
-  verifyTelegramSecretHeader,
-  type TelegramUpdatePayload,
+  processInboundTelegramUpdate,
+  type TelegramChannelState,
 } from "../../lib/telegram-channel/index.js";
-
-interface TelegramChannelState {
-  readonly chatId: number;
-  readonly isGroup: boolean;
-  readonly fromUserId: number | null;
-  readonly fromLanguageCode: string | null;
-}
 
 export default defineChannel<
   TelegramChannelState,
@@ -39,74 +30,23 @@ export default defineChannel<
   context: (state) => ({ chatId: state.chatId, fromUserId: state.fromUserId }),
   routes: [
     POST<TelegramChannelState>("/api/telegram", async (req, { send, waitUntil }) => {
-      const verified = verifyTelegramSecretHeader(
-        req,
-        process.env.TELEGRAM_WEBHOOK_SECRET_TOKEN,
-      );
-      if (!verified.ok) {
-        return new Response(verified.reason, { status: verified.status });
-      }
-
-      let update: TelegramUpdatePayload;
-      try {
-        update = (await req.json()) as TelegramUpdatePayload;
-      } catch {
-        return new Response("bad json", { status: 400 });
-      }
-
-      const inbound = extractInboundMessage(update);
-      if (!inbound) {
-        // Updates we don't handle yet (photos, edits, reactions, …)
-        // are acked so Telegram doesn't retry.
-        return new Response(null, { status: 204 });
-      }
-
-      const existingSessionId = await getSessionIdForChat(inbound.chatId);
-      const continuationToken = existingSessionId ?? `tg:${inbound.chatId}`;
-
-      const session = await send(inbound.text, {
-        auth:
-          inbound.fromUserId === null
-            ? null
-            : {
-                principalId: String(inbound.fromUserId),
-                principalType: "user",
-                authenticator: "telegram",
-                attributes: inbound.fromLanguageCode
-                  ? { languageCode: inbound.fromLanguageCode }
-                  : {},
-              },
-        continuationToken,
-        state: {
-          chatId: inbound.chatId,
-          isGroup: inbound.isGroup,
-          fromUserId: inbound.fromUserId,
-          fromLanguageCode: inbound.fromLanguageCode,
-        },
+      return processInboundTelegramUpdate(req, {
+        expectedSecret: process.env.TELEGRAM_WEBHOOK_SECRET_TOKEN,
+        sendToAsh: send,
+        waitUntil,
+        getSessionIdForChat,
+        setSessionIdForChat,
+        // Token is left implicit so the drain falls back to
+        // `process.env.TELEGRAM_BOT_TOKEN` — same behaviour the
+        // spike has always had. When the Phase 2 channel factory
+        // replaces this route, it will pass `{ token: capturedToken }`
+        // explicitly and the env-var fallback in `outbound.ts`'s
+        // `buildDefaultSendMessage` drops out of the codebase.
+        drainSession: (session, chatId) =>
+          drainSessionToTelegram(session, chatId, {
+            token: process.env.TELEGRAM_BOT_TOKEN,
+          }),
       });
-
-      if (!existingSessionId) {
-        // Persist immediately so a concurrent retry doesn't open a
-        // second session for the same chat.
-        await setSessionIdForChat(inbound.chatId, session.id);
-      }
-
-      // Drain the event stream in the background so the assistant's
-      // reply gets posted back to Telegram after the HTTP response
-      // returns. Telegram retries if the webhook hangs.
-      //
-      // The token is left as `undefined` so the drain falls back to
-      // `process.env.TELEGRAM_BOT_TOKEN` — same behaviour the spike has
-      // always had. When the Phase 2 `telegramChannel({ token, ... })`
-      // factory replaces this webhook, it will pass the captured token
-      // explicitly via `deps.token` and the env-var fallback drops out.
-      waitUntil(
-        drainSessionToTelegram(session, inbound.chatId, {
-          token: process.env.TELEGRAM_BOT_TOKEN,
-        }),
-      );
-
-      return new Response(null, { status: 204 });
     }),
   ],
 });
