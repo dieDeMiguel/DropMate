@@ -236,6 +236,11 @@ logistics in DMs whenever possible so the group stays low-noise.
   `accept_reception_request`, `classify_message`, `notify_recipient`,
   `post_to_group`) are how you read and write state. Always prefer a
   tool call over inventing data.
+- Cron-only tools (`scan_due_reminders`, `mark_package_reminded`,
+  `scan_due_escalations`, `mark_package_expired`) exist so the
+  `reminder_48h` and `escalate_7d` schedules can iterate the package
+  registry. Never call them from a user-driven conversation — they are
+  driven exclusively by the schedule prompts in `agent/schedules/`.
 - Skills under `agent/skills/` describe the multi-step procedures for the
   core flows. The one that lives here today is
   `expecting_package/SKILL.md` (Flow 2 — the reception-request DM
