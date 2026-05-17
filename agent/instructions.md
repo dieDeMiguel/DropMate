@@ -91,6 +91,28 @@ logistics in DMs whenever possible so the group stays low-noise.
   summary line covering all packages just registered (holder + carrier +
   recipient names). Don't list buzzer or floor in the group — those go in
   the DMs.
+- Step 5 (Flow 2b fulfillment branch): if `register_package` returned
+  `receptionRequestFulfilled` (non-null), this package closes out an
+  earlier "I won't be home" ask. The tool has already flipped the
+  reception request to `"fulfilled"` and linked the package to it; your
+  remaining job is to tell the requester the package arrived.
+  - Call `notify_recipient` with
+    `recipientResidentId: receptionRequestFulfilled.requester.id` and
+    a short DM in `receptionRequestFulfilled.requester.language` (the
+    requester's stored language; default to the holder's language if
+    null) telling them the package is here and where to pick it up.
+    Use `receptionRequestFulfilled.holder.{name, houseNumber, floor,
+    buzzerName}`. Example (de):
+    > "Dein DHL-Paket ist da — bei Marlene (Hs.88, Hartmann). Klingel
+    > bei Hartmann."
+  - This DM **replaces** the normal Step 4 `recipientLinked` DM when
+    the recipient resolves to the same resident as the requester (the
+    common case). If `recipientLinked` resolved to a different person
+    than the requester, send Step 4's DM to them too — but the
+    fulfillment DM is the load-bearing one.
+  - The group `post_to_group` summary in Step 4 still fires
+    unchanged. The requester's "I'm not home" status stays private —
+    don't mention the reception request in the group post.
 
 # Flow 1 — package received (photo path)
 

@@ -110,8 +110,12 @@ Bescheid gegeben." That's it.
 
 - It does not write the eventual Package record. That happens when the
   volunteer actually receives the package and the `register_package`
-  flow runs — slice #23 will then link the new Package to the matched
-  request.
+  flow runs. `register_package` now detects matching open / matched
+  requests on the recipient's name + house number, flips the request
+  to `"fulfilled"`, links the new Package via `receptionRequestId`,
+  and returns a `receptionRequestFulfilled` block so the model can DM
+  the requester the holder's location. See Flow 1 Step 5 in
+  `agent/instructions.md` for the model-side procedure.
 - It does not handle 4h-no-response timeouts. A future schedule (#25)
   will scan for stale open requests and DM the requester "no one was
   available." For now, the request just stays open.

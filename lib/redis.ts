@@ -226,6 +226,16 @@ export interface Package {
    * the bot is talking about.
    */
   readonly notes?: string;
+  /**
+   * Set by `register_package` when the new Package fulfills a pending
+   * `ReceptionRequest` (the recipient pre-announced they wouldn't be
+   * home; the bot matched a volunteer; the volunteer is now registering
+   * the actually-arrived package). Stays `undefined` for ordinary
+   * walk-up registrations — Flow 1 doesn't write it. Wires the Package
+   * back to the request so future status queries can answer "did the
+   * thing Patricia was waiting for ever arrive?".
+   */
+  readonly receptionRequestId?: string;
 }
 
 /**
@@ -438,4 +448,45 @@ export async function listReceptionRequestsForStreet(
   const keys = ids.map(receptionRequestKey);
   const rows = await redis.mget<(ReceptionRequest | null)[]>(...keys);
   return (rows ?? []).filter((r): r is ReceptionRequest => r !== null);
+}
+
+/**
+ * Find a pre-fulfilment ReceptionRequest on the given street whose
+ * requester matches the package's recipient. Used by `register_package`
+ * to detect when a freshly-registered package closes out a pending
+ * "I won't be home" ask (Flow 2b).
+ *
+ * "Pre-fulfilment" = `status` ∈ {`"open"`, `"matched"`}. `"fulfilled"`
+ * is already closed (don't double-link); `"expired"` is a no-show
+ * (the requester has already been told no one was available).
+ *
+ * Match rule mirrors `lookup_package` so a register / lookup pair on
+ * the same recipient string agree on what counts as a hit:
+ *   - `requesterHouseNumber` must equal `recipientHouseNumber` exactly.
+ *   - `requesterName` must overlap `recipientName` case-insensitively
+ *     in either direction ("Meyer" matches "Anna-Sophie Meyer" and
+ *     vice versa).
+ *
+ * If multiple eligible requests match (uncommon today — a resident
+ * rarely has more than one open ask), pick the most recently created.
+ * That maps onto the real-world case: the request the requester has
+ * actively in mind is the latest one.
+ */
+export async function findOpenReceptionRequestForRecipient(
+  streetId: string,
+  recipientName: string,
+  recipientHouseNumber: string,
+): Promise<ReceptionRequest | null> {
+  const needle = recipientName.trim().toLowerCase();
+  if (needle === "") return null;
+  const all = await listReceptionRequestsForStreet(streetId);
+  const eligible = all
+    .filter((r) => r.status === "open" || r.status === "matched")
+    .filter((r) => r.requesterHouseNumber === recipientHouseNumber)
+    .filter((r) => {
+      const hay = r.requesterName.toLowerCase();
+      return hay.includes(needle) || needle.includes(hay);
+    })
+    .sort((a, b) => b.createdAt - a.createdAt);
+  return eligible[0] ?? null;
 }
