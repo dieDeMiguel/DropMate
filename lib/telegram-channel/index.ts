@@ -5,10 +5,11 @@
  * to a first-class Ash channel built on Chat SDK + `@chat-adapter/telegram`.
  * This barrel exports the pieces that don't need a live bot to validate:
  *
- *   - `verify.ts`     — webhook signature check (shared with the spike)
- *   - `inbound.ts`    — raw-update → canonical message narrowing
- *   - `outbound.ts`   — Ash session event stream → Telegram replies
- *   - `send.ts`       — `sendMessage` Bot API primitive (token explicit)
+ *   - `verify.ts`         — webhook signature check (shared with the spike)
+ *   - `inbound.ts`        — raw-update → canonical message narrowing
+ *   - `outbound.ts`       — Ash session event stream → Telegram replies
+ *   - `send.ts`           — `sendMessage` Bot API primitive (token explicit)
+ *   - `process-update.ts` — full inbound pipeline orchestrator
  *
  * The remaining Phase 2 modules (`chat-instance.ts` and the
  * `telegramChannel({ ... })` factory that returns an Ash
@@ -36,3 +37,10 @@ export {
 } from "./outbound.js";
 
 export { sendTelegramMessage } from "./send.js";
+
+export {
+  processInboundTelegramUpdate,
+  type ProcessUpdateDeps,
+  type TelegramChannelState,
+  type TelegramSessionAuth,
+} from "./process-update.js";
