@@ -10,6 +10,7 @@
  */
 
 import { Redis } from "@upstash/redis";
+import { z } from "zod";
 
 let cached: Redis | null = null;
 
@@ -141,14 +142,23 @@ export async function findResidentByNameAndHouse(
  * no separate `Street` record yet). Once #19 lands a proper Street
  * model, packages will reference `Street.id`.
  */
-export type PackageCarrier =
-  | "DHL"
-  | "Hermes"
-  | "DPD"
-  | "GLS"
-  | "UPS"
-  | "Amazon"
-  | "unknown";
+/**
+ * Single source of truth for the Package carrier enum. The Zod schema
+ * doubles as the runtime validator for tool inputs and as the source
+ * for the `PackageCarrier` TS type — so adding a new carrier here
+ * updates both.
+ */
+export const packageCarrierSchema = z.enum([
+  "DHL",
+  "Hermes",
+  "DPD",
+  "GLS",
+  "UPS",
+  "Amazon",
+  "unknown",
+]);
+
+export type PackageCarrier = z.infer<typeof packageCarrierSchema>;
 
 export type PackageStatus =
   | "held"
@@ -195,4 +205,42 @@ export async function setPackage(pkg: Package): Promise<void> {
   const redis = getRedis();
   await redis.set(packageKey(pkg.id), pkg);
   await redis.sadd(streetPackagesKey(pkg.streetId), pkg.id);
+}
+
+/**
+ * Loads every Package indexed under the given street. Returns the
+ * records in the order Redis hands them back (unsorted). Caller
+ * filters by `status` etc. — the street index intentionally holds
+ * everything (held + picked_up + expired) so historic queries are
+ * still cheap.
+ *
+ * Phase 1 spike scale (a few dozen packages per street, history
+ * accumulating over weeks) makes a full scan + in-memory filter
+ * acceptable. Per PRD §13.6, V2 will replace this with a held-only
+ * Redis set (`street:<id>:held`) + a sorted-set timeline so common
+ * queries don't load the entire history.
+ */
+export async function listPackagesForStreet(
+  streetId: string,
+): Promise<readonly Package[]> {
+  const redis = getRedis();
+  const ids = await redis.smembers(streetPackagesKey(streetId));
+  if (ids.length === 0) return [];
+  const keys = ids.map(packageKey);
+  const rows = await redis.mget<(Package | null)[]>(...keys);
+  return (rows ?? []).filter((p): p is Package => p !== null);
+}
+
+/**
+ * Convenience wrapper around `listPackagesForStreet` that returns only
+ * `status: "held"` records. Used by Flow 1 pickup confirmation (count
+ * of remaining held packages on the same street) and Flow 3 lookup
+ * (search the in-flight set). Same spike-scale tradeoff applies — see
+ * `listPackagesForStreet`.
+ */
+export async function listHeldPackagesForStreet(
+  streetId: string,
+): Promise<readonly Package[]> {
+  const all = await listPackagesForStreet(streetId);
+  return all.filter((p) => p.status === "held");
 }
