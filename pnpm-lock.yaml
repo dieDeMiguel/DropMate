@@ -33,6 +33,9 @@ importers:
       '@typescript/native-preview':
         specifier: 7.0.0-dev.20260331.1
         version: 7.0.0-dev.20260331.1
+      husky:
+        specifier: ^9.1.7
+        version: 9.1.7
       vitest:
         specifier: ^3.0.0
         version: 3.2.4(@types/debug@4.1.13)(@types/node@24.12.4)
@@ -764,6 +767,11 @@ packages:
 
   httpxy@0.5.1:
     resolution: {integrity: sha512-JPhqYiixe1A1I+MXDewWDZqeudBGU8Q9jCHYN8ML+779RQzLjTi78HBvWz4jMxUD6h2/vUL12g4q/mFM0OUw1A==}
+
+  husky@9.1.7:
+    resolution: {integrity: sha512-5gs5ytaNjBrh5Ow3zrvdUUY+0VxIuWVL4i9irt6friV+BqdCfmV11CQTWMiBYWHbXhco+J1kHfTOUkePhCDvMA==}
+    engines: {node: '>=18'}
+    hasBin: true
 
   is-plain-obj@4.1.0:
     resolution: {integrity: sha512-+Pgi+vMuUNkJyExiMBt5IlFoMyKnr5zhJ4Uspz58WOhBF5QoIZkFyNHIbBAtHwzVAgk5RtndVNsDRN61/mmDqg==}
@@ -1792,6 +1800,8 @@ snapshots:
   hookable@6.1.1: {}
 
   httpxy@0.5.1: {}
+
+  husky@9.1.7: {}
 
   is-plain-obj@4.1.0: {}
 

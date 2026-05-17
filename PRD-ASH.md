@@ -433,10 +433,10 @@ The implementing agent should follow three phases. Each phase is independently s
 
 ### Skills to consult
 
-The agent has two skills available and should read both before writing code:
+Skills live **in the repo** at `.claude/skills/<name>/SKILL.md` (symlinks to `.agents/skills/<name>/` which is the canonical source). Claude Code auto-discovers them from the working directory, so the bind-mounted sandbox sees the same skills as the host with no extra setup. The agent should read both before writing code:
 
-- **`use-ash`** (`~/.agents/skills/use-ash/SKILL.md`) — Ash project layout, `defineAgent` / `defineTool` / `defineSchedule` / `defineHook`, channel adapter interface, CLI, sessions, streaming. Authoritative docs: <https://ash.labs.vercel.dev/docs/getting-started>.
-- **`chat-sdk`** (`.claude/skills/chat-sdk/SKILL.md`) — Chat SDK `Chat` class, adapters, event handlers (`onNewMention`, `onDirectMessage`, `onSubscribedMessage`, `onSlashCommand`, `onAction`), JSX cards, modals, streaming, file handling. Includes pointers to `node_modules/chat/docs/*.mdx` for every API surface.
+- **`use-ash`** (`.claude/skills/use-ash/SKILL.md`) — Ash project layout, `defineAgent` / `defineTool` / `defineSchedule` / `defineHook`, channel adapter interface, CLI, sessions, streaming. Authoritative docs: <https://ash.labs.vercel.dev/docs/getting-started>.
+- **`chat-sdk`** (`.claude/skills/chat-sdk/SKILL.md`) — Chat SDK `Chat` class, adapters, event handlers (`onNewMention`, `onDirectMessage`, `onSubscribedMessage`, `onSlashCommand`, `onAction`), JSX cards, modals, streaming, file handling. Sourced from `vercel/chat`'s `skills/chat/SKILL.md` (tracked in `skills-lock.json`) — includes pointers to `node_modules/chat/docs/*.mdx` for every API surface.
 
 For the custom channel specifically, read in order:
 1. `node_modules/experimental-ash/dist/src/channel/adapter.d.ts` — the `ChannelAdapter` interface DropMate's channel must implement.

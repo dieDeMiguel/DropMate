@@ -10,7 +10,8 @@
     "build": "ash build",
     "dev": "ash dev",
     "typecheck": "tsgo",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "prepare": "husky"
   },
   "dependencies": {
     "@chat-adapter/telegram": "^4.28.1",
@@ -23,6 +24,7 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@typescript/native-preview": "7.0.0-dev.20260331.1",
+    "husky": "^9.1.7",
     "vitest": "^3.0.0"
   }
 }
