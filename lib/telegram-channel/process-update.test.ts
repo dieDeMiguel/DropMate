@@ -63,7 +63,7 @@ interface BuiltDeps {
   getSessionIdForChat: ReturnType<typeof vi.fn>;
   setSessionIdForChat: ReturnType<typeof vi.fn>;
   drainSession: ReturnType<typeof vi.fn>;
-  fetchFile: ReturnType<typeof vi.fn>;
+  getFileUrl: ReturnType<typeof vi.fn>;
   parseLabel: ReturnType<typeof vi.fn>;
   answerCallback: ReturnType<typeof vi.fn>;
   stripKeyboard: ReturnType<typeof vi.fn>;
@@ -78,7 +78,7 @@ function buildDeps(overrides: {
   existingSessionId?: string | null;
   session?: Session;
   expectedSecret?: string | undefined;
-  fetchedFile?: { bytes: Uint8Array; mediaType: string };
+  fileUrl?: string;
   parsedLabel?: ParsedLabel | null;
   packageRecipientId?: string | null;
 } = {}): BuiltDeps {
@@ -90,13 +90,11 @@ function buildDeps(overrides: {
     .mockResolvedValue(overrides.existingSessionId ?? null);
   const setSessionIdForChat = vi.fn().mockResolvedValue(undefined);
   const drainSession = vi.fn().mockResolvedValue(undefined);
-  const fetchFile = vi
+  const getFileUrl = vi
     .fn()
     .mockResolvedValue(
-      overrides.fetchedFile ?? {
-        bytes: new Uint8Array([0xff, 0xd8, 0xff, 0xe0]),
-        mediaType: "image/jpeg",
-      },
+      overrides.fileUrl ??
+        "https://api.telegram.org/file/bot111:AAA/photos/file_42.jpg",
     );
   const defaultParsedLabel: ParsedLabel = {
     carrier: "DHL",
@@ -124,7 +122,7 @@ function buildDeps(overrides: {
     getSessionIdForChat,
     setSessionIdForChat,
     drainSession,
-    fetchFile,
+    getFileUrl,
     parseLabel,
     answerCallback,
     stripKeyboard,
@@ -137,7 +135,7 @@ function buildDeps(overrides: {
       getSessionIdForChat,
       setSessionIdForChat,
       drainSession,
-      fetchFile,
+      getFileUrl,
       parseLabel,
       answerCallback,
       stripKeyboard,
@@ -299,9 +297,10 @@ describe("processInboundTelegramUpdate", () => {
   });
 
   it("parses the label via parseLabel and forwards a synthetic text message naming the extracted fields", async () => {
-    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
-    const { deps, sendToAsh, fetchFile, parseLabel } = buildDeps({
-      fetchedFile: { bytes, mediaType: "image/png" },
+    const fileUrl =
+      "https://api.telegram.org/file/bot111:AAA/photos/file_99.jpg";
+    const { deps, sendToAsh, getFileUrl, parseLabel } = buildDeps({
+      fileUrl,
       parsedLabel: {
         carrier: "DHL",
         recipientName: "Natascha Elter",
@@ -329,18 +328,17 @@ describe("processInboundTelegramUpdate", () => {
     const res = await processInboundTelegramUpdate(makeRequest(update), deps);
     expect(res.status).toBe(204);
 
-    expect(fetchFile).toHaveBeenCalledWith("large");
+    expect(getFileUrl).toHaveBeenCalledWith("large");
 
-    // parseLabel receives the bytes (base64-encoded) + mediaType + caption.
+    // parseLabel receives the URL + caption — no bytes, no mediaType. The
+    // Gateway server fetches the URL itself; passing inline bytes would
+    // make the Gateway client emit a `data:` URI the server rejects.
     expect(parseLabel).toHaveBeenCalledTimes(1);
     const parseArgs = parseLabel.mock.calls[0]![0];
-    expect(parseArgs.mediaType).toBe("image/png");
+    expect(parseArgs.imageUrl).toBe(fileUrl);
     expect(parseArgs.caption).toBe("Paket für Natascha");
-    expect(typeof parseArgs.imageBase64).toBe("string");
-    expect(parseArgs.imageBase64.length).toBeGreaterThan(0);
-    // Round-trip the base64 — orchestrator must encode the bytes faithfully.
-    const decoded = Buffer.from(parseArgs.imageBase64, "base64");
-    expect(decoded.equals(Buffer.from(bytes))).toBe(true);
+    expect(parseArgs.imageBase64).toBeUndefined();
+    expect(parseArgs.mediaType).toBeUndefined();
 
     const [message, options] = sendToAsh.mock.calls[0]!;
     expect(typeof message).toBe("string");
@@ -362,7 +360,7 @@ describe("processInboundTelegramUpdate", () => {
   });
 
   it("substitutes a placeholder caption when a photo arrives without text", async () => {
-    const { deps, sendToAsh, fetchFile, parseLabel } = buildDeps();
+    const { deps, sendToAsh, getFileUrl, parseLabel } = buildDeps();
 
     const update = {
       update_id: 2,
@@ -377,7 +375,7 @@ describe("processInboundTelegramUpdate", () => {
 
     await processInboundTelegramUpdate(makeRequest(update), deps);
 
-    expect(fetchFile).toHaveBeenCalledWith("only");
+    expect(getFileUrl).toHaveBeenCalledWith("only");
     // No caption passed to parseLabel when the user didn't send one.
     const parseArgs = parseLabel.mock.calls[0]![0];
     expect(parseArgs.caption).toBeUndefined();
@@ -460,9 +458,9 @@ describe("processInboundTelegramUpdate", () => {
     expect(message).toContain("[photo received, label could not be parsed]");
   });
 
-  it("falls back to the parse-failure message when fetchFile throws", async () => {
-    const { deps, sendToAsh, parseLabel, fetchFile } = buildDeps();
-    fetchFile.mockRejectedValueOnce(new Error("Bot API 404"));
+  it("falls back to the parse-failure message when getFileUrl throws", async () => {
+    const { deps, sendToAsh, parseLabel, getFileUrl } = buildDeps();
+    getFileUrl.mockRejectedValueOnce(new Error("Bot API 404"));
 
     const update = {
       update_id: 6,
@@ -512,15 +510,15 @@ describe("processInboundTelegramUpdate", () => {
     expect(message).not.toContain("tracking=");
   });
 
-  it("does not call fetchFile or parseLabel on text-only updates", async () => {
-    const { deps, fetchFile, parseLabel } = buildDeps();
+  it("does not call getFileUrl or parseLabel on text-only updates", async () => {
+    const { deps, getFileUrl, parseLabel } = buildDeps();
 
     await processInboundTelegramUpdate(
       makeRequest(dmUpdate({ chatId: 5, text: "hi", fromUserId: 99 })),
       deps,
     );
 
-    expect(fetchFile).not.toHaveBeenCalled();
+    expect(getFileUrl).not.toHaveBeenCalled();
     expect(parseLabel).not.toHaveBeenCalled();
   });
 });

@@ -125,6 +125,30 @@ describe("fetchTelegramFile", () => {
     expect(result.mediaType).toBe("image/jpeg");
   });
 
+  it("falls back to image/jpeg when the CDN returns a non-image content-type (e.g. application/octet-stream)", async () => {
+    // Reproduces the production failure: Telegram's file CDN sometimes
+    // serves uploaded photos with `application/octet-stream` instead of
+    // `image/jpeg`. Vision providers reject FilePart unless the
+    // mediaType is `image/*`, so we have to normalise. The bytes are
+    // always JPEG per Bot API `photo[]` semantics.
+    const fetchSpy = vi.mocked(globalThis.fetch);
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ ok: true, result: { file_path: "photos/file_2.jpg" } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    fetchSpy.mockResolvedValueOnce(
+      new Response(new Uint8Array([0xff, 0xd8, 0xff, 0xe0]), {
+        status: 200,
+        headers: { "content-type": "application/octet-stream" },
+      }),
+    );
+
+    const result = await fetchTelegramFile(TOKEN, "abc");
+    expect(result.mediaType).toBe("image/jpeg");
+  });
+
   it("throws when the CDN download returns a non-2xx", async () => {
     const fetchSpy = vi.mocked(globalThis.fetch);
     fetchSpy.mockResolvedValueOnce(

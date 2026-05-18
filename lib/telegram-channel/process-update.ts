@@ -127,38 +127,39 @@ export interface ProcessUpdateDeps {
   /** Starts the outbound drain for the resolved session + chat. */
   readonly drainSession: (session: Session, chatId: number) => Promise<void>;
   /**
-   * Resolves a Telegram `file_id` (from `photo[]`) into the file's
-   * bytes plus media type. Wired by the factory to
-   * `fetchTelegramFile(token, id)` with the closure-captured token;
+   * Resolves a Telegram `file_id` (from `photo[]`) into a publicly-
+   * fetchable HTTPS URL on the Telegram file CDN. Wired by the factory
+   * to `getTelegramFileUrl(token, id)` with the closure-captured token;
    * tests pass a spy.
    *
-   * We inline the bytes (rather than handing the model provider a URL
-   * with the bot token embedded) because (a) some AI Gateway routes
-   * reject credential-bearing URLs and (b) AI SDK 7 multimodal parts
-   * are most reliable with explicit `mediaType` + bytes packaged as a
-   * `FilePart` ({ type: "file", data: bytes, mediaType }). The legacy
-   * `ImagePart` shape ({ type: "image", image: bytes }) is deprecated
-   * in AI SDK 7 and the Vercel AI Gateway rejects the data: URI it
-   * serializes to with "Unsupported file URI type".
+   * The URL embeds the bot token — that was the original concern in
+   * #41, which we tried to address by switching to inline bytes. But
+   * the Vercel AI Gateway client converts inline `Uint8Array` →
+   * `data:image/jpeg;base64,...` URI, and the Gateway *server* rejects
+   * `data:` URIs with "Unsupported file URI type". The supported
+   * shape on the Gateway is an actual HTTP(S) URL it can fetch
+   * server-side. We accept the token-in-URL exposure because the URL
+   * never reaches end users — it's only handed to the Gateway for a
+   * one-shot server-to-server fetch, and Telegram's file URLs expire
+   * in ~1h. If defense-in-depth becomes important, swap to a Vercel
+   * Blob proxy here (upload bytes once, hand the Blob URL to the
+   * Gateway).
    */
-  readonly fetchFile: (fileId: string) => Promise<{
-    readonly bytes: Uint8Array;
-    readonly mediaType: string;
-  }>;
+  readonly getFileUrl: (fileId: string) => Promise<string>;
   /**
    * Vision parser for shipping-label photos. Wired by the factory to
-   * `agent/tools/parse_label.ts`'s `execute({ imageBase64, mediaType,
-   * caption })`. The orchestrator calls this exactly once per inbound
-   * photo update; the result is folded into a synthetic text message
-   * the conversational agent reads as if the user had typed it.
+   * `agent/tools/parse_label.ts`'s `execute({ imageUrl, caption })`.
+   * The orchestrator calls this exactly once per inbound photo
+   * update; the result is folded into a synthetic text message the
+   * conversational agent reads as if the user had typed it.
    *
-   * Returns `null` when parsing fails — the orchestrator falls back
-   * to a generic "I received a photo but couldn't read it" prompt so
-   * the agent can ask the holder to retype the recipient.
+   * Throws when the underlying model + fallback both fail — the
+   * orchestrator's catch logs the error and falls back to a generic
+   * "I received a photo but couldn't read it" prompt so the agent
+   * can ask the holder to retype the recipient.
    */
   readonly parseLabel: (input: {
-    imageBase64: string;
-    mediaType: string;
+    imageUrl: string;
     caption?: string;
   }) => Promise<{
     carrier: string;
@@ -312,16 +313,7 @@ async function handleCallbackQuery(
 }
 
 /**
- * Encode bytes as base64 without depending on Node's `Buffer` typing
- * surfacing into the orchestrator's signature — the tool's `execute`
- * handles the decode side itself.
- */
-function bytesToBase64(bytes: Uint8Array): string {
-  return Buffer.from(bytes).toString("base64");
-}
-
-/**
- * Photo path: fetch the file, parse the label via the vision tool,
+ * Photo path: resolve the file URL, parse the label via the vision tool,
  * and produce a synthetic text message the conversational agent reads
  * as if the user typed it. Tolerates failure at every step — the
  * agent's final-resort message tells it a photo arrived but couldn't
@@ -342,13 +334,32 @@ async function buildSyntheticPhotoMessage(
 
   let parsed: Awaited<ReturnType<ProcessUpdateDeps["parseLabel"]>> = null;
   try {
-    const { bytes, mediaType } = await deps.fetchFile(fileId);
+    const imageUrl = await deps.getFileUrl(fileId);
     parsed = await deps.parseLabel({
-      imageBase64: bytesToBase64(bytes),
-      mediaType,
+      imageUrl,
       caption: captionText,
     });
-  } catch {
+    // Log every successful parse so we can tell apart "model never got
+    // called" from "model returned confidence=low with no recipientName".
+    // URL excluded from the log (contains the bot token); only the
+    // structured output and chatId.
+    console.info(
+      "[parse_label] ok for chatId",
+      inbound.chatId,
+      "result:",
+      parsed,
+    );
+  } catch (err) {
+    // Don't crash the turn — the agent has a "couldn't parse" branch that
+    // asks the holder to retype. But DO log: silent failure here is what
+    // hid Gateway model/auth errors during #43 item 1 rollout, so every
+    // photo turn that ends in "couldn't read the label" now leaves a trail.
+    console.error(
+      "[parse_label] failed for chatId",
+      inbound.chatId,
+      "mediaType-via-fetch (sanitised) — error:",
+      err instanceof Error ? { name: err.name, message: err.message, stack: err.stack } : err,
+    );
     parsed = null;
   }
 
