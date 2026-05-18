@@ -5,8 +5,17 @@
  * Routes through Vercel AI Gateway with an explicit model-level
  * fallback chain:
  *
- *   primary:  google/gemma-4-31b-it    — cheap, native vision
- *   fallback: anthropic/claude-opus-4.5 — stronger OCR + multilingual
+ *   primary:  google/gemini-3.1-flash-lite — cheap, native vision
+ *   fallback: anthropic/claude-sonnet-4.6  — stronger OCR + multilingual
+ *
+ * Earlier iterations of this tool used `google/gemma-4-31b-it` →
+ * `anthropic/claude-opus-4.5`. Gemma 4 is text-only on the gateway
+ * (Gemma open-weight models don't include vision in the IT variants);
+ * passing a `FilePart` to it threw at the provider boundary and the
+ * fallback to Opus 4.5 (now superseded) didn't reliably rescue the
+ * call. Gemini 3.1 Flash Lite is the cheapest current vision-native
+ * Gemini and Sonnet 4.6 is the current Anthropic price/perf sweet
+ * spot for OCR.
  *
  * Model-level fallback (try primary → on error, try fallback) is
  * implemented here rather than via the Gateway's `order` provider
@@ -37,8 +46,8 @@ import { defineTool } from "experimental-ash/tools";
 import { generateObject } from "ai";
 import { z } from "zod";
 
-const PRIMARY_MODEL = "google/gemma-4-31b-it";
-const FALLBACK_MODEL = "anthropic/claude-opus-4.5";
+export const PRIMARY_MODEL = "google/gemini-3.1-flash-lite";
+export const FALLBACK_MODEL = "anthropic/claude-sonnet-4.6";
 
 const inputSchema = z.object({
   imageBase64: z
@@ -179,12 +188,13 @@ async function runVisionModel(
 export default defineTool({
   description:
     "Extract carrier, tracking number, recipient name, and recipient " +
-    "house number from a shipping-label photo. Tries Gemma 4 31B (vision) " +
-    "first, then falls back to Claude Opus 4.5 if the primary errors. " +
-    "Routes via Vercel AI Gateway. Returns `{ carrier, trackingNumber?, " +
-    "recipientName?, recipientHouseNumber?, confidence, reason }`. The " +
-    "orchestrator calls this on every inbound photo before the agent " +
-    "runs; the conversational model only ever sees the parsed text form.",
+    "house number from a shipping-label photo. Tries Gemini 3.1 Flash " +
+    "Lite (vision) first, then falls back to Claude Sonnet 4.6 if the " +
+    "primary errors. Routes via Vercel AI Gateway. Returns `{ carrier, " +
+    "trackingNumber?, recipientName?, recipientHouseNumber?, confidence, " +
+    "reason }`. The orchestrator calls this on every inbound photo " +
+    "before the agent runs; the conversational model only ever sees " +
+    "the parsed text form.",
   inputSchema,
   async execute({ imageBase64, mediaType, caption }) {
     const imageBytes = Uint8Array.from(Buffer.from(imageBase64, "base64"));
