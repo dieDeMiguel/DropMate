@@ -107,6 +107,12 @@ export function telegramChannel(config: TelegramChannelConfig) {
               drainSessionToTelegram(session, chatId, { token }),
             fetchFile: (fileId) => fetchTelegramFile(token, fileId),
             parseLabel: async (input) => {
+              // No silent catch: errors propagate to process-update.ts's
+              // catch which logs with stack + chatId. A silent `return
+              // null` here hid an entire failure chain in production
+              // (mediaType=application/octet-stream → provider reject →
+              // primary throw → fallback throw → primary rethrow →
+              // silenced by this catch → null → "couldn't read" reply).
               const execute = parseLabelTool.execute as (
                 input: unknown,
                 options: unknown,
@@ -118,14 +124,10 @@ export function telegramChannel(config: TelegramChannelConfig) {
                 confidence: "high" | "medium" | "low";
                 reason: string;
               }>;
-              try {
-                return await execute(input, {
-                  toolCallId: `parse_label:${Date.now()}`,
-                  messages: [],
-                });
-              } catch {
-                return null;
-              }
+              return execute(input, {
+                toolCallId: `parse_label:${Date.now()}`,
+                messages: [],
+              });
             },
             answerCallback: (callbackId, text) =>
               answerCallbackQuery(token, callbackId, text),

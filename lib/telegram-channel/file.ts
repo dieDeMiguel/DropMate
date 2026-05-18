@@ -109,7 +109,17 @@ export async function fetchTelegramFile(
       `Telegram file download failed: ${res.status} ${res.statusText} ${body}`,
     );
   }
-  const mediaType = res.headers.get("content-type") ?? "image/jpeg";
+  // Normalise mediaType: vision providers reject FilePart unless the
+  // mediaType is `image/*`. Telegram's file CDN sometimes returns
+  // `application/octet-stream` (observed in production for photos
+  // uploaded from the iOS client) — falling back to `image/jpeg`
+  // matches the actual bytes since `photo[]` updates are always JPEG
+  // per the Bot API spec. Only accept the CDN's value when it is
+  // already an image/* type.
+  const rawContentType = res.headers.get("content-type") ?? "";
+  const mediaType = rawContentType.startsWith("image/")
+    ? rawContentType
+    : "image/jpeg";
   const bytes = new Uint8Array(await res.arrayBuffer());
   return { bytes, mediaType };
 }
