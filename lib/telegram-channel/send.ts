@@ -62,17 +62,28 @@ export interface TelegramMessageEntity {
   readonly user: { readonly id: number };
 }
 
+/**
+ * Result of a successful `sendMessage` call. The Bot API returns a full
+ * `Message` object — we only surface the fields downstream callers care
+ * about (currently just `messageId`, used by `/receive` to remember the
+ * group card so it can later be edited). Empty when the call short-
+ * circuited on empty text.
+ */
+export interface SendTelegramMessageResult {
+  readonly messageId?: number;
+}
+
 export async function sendTelegramMessage(
   token: string,
   chatId: number,
   text: string,
   replyMarkup?: InlineKeyboardMarkup,
   entities?: ReadonlyArray<TelegramMessageEntity>,
-): Promise<void> {
+): Promise<SendTelegramMessageResult> {
   if (token.length === 0) {
     throw new Error("Telegram bot token is empty.");
   }
-  if (text.length === 0) return;
+  if (text.length === 0) return {};
   const body: Record<string, unknown> = { chat_id: chatId, text };
   if (replyMarkup) body.reply_markup = replyMarkup;
   if (entities && entities.length > 0) body.entities = entities;
@@ -90,4 +101,16 @@ export async function sendTelegramMessage(
       `Telegram sendMessage failed: ${res.status} ${res.statusText} ${failureBody}`,
     );
   }
+  // The Bot API returns `{ ok: true, result: { message_id, ... } }`. Be
+  // tolerant of unexpected shapes — older mock responses in tests may
+  // only return `{ ok: true }` without a `result` block; `messageId`
+  // simply stays absent in that case.
+  let parsed: { result?: { message_id?: number } } | null = null;
+  try {
+    parsed = (await res.json()) as { result?: { message_id?: number } };
+  } catch {
+    parsed = null;
+  }
+  const messageId = parsed?.result?.message_id;
+  return typeof messageId === "number" ? { messageId } : {};
 }

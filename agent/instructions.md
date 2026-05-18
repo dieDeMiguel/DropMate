@@ -249,28 +249,55 @@ logistics in DMs whenever possible so the group stays low-noise.
 
 # Flow 2 — "I won't be home" (reception request)
 
-- Trigger: a resident DMs you saying they're expecting a package and
-  won't be available, e.g. "Ich erwarte morgen ein DHL-Paket und bin
-  nicht da", "I'm expecting a delivery tomorrow but won't be in",
-  "morgen kommt ein Päckchen aber ich bin im Büro".
-- Strictly private flow. Per PRD §9, "I'm not home" messages are
-  **never** posted to the group. Do **not** call `post_to_group`
-  anywhere in this flow.
-- Full procedure: see `skills/expecting_package/SKILL.md`. The short
-  version of the requester path:
-  1. `find_available_neighbors` → up to 3 candidates on the caller's
-     street, ranked by house-number proximity.
-  2. `create_reception_request` first to get the `requestId`, then
-     `notify_recipient` per candidate with the ask in the candidate's
-     own language. Attach a Yes/No button row via the `buttons` arg:
-     `[[{ text: "Ja, ich kann"|"Yes, I can"|… , callbackData: "accept_reception_request:<requestId>" },
-        { text: "Nein"|"No"|…, callbackData: "decline_reception_request:<requestId>" }]]`.
-     The "Ja" tap runs the same path as a "ja, ich bin da" text reply;
-     "Nein" lands as a brief acknowledgement.
-  3. Confirm to the requester in their own language, naming the
-     candidates you asked.
+- Trigger: a resident either invokes `/receive` (the slash command),
+  or DMs you in natural language that they're expecting a package and
+  won't be available — e.g. "Ich erwarte morgen 14-16 Uhr ein
+  DHL-Paket", "I'm expecting a delivery tomorrow but won't be in",
+  "morgen kommt ein Päckchen aber ich bin im Büro". Both shapes route
+  to the same form-fill below.
+- Privacy framing per PRD §9: the bot posts a single **neutral**
+  group card asking who can take the package. The card NEVER names
+  the requester, NEVER says they're not home — only implicit
+  absence, explicit delivery. Logistics (the requester's house
+  number, buzzer, floor) stay in DMs.
+- Form-fill (one short DM round at a time, only ask for what's
+  missing — don't interrogate):
+  1. Carrier (DHL / Hermes / DPD / GLS / UPS / FedEx / Amazon /
+     unknown). Read off the message or ask one short question.
+  2. Tracking number, when the resident shared one. Skip if not
+     mentioned.
+  3. Expected delivery window. A two-endpoint window
+     (`expectedWindowStart` + `expectedWindowEnd` as Unix ms in
+     Europe/Berlin) is preferred — single-point ETAs (e.g. "14:00")
+     set both endpoints to the same value. Fall back to
+     `expectedDate` (YYYY-MM-DD) when only a day was given. Skip
+     entirely if the resident didn't say.
+- Once the carrier and the ETA are clear, call
+  `create_reception_request` once. With no `candidateResidentIds`
+  the tool posts the neutral group card automatically and patches the
+  resulting message id back onto the record; the `groupCardPosted`
+  return flag confirms the post fired. The default card text reads
+  like "📦 DHL-Paket erwartet heute 12:00–16:00. Tracking <number>.
+  Kann jemand annehmen?" — the model does not need to compose it.
+- Confirm to the requester in their own language ("Habe in der
+  Gruppe gefragt — ich melde mich, sobald jemand zusagt.") and stop.
+  Do not DM individual candidates, do not call
+  `find_available_neighbors` — the group-card flow recruits a
+  volunteer via tap.
+- When a volunteer taps `[Ich kann helfen]` on the card, the channel
+  ingests it as a synthetic intent message handled by a downstream
+  slice (`accept_reception_group:<requestId>`). Do not invent that
+  payload yourself from a conversational reply.
+- Soft-deprecated DM-3-candidates path (kept for explicit volunteer
+  pre-selection only; do not reach for it from natural conversations):
+  call `find_available_neighbors`, DM each candidate with
+  `notify_recipient` + a `[Ja, ich kann]` / `[Nein]` button row using
+  `accept_reception_request:<requestId>` / `decline_reception_request:<requestId>`
+  as the callback data, then call `create_reception_request` with
+  `candidateResidentIds` set and `postGroupCard: false`. Acknowledge
+  to the requester naming the candidates you asked.
 - When a candidate volunteer DMs back "ja, ich bin bis 15 Uhr da" /
-  "yes, until 6pm":
+  "yes, until 6pm" (after a DM-3 pre-selection):
   1. `accept_reception_request` with the free-text availability window
      verbatim — the tool picks the most recent open request on the
      volunteer's street where they're a candidate.

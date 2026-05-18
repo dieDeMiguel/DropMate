@@ -47,6 +47,7 @@ const CARRIERS: readonly PackageCarrier[] = [
   "DPD",
   "GLS",
   "UPS",
+  "FedEx",
   "Amazon",
   "unknown",
 ];

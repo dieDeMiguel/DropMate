@@ -181,6 +181,7 @@ export const packageCarrierSchema = z.enum([
   "DPD",
   "GLS",
   "UPS",
+  "FedEx",
   "Amazon",
   "unknown",
 ]);
@@ -566,6 +567,43 @@ export interface ReceptionRequest {
   readonly status: ReceptionRequestStatus;
   readonly createdAt: number;
   readonly respondedAt: number | null;
+  /**
+   * Tracking number captured from the requester's screenshot or typed
+   * input. Surfaces verbatim on the public group card so a volunteer
+   * can match the request to a tracking page or a label scan later.
+   */
+  readonly trackingNumber?: string;
+  /**
+   * Telegram file_id of the original tracking-page screenshot, when the
+   * request was entered via the screenshot path. Stored so a volunteer
+   * who accepts can be shown the source image if `parseConfidence` was
+   * `"low"`. Wired up by a downstream slice — not consumed here.
+   */
+  readonly screenshotFileId?: string;
+  /**
+   * Optional ETA window, both endpoints as Unix ms. A single-point ETA
+   * (e.g. "14:00") sets both fields to the same value. Absent when the
+   * requester didn't pin a time.
+   */
+  readonly expectedWindowStartAt?: number;
+  readonly expectedWindowEndAt?: number;
+  /**
+   * Group chat id + message id of the public `/receive` card. Populated
+   * by `create_reception_request` after the card is posted, so the
+   * downstream accept/timeout/fulfilment slices can edit or strip it.
+   * Absent on records created via the soft-deprecated DM-3-candidates
+   * path — those records noop on group-card edits.
+   */
+  readonly groupCardChatId?: number;
+  readonly groupCardMessageId?: number;
+  /**
+   * Vision-tool confidence when the request entered via the screenshot
+   * path. Mirrors `parse_label`'s `confidence` field. Drives the rich
+   * volunteer DM in the accept flow: on `"low"`, the volunteer is shown
+   * the original screenshot for verification. Absent on the slash-command
+   * and natural-language paths.
+   */
+  readonly parseConfidence?: "high" | "medium" | "low";
 }
 
 const RECEPTION_REQUEST_KEY_PREFIX = "reception_request:";

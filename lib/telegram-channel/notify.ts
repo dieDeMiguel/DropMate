@@ -20,6 +20,7 @@
 import {
   sendTelegramMessage,
   type InlineKeyboardMarkup,
+  type SendTelegramMessageResult,
   type TelegramMessageEntity,
 } from "./send.js";
 import type { Resident } from "../redis.js";
@@ -29,8 +30,8 @@ export async function dmResident(
   resident: Resident,
   text: string,
   replyMarkup?: InlineKeyboardMarkup,
-): Promise<void> {
-  await sendTelegramMessage(
+): Promise<SendTelegramMessageResult> {
+  return sendTelegramMessage(
     token,
     Number(resident.platformId),
     text,
@@ -44,6 +45,6 @@ export async function postToGroup(
   text: string,
   replyMarkup?: InlineKeyboardMarkup,
   entities?: ReadonlyArray<TelegramMessageEntity>,
-): Promise<void> {
-  await sendTelegramMessage(token, groupChatId, text, replyMarkup, entities);
+): Promise<SendTelegramMessageResult> {
+  return sendTelegramMessage(token, groupChatId, text, replyMarkup, entities);
 }
