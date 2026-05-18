@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   answerCallbackQuery,
   editMessageReplyMarkup,
+  editMessageText,
 } from "./keyboards.js";
 
 const TOKEN = "123456:abcdef";
@@ -141,6 +142,98 @@ describe("editMessageReplyMarkup", () => {
     );
 
     await expect(editMessageReplyMarkup(TOKEN, 1, 999)).rejects.toThrow(
+      /400 Bad Request.*Message to edit not found/,
+    );
+  });
+});
+
+describe("editMessageText", () => {
+  const fetchMock = vi.fn();
+
+  beforeEach(() => {
+    fetchMock.mockReset();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("POSTs chat_id + message_id + text to editMessageText", async () => {
+    fetchMock.mockResolvedValue(new Response("", { status: 200 }));
+
+    await editMessageText(TOKEN, 42, 555, "✅ angenommen von Marlene");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe(
+      `https://api.telegram.org/bot${TOKEN}/editMessageText`,
+    );
+    expect(JSON.parse(init?.body as string)).toEqual({
+      chat_id: 42,
+      message_id: 555,
+      text: "✅ angenommen von Marlene",
+    });
+  });
+
+  it("includes entities only when non-empty", async () => {
+    fetchMock.mockResolvedValue(new Response("", { status: 200 }));
+
+    const entities = [
+      {
+        type: "text_mention" as const,
+        offset: 16,
+        length: 7,
+        user: { id: 999 },
+      },
+    ];
+    await editMessageText(TOKEN, 42, 555, "✅ angenommen von Marlene", entities);
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect(JSON.parse(init?.body as string)).toEqual({
+      chat_id: 42,
+      message_id: 555,
+      text: "✅ angenommen von Marlene",
+      entities,
+    });
+  });
+
+  it("omits the entities field when an empty array is supplied", async () => {
+    fetchMock.mockResolvedValue(new Response("", { status: 200 }));
+
+    await editMessageText(TOKEN, 42, 555, "text", []);
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect(JSON.parse(init?.body as string)).toEqual({
+      chat_id: 42,
+      message_id: 555,
+      text: "text",
+    });
+  });
+
+  it("throws when token is empty without hitting the network", async () => {
+    await expect(editMessageText("", 1, 1, "x")).rejects.toThrow(
+      /token is empty/i,
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("throws when text is empty", async () => {
+    await expect(editMessageText(TOKEN, 1, 1, "")).rejects.toThrow(
+      /text must not be empty/i,
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("throws with status + body when the API responds non-2xx", async () => {
+    fetchMock.mockResolvedValue(
+      new Response("Message to edit not found", {
+        status: 400,
+        statusText: "Bad Request",
+      }),
+    );
+
+    await expect(editMessageText(TOKEN, 1, 999, "x")).rejects.toThrow(
       /400 Bad Request.*Message to edit not found/,
     );
   });

@@ -38,6 +38,7 @@ import { defineChannel, GET, POST } from "experimental-ash/channels";
 import parseLabelTool from "../../agent/tools/parse_label.js";
 import {
   getPackage,
+  getResident,
   getSessionIdForChat,
   setSessionIdForChat,
   upsertKnownTelegramUser,
@@ -164,6 +165,10 @@ export function telegramChannel(config: TelegramChannelConfig) {
             },
             recordTelegramObservation: async (input) => {
               await upsertKnownTelegramUser(input);
+            },
+            isRegisteredResident: async (userId) => {
+              const resident = await getResident(String(userId));
+              return resident !== null;
             },
           });
         },

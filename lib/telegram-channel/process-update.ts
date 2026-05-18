@@ -213,6 +213,15 @@ export interface ProcessUpdateDeps {
     readonly languageCode?: string;
     readonly chatId: number;
   }) => Promise<void>;
+  /**
+   * Pre-handler scope check for `accept_reception_group` taps (#52).
+   * Returns `true` when the tapping user has a `Resident` record (i.e.
+   * has already `/register`ed); `false` otherwise. Implemented in the
+   * factory via `getResident(String(userId))`. Used to short-circuit
+   * the tap with a toast + leave the button live, so the user can
+   * `/register` and retry without the card going dead.
+   */
+  readonly isRegisteredResident: (userId: number) => Promise<boolean>;
 }
 
 /**
@@ -254,6 +263,10 @@ function synthesizeCallbackMessage(parsed: ParsedCallbackData): string {
       return parsed.id
         ? `[button-tap] I'm accepting the reception request ${parsed.id}. Treat this as 'yes, I can receive'; if I haven't said when, ask for the availability window.`
         : "[button-tap] I'm accepting a reception request but no id was attached — ignore.";
+    case "accept_reception_group":
+      return parsed.id
+        ? `[button-tap] I'm tapping [Ich kann helfen] on the public /receive card for reception request ${parsed.id}. Ask me one short question for my availability window (in my language), then call accept_reception_request with requestId="${parsed.id}". After the tool returns: edit the group card in place to "✅ angenommen von <volunteer.name>" via editGroupCard using the returned groupCardChatId/groupCardMessageId and a text_mention entity on my name; DM me the operational handoff (requester's house/buzzer/floor + carrier + tracking + window, and the screenshotFileId if parseConfidence was "low"); DM the requester a short named confirmation in their language.`
+        : "[button-tap] I'm tapping the public /receive card but no request id was attached — ignore.";
     case "decline_reception_request":
       return parsed.id
         ? `[button-tap] I'm declining the reception request ${parsed.id}. Acknowledge briefly in my language and don't ask follow-up questions.`
@@ -330,6 +343,27 @@ async function handleCallbackQuery(
         .answerCallback(cb.callbackId, "Only the recipient can confirm pickup.")
         .catch(() => undefined);
       // Leave the keyboard intact — the actual recipient may still tap.
+      return new Response(null, { status: 204 });
+    }
+  }
+
+  // `accept_reception_group` taps (#52): the volunteer must be a
+  // registered resident. Telegram bot DMs require the recipient to
+  // have started a chat with the bot at least once, and accept tools
+  // throw on unregistered callers anyway — short-circuit with a toast
+  // so the user can `/register` and retry. Keyboard stays live so the
+  // card doesn't go dead on a single wrong tap.
+  if (parsed.action === "accept_reception_group" && parsed.id) {
+    const isRegistered = await deps
+      .isRegisteredResident(cb.fromUserId)
+      .catch(() => false);
+    if (!isRegistered) {
+      await deps
+        .answerCallback(
+          cb.callbackId,
+          "Bitte zuerst /register, um Paketen zu helfen.",
+        )
+        .catch(() => undefined);
       return new Response(null, { status: 204 });
     }
   }

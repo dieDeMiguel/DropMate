@@ -104,6 +104,13 @@ function seedRequest(overrides: Partial<ReceptionRequest> & { id: string; street
     status: overrides.status ?? "open",
     createdAt: overrides.createdAt ?? Date.now(),
     respondedAt: overrides.respondedAt ?? null,
+    trackingNumber: overrides.trackingNumber,
+    screenshotFileId: overrides.screenshotFileId,
+    expectedWindowStartAt: overrides.expectedWindowStartAt,
+    expectedWindowEndAt: overrides.expectedWindowEndAt,
+    groupCardChatId: overrides.groupCardChatId,
+    groupCardMessageId: overrides.groupCardMessageId,
+    parseConfidence: overrides.parseConfidence,
   };
   requestStore.set(r.id, r);
   if (!streetIndex.has(r.streetId)) streetIndex.set(r.streetId, new Set());
@@ -131,7 +138,13 @@ describe("accept_reception_request", () => {
   });
 
   it("flips an open request to matched and records volunteer + availability", async () => {
-    seedResident({ platformId: "marlene", name: "Marlene Hartmann", houseNumber: "88" });
+    seedResident({
+      platformId: "marlene",
+      name: "Marlene Hartmann",
+      houseNumber: "88",
+      floor: "IV",
+      buzzerName: "Hartmann",
+    });
     seedResident({ platformId: "patricia", name: "Patricia Höfer", houseNumber: "90" });
     seedRequest({
       id: "req-1",
@@ -146,6 +159,17 @@ describe("accept_reception_request", () => {
     })) as {
       request: ReceptionRequest;
       requester: { id: string; name: string; houseNumber: string; language: string | null };
+      volunteer: {
+        id: string;
+        name: string;
+        houseNumber: string;
+        floor: string | null;
+        buzzerName: string | null;
+        language: string | null;
+        platformId: string;
+      };
+      groupCardChatId: number | null;
+      groupCardMessageId: number | null;
     };
 
     expect(result.request.id).toBe("req-1");
@@ -163,6 +187,18 @@ describe("accept_reception_request", () => {
       houseNumber: "90",
       language: "de",
     });
+    expect(result.volunteer).toEqual({
+      id: "marlene",
+      name: "Marlene Hartmann",
+      houseNumber: "88",
+      floor: "IV",
+      buzzerName: "Hartmann",
+      language: "de",
+      platformId: "marlene",
+    });
+    // No group card on this soft-deprecated DM-3 request.
+    expect(result.groupCardChatId).toBeNull();
+    expect(result.groupCardMessageId).toBeNull();
   });
 
   it("picks the most recent open request when several exist", async () => {
@@ -283,6 +319,98 @@ describe("accept_reception_request", () => {
     await expect(
       runExecute({ availability: "until 18:00" }),
     ).rejects.toThrow(/not a registered resident/);
+  });
+
+  it("accepts a group-card request with empty candidate list when requestId is supplied", async () => {
+    seedResident({
+      platformId: "marlene",
+      name: "Marlene Hartmann",
+      houseNumber: "88",
+      floor: "IV",
+      buzzerName: "Hartmann",
+    });
+    seedResident({ platformId: "patricia", name: "Patricia", houseNumber: "90" });
+    seedRequest({
+      id: "req-group",
+      streetId: "Methfesselstraße",
+      requesterResidentId: "patricia",
+      candidateResidentIds: [],
+      groupCardChatId: -100123,
+      groupCardMessageId: 777,
+      trackingNumber: "AB123",
+      expectedWindowStartAt: Date.parse("2026-05-17T12:00:00Z"),
+      expectedWindowEndAt: Date.parse("2026-05-17T16:00:00Z"),
+    });
+    withTelegramSession("marlene");
+
+    const result = (await runExecute({
+      availability: "bis 16 Uhr",
+      requestId: "req-group",
+    })) as {
+      request: ReceptionRequest;
+      volunteer: { id: string; floor: string | null; buzzerName: string | null };
+      groupCardChatId: number | null;
+      groupCardMessageId: number | null;
+    };
+
+    expect(result.request.status).toBe("matched");
+    expect(result.request.volunteerResidentId).toBe("marlene");
+    expect(result.groupCardChatId).toBe(-100123);
+    expect(result.groupCardMessageId).toBe(777);
+    expect(result.volunteer.floor).toBe("IV");
+    expect(result.volunteer.buzzerName).toBe("Hartmann");
+    // Original fields preserved on the matched record.
+    expect(result.request.trackingNumber).toBe("AB123");
+    expect(result.request.expectedWindowStartAt).toBe(
+      Date.parse("2026-05-17T12:00:00Z"),
+    );
+  });
+
+  it("rejects a group-card request when the caller is on a different street", async () => {
+    seedResident({
+      platformId: "marlene",
+      name: "Marlene",
+      houseNumber: "88",
+      street: "Other-Straße",
+    });
+    seedResident({ platformId: "patricia", name: "Patricia", houseNumber: "90" });
+    seedRequest({
+      id: "req-group",
+      streetId: "Methfesselstraße",
+      requesterResidentId: "patricia",
+      candidateResidentIds: [],
+      groupCardMessageId: 777,
+    });
+    withTelegramSession("marlene");
+
+    await expect(
+      runExecute({ availability: "x", requestId: "req-group" }),
+    ).rejects.toThrow(/different street|on .* request .* is on/i);
+  });
+
+  it("volunteer.floor and buzzerName default to null when the volunteer has none stored", async () => {
+    seedResident({
+      platformId: "marlene",
+      name: "Marlene",
+      houseNumber: "88",
+      floor: undefined,
+      buzzerName: undefined,
+    });
+    seedResident({ platformId: "patricia", houseNumber: "90" });
+    seedRequest({
+      id: "req-1",
+      streetId: "Methfesselstraße",
+      requesterResidentId: "patricia",
+      candidateResidentIds: ["marlene"],
+    });
+    withTelegramSession("marlene");
+
+    const result = (await runExecute({ availability: "x" })) as {
+      volunteer: { floor: string | null; buzzerName: string | null };
+    };
+
+    expect(result.volunteer.floor).toBeNull();
+    expect(result.volunteer.buzzerName).toBeNull();
   });
 
   it("requester.language defaults to null when the requester has no stored language", async () => {

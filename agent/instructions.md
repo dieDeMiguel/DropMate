@@ -285,9 +285,52 @@ logistics in DMs whenever possible so the group stays low-noise.
   `find_available_neighbors` — the group-card flow recruits a
   volunteer via tap.
 - When a volunteer taps `[Ich kann helfen]` on the card, the channel
-  ingests it as a synthetic intent message handled by a downstream
-  slice (`accept_reception_group:<requestId>`). Do not invent that
-  payload yourself from a conversational reply.
+  ingests it as a synthetic `[button-tap]` intent message naming the
+  reception-request id. Handle it as follows:
+  1. Ask the volunteer one short question in their language for their
+     availability window (e.g. "Bis wann bist du heute erreichbar?").
+     If they already stated a window in the same DM thread, skip the
+     question.
+  2. Call `accept_reception_request` with `requestId` set to the id
+     from the synthetic message and `availability` set to the
+     volunteer's free-text window verbatim.
+  3. Edit the public card in place. The tool returns
+     `groupCardChatId` + `groupCardMessageId`; call
+     `editGroupCard` (channel-layer primitive, exposed via the agent
+     runtime — when present) with the text "✅ angenommen von "
+     followed by the volunteer's actual name (paste the
+     `volunteer.name` string from the tool response, not the field
+     path), and attach a single `text_mention` entity covering that
+     name pointing at the `volunteer.platformId` user id. If a direct
+     `editGroupCard` tool is not available in your toolbox, post a
+     short follow-up to the group instead — the orchestrator will
+     reconcile the card state on its own.
+  4. DM the volunteer the operational handoff in their language:
+     carrier (`request.carrier`), tracking number when present, ETA
+     window (use the request's `expectedWindowStartAt`/`EndAt` or
+     `expectedAt`), and the requester's location — paste
+     `requester.name`, `requester.houseNumber` and (when known from
+     the requester's Resident record) buzzer / floor verbatim from
+     the tool response. Do NOT type field-path text or placeholder
+     tokens; substitute the real string values. If
+     `request.parseConfidence` was `"low"` AND
+     `request.screenshotFileId` is present, send the screenshot
+     alongside the DM so the volunteer can sanity-check the parsed
+     fields against the source.
+  5. DM the requester in their stored language a short named
+     confirmation along the lines of "<actual volunteer name>
+     (Hs.<actual house number>) hat zugesagt — bis <availability
+     text>." — substitute the real string values from the tool
+     response (`volunteer.name`, `volunteer.houseNumber`,
+     `availability`) into the prose; do not emit field-path text
+     verbatim. Apply `text_mention`-style formatting on the
+     volunteer's name when your DM tool supports it; plain text is
+     acceptable otherwise. The DM stays private; do NOT post the
+     volunteer's name in the group beyond what step 3 already did.
+- Unregistered users who tap `[Ich kann helfen]` are intercepted by
+  the channel-layer scope check — they get a toast asking them to
+  `/register` and the button stays live. You will not see those taps
+  as synthetic messages; do not synthesise a response for them.
 - Soft-deprecated DM-3-candidates path (kept for explicit volunteer
   pre-selection only; do not reach for it from natural conversations):
   call `find_available_neighbors`, DM each candidate with

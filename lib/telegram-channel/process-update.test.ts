@@ -69,6 +69,7 @@ interface BuiltDeps {
   stripKeyboard: ReturnType<typeof vi.fn>;
   getPackageRecipientId: ReturnType<typeof vi.fn>;
   recordTelegramObservation: ReturnType<typeof vi.fn>;
+  isRegisteredResident: ReturnType<typeof vi.fn>;
 }
 
 type ParsedLabel = NonNullable<
@@ -82,6 +83,7 @@ function buildDeps(overrides: {
   fileUrl?: string;
   parsedLabel?: ParsedLabel | null;
   packageRecipientId?: string | null;
+  isRegisteredResident?: boolean;
 } = {}): BuiltDeps {
   const session = overrides.session ?? makeSession("sess_new");
   const sendToAsh = vi.fn().mockResolvedValue(session);
@@ -118,6 +120,11 @@ function buildDeps(overrides: {
       "packageRecipientId" in overrides ? overrides.packageRecipientId : null,
     );
   const recordTelegramObservation = vi.fn().mockResolvedValue(undefined);
+  const isRegisteredResident = vi
+    .fn()
+    .mockResolvedValue(
+      "isRegisteredResident" in overrides ? overrides.isRegisteredResident : true,
+    );
   return {
     sendToAsh,
     waitUntil,
@@ -130,6 +137,7 @@ function buildDeps(overrides: {
     stripKeyboard,
     getPackageRecipientId,
     recordTelegramObservation,
+    isRegisteredResident,
     deps: {
       expectedSecret:
         "expectedSecret" in overrides ? overrides.expectedSecret : SECRET,
@@ -144,6 +152,7 @@ function buildDeps(overrides: {
       stripKeyboard,
       getPackageRecipientId,
       recordTelegramObservation,
+      isRegisteredResident,
     },
   };
 }
@@ -914,5 +923,107 @@ describe("processInboundTelegramUpdate — callback_query", () => {
     );
     const [text] = sendToAsh.mock.calls[0]!;
     expect(text).toMatch(/weird_action/);
+  });
+
+  it("admits accept_reception_group taps from a registered resident and synthesizes a request-id intent", async () => {
+    const { deps, sendToAsh, stripKeyboard, answerCallback, isRegisteredResident } =
+      buildDeps({ existingSessionId: "sess_x", isRegisteredResident: true });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        cbUpdate({
+          chatId: -100123,
+          messageId: 777,
+          fromUserId: 99,
+          data: "accept_reception_group:req_abc",
+          chatType: "supergroup",
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(isRegisteredResident).toHaveBeenCalledWith(99);
+    expect(answerCallback).toHaveBeenCalledWith("cb_abc");
+    expect(stripKeyboard).toHaveBeenCalledWith(-100123, 777);
+    expect(sendToAsh).toHaveBeenCalledTimes(1);
+    const [text] = sendToAsh.mock.calls[0]!;
+    expect(text).toMatch(/Ich kann helfen|public \/receive card/i);
+    expect(text).toMatch(/req_abc/);
+    expect(text).toMatch(/accept_reception_request.*req_abc/);
+  });
+
+  it("rejects accept_reception_group taps from non-registered users with a toast and leaves the keyboard live", async () => {
+    const { deps, sendToAsh, stripKeyboard, answerCallback, isRegisteredResident } =
+      buildDeps({ isRegisteredResident: false });
+
+    const res = await processInboundTelegramUpdate(
+      makeRequest(
+        cbUpdate({
+          chatId: -100123,
+          messageId: 777,
+          fromUserId: 99,
+          data: "accept_reception_group:req_abc",
+          chatType: "supergroup",
+        }),
+      ),
+      deps,
+    );
+
+    expect(res.status).toBe(204);
+    expect(isRegisteredResident).toHaveBeenCalledWith(99);
+    expect(answerCallback).toHaveBeenCalledWith(
+      "cb_abc",
+      expect.stringMatching(/\/register/),
+    );
+    // Button stays tappable so the user can /register and retry.
+    expect(stripKeyboard).not.toHaveBeenCalled();
+    expect(sendToAsh).not.toHaveBeenCalled();
+  });
+
+  it("treats an isRegisteredResident throw as unregistered (defensive)", async () => {
+    const { deps, sendToAsh, stripKeyboard, answerCallback, isRegisteredResident } =
+      buildDeps();
+    isRegisteredResident.mockRejectedValueOnce(new Error("redis down"));
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        cbUpdate({
+          chatId: -100123,
+          messageId: 777,
+          fromUserId: 99,
+          data: "accept_reception_group:req_abc",
+          chatType: "supergroup",
+        }),
+      ),
+      deps,
+    );
+
+    expect(answerCallback).toHaveBeenCalledWith(
+      "cb_abc",
+      expect.stringMatching(/\/register/),
+    );
+    expect(stripKeyboard).not.toHaveBeenCalled();
+    expect(sendToAsh).not.toHaveBeenCalled();
+  });
+
+  it("does not call isRegisteredResident for non-accept-group actions", async () => {
+    const { deps, isRegisteredResident } = buildDeps({
+      existingSessionId: "sess_x",
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        cbUpdate({
+          chatId: 42,
+          messageId: 1,
+          fromUserId: 99,
+          data: "confirm_pickup:pkg_42",
+        }),
+      ),
+      deps,
+    );
+
+    expect(isRegisteredResident).not.toHaveBeenCalled();
   });
 });
