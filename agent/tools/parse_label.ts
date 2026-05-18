@@ -68,9 +68,9 @@ const inputSchema = z.object({
     .optional()
     .describe(
       "Optional free-text caption the holder sent with the photo. " +
-        "Useful for disambiguating multi-label photos ('für Ritter und " +
-        "Meyer' + two visible labels = two packages). Pass through " +
-        "verbatim if present; otherwise omit.",
+        "Useful for disambiguating multi-label photos (e.g. a caption " +
+        "naming two recipients alongside two visible labels = two " +
+        "packages). Pass through verbatim if present; otherwise omit.",
     ),
 });
 

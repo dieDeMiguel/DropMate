@@ -35,7 +35,7 @@ Procedure — follow exactly, no creative liberties:
    holder + recipient summaries pre-resolved.
 2. If \`entries\` is empty, stop. Do not post anything.
 3. Compose **one** short group message in the dominant group
-   language (German for the Methfesselstraße MVP) listing each
+   language (read it off the group's recent traffic) listing each
    entry on its own line:
 
        "Paket für <recipientName> (Hs.<recipientHouseNumber>) liegt

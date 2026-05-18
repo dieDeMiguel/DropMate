@@ -15,9 +15,9 @@
  * own street, which matches PRD §9 privacy (data minimisation).
  *
  * Returns every `status: "held"` Package whose `recipientName`
- * case-insensitively matches `recipientName` (either direction —
- * "Meyer" matches "Anna-Sophie Meyer" and vice versa) AND whose
- * `recipientHouseNumber` matches exactly. When `carrier` is provided
+ * case-insensitively matches `recipientName` (either direction — a
+ * family name alone matches a full given+family name and vice versa)
+ * AND whose `recipientHouseNumber` matches exactly. When `carrier` is provided
  * it further narrows the result. The model is expected to:
  *   - 0 matches → ask whether to query the group (Flow 3) or treat
  *     as "no package to pick up" (Flow 1).
@@ -78,7 +78,8 @@ const inputSchema = z.object({
     .min(1)
     .describe(
       "Recipient name to search for. Case-insensitive substring match " +
-        "in either direction, so 'Meyer' finds 'Anna-Sophie Meyer'.",
+        "in either direction — a family-name fragment finds the full " +
+        "registered name and vice versa.",
     ),
   recipientHouseNumber: z
     .string()

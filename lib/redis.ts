@@ -233,7 +233,7 @@ export interface Package {
    * the actually-arrived package). Stays `undefined` for ordinary
    * walk-up registrations — Flow 1 doesn't write it. Wires the Package
    * back to the request so future status queries can answer "did the
-   * thing Patricia was waiting for ever arrive?".
+   * package the requester was waiting for ever arrive?".
    */
   readonly receptionRequestId?: string;
 }
@@ -498,8 +498,8 @@ export async function listReceptionRequestsForStreet(
  * the same recipient string agree on what counts as a hit:
  *   - `requesterHouseNumber` must equal `recipientHouseNumber` exactly.
  *   - `requesterName` must overlap `recipientName` case-insensitively
- *     in either direction ("Meyer" matches "Anna-Sophie Meyer" and
- *     vice versa).
+ *     in either direction (a family-name fragment matches a full
+ *     given+family name and vice versa).
  *
  * If multiple eligible requests match (uncommon today — a resident
  * rarely has more than one open ask), pick the most recently created.

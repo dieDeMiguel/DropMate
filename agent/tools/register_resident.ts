@@ -25,25 +25,25 @@ const inputSchema = z.object({
   name: z
     .string()
     .min(1)
-    .describe("Full name as the resident wrote it, e.g. 'Anna-Sophie Meyer'."),
+    .describe("Full name as the resident wrote it (first name + family name)."),
   street: z
     .string()
     .min(1)
-    .describe("Street name without the house number, e.g. 'Methfesselstraße'."),
+    .describe("Street name without the house number."),
   houseNumber: z
     .string()
     .min(1)
-    .describe("House number with any suffix, e.g. '92', '92a', '10-12'."),
+    .describe("House number with any suffix (e.g. a bare number, a number with a letter, or a hyphenated range)."),
   floor: z
     .string()
     .min(1)
     .optional()
-    .describe("Floor/Etage if the resident provided one, e.g. 'III. Etage', 'EG', '5. OG'."),
+    .describe("Floor/Etage if the resident provided one (e.g. an ordinal Etage label, 'EG', or a numbered 'OG')."),
   buzzerName: z
     .string()
     .min(1)
     .optional()
-    .describe("Name on the buzzer if different from the resident's name, e.g. 'Hartmann'."),
+    .describe("Name on the buzzer if different from the resident's name."),
 });
 
 export default defineTool({

@@ -1,6 +1,6 @@
 /**
  * `register_expected_delivery` — pre-announce a package the caller is
- * expecting (PRD §3 planner persona "Patricia").
+ * expecting (PRD §3 planner persona).
  *
  * Records an `"expected"` Package keyed to the caller as the recipient.
  * No holder yet: `holderResidentId` is `null` until a neighbor receives
