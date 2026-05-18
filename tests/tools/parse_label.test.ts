@@ -14,6 +14,13 @@
  * or `FALLBACK_MODEL` to a wrong/text-only slug, the existence test
  * below (`primary slug names a current vision-capable model`) is the
  * canary — it asserts the slugs match a known-good vision-capable set.
+ *
+ * URL vs bytes: the tool takes an `imageUrl` string and passes it to
+ * generateObject as `{ type: 'file', data: imageUrl, mediaType: 'image' }`.
+ * Inline bytes (Uint8Array / base64) do NOT work via the Vercel AI
+ * Gateway — the Gateway client converts them to a `data:` URI and the
+ * Gateway server rejects with "Unsupported file URI type". Tests
+ * therefore assert URL-shape, not byte-shape.
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -43,8 +50,8 @@ async function runExecute(input: Record<string, unknown>) {
   return execute(input, { toolCallId: "call-1", messages: [] });
 }
 
-const sampleBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
-const sampleBase64 = Buffer.from(sampleBytes).toString("base64");
+const sampleUrl =
+  "https://api.telegram.org/file/bot111:AAA/photos/file_42.jpg";
 
 describe("parse_label", () => {
   beforeEach(() => {
@@ -64,8 +71,7 @@ describe("parse_label", () => {
     });
 
     const result = (await runExecute({
-      imageBase64: sampleBase64,
-      mediaType: "image/jpeg",
+      imageUrl: sampleUrl,
       caption: "Paket für Anna-Sophie",
     })) as {
       carrier: string;
@@ -94,8 +100,7 @@ describe("parse_label", () => {
     });
 
     const result = (await runExecute({
-      imageBase64: sampleBase64,
-      mediaType: "image/jpeg",
+      imageUrl: sampleUrl,
     })) as { confidence: string; reason: string };
 
     expect(result.confidence).toBe("low");
@@ -116,8 +121,7 @@ describe("parse_label", () => {
     });
 
     const result = (await runExecute({
-      imageBase64: sampleBase64,
-      mediaType: "image/jpeg",
+      imageUrl: sampleUrl,
     })) as { carrier: string };
 
     expect(result.carrier).toBe("Hermes");
@@ -133,14 +137,16 @@ describe("parse_label", () => {
     generateObjectMock.mockRejectedValueOnce(primaryErr);
     generateObjectMock.mockRejectedValueOnce(new Error("claude down too"));
 
-    await expect(
-      runExecute({ imageBase64: sampleBase64, mediaType: "image/jpeg" }),
-    ).rejects.toBe(primaryErr);
+    await expect(runExecute({ imageUrl: sampleUrl })).rejects.toBe(primaryErr);
 
     expect(generateObjectMock).toHaveBeenCalledTimes(2);
   });
 
-  it("passes the image as a FilePart with the bytes the orchestrator base64-decoded", async () => {
+  it("passes the image URL through as a FilePart with mediaType='image' so the Gateway server fetches it", async () => {
+    // Regression guard for the v0.3 photo-path bug: passing inline bytes
+    // makes the Gateway client serialize to `data:image/jpeg;base64,...`
+    // and the Gateway server rejects with "Unsupported file URI type".
+    // The tool MUST pass the URL through verbatim as the `data` field.
     generateObjectMock.mockResolvedValueOnce({
       object: {
         carrier: "DHL",
@@ -150,8 +156,7 @@ describe("parse_label", () => {
     });
 
     await runExecute({
-      imageBase64: sampleBase64,
-      mediaType: "image/png",
+      imageUrl: sampleUrl,
       caption: "lab",
     });
 
@@ -163,11 +168,8 @@ describe("parse_label", () => {
 
     const filePart = userMessage.content[0];
     expect(filePart.type).toBe("file");
-    expect(filePart.mediaType).toBe("image/png");
-    expect(filePart.data).toBeInstanceOf(Uint8Array);
-    expect(Buffer.from(filePart.data).equals(Buffer.from(sampleBytes))).toBe(
-      true,
-    );
+    expect(filePart.mediaType).toBe("image");
+    expect(filePart.data).toBe(sampleUrl);
 
     const textPart = userMessage.content[1];
     expect(textPart.type).toBe("text");
@@ -242,8 +244,7 @@ describe("parse_label", () => {
     });
 
     await runExecute({
-      imageBase64: sampleBase64,
-      mediaType: "image/jpeg",
+      imageUrl: sampleUrl,
     });
 
     const call = generateObjectMock.mock.calls[0]![0];

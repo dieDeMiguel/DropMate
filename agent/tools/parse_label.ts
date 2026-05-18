@@ -50,20 +50,18 @@ export const PRIMARY_MODEL = "google/gemini-3.1-flash-lite";
 export const FALLBACK_MODEL = "anthropic/claude-sonnet-4.6";
 
 const inputSchema = z.object({
-  imageBase64: z
+  imageUrl: z
     .string()
-    .min(1)
+    .url()
     .describe(
-      "Base64-encoded image bytes of the shipping label photo. The " +
-        "orchestrator encodes the bytes returned by `fetchTelegramFile` " +
-        "before calling this tool.",
-    ),
-  mediaType: z
-    .string()
-    .min(1)
-    .describe(
-      "MIME type of the image, e.g. 'image/jpeg' or 'image/png'. From " +
-        "the Bot API `getFile` response.",
+      "HTTPS URL of the shipping-label photo. The orchestrator resolves " +
+        "the Telegram `file_id` via `getTelegramFileUrl` (Bot API getFile " +
+        "+ CDN base) and passes the resulting URL through. The Vercel AI " +
+        "Gateway fetches the URL server-side and forwards the bytes to " +
+        "the underlying vision model. Inline bytes (Uint8Array / base64) " +
+        "are NOT supported here: the Gateway client converts them to a " +
+        "`data:` URI which the Gateway server rejects with `Unsupported " +
+        "file URI type`. URL string in, vision out.",
     ),
   caption: z
     .string()
@@ -154,8 +152,7 @@ const visionPrompt = [
 ].join("\n");
 
 interface VisionArgs {
-  readonly imageBytes: Uint8Array;
-  readonly mediaType: string;
+  readonly imageUrl: string;
   readonly caption: string | undefined;
 }
 
@@ -176,7 +173,13 @@ async function runVisionModel(
       {
         role: "user",
         content: [
-          { type: "file", data: args.imageBytes, mediaType: args.mediaType },
+          // URL form (string) — the Gateway server fetches it directly.
+          // Inline bytes would be re-encoded to a `data:` URI by the
+          // Gateway client and rejected server-side. `mediaType: 'image'`
+          // (top-level IANA segment) matches the AI SDK 7 docs example
+          // and lets each provider sniff its own subtype from the
+          // fetched bytes.
+          { type: "file", data: args.imageUrl, mediaType: "image" },
           { type: "text", text: userPrompt },
         ],
       },
@@ -196,9 +199,8 @@ export default defineTool({
     "before the agent runs; the conversational model only ever sees " +
     "the parsed text form.",
   inputSchema,
-  async execute({ imageBase64, mediaType, caption }) {
-    const imageBytes = Uint8Array.from(Buffer.from(imageBase64, "base64"));
-    const args: VisionArgs = { imageBytes, mediaType, caption };
+  async execute({ imageUrl, caption }) {
+    const args: VisionArgs = { imageUrl, caption };
 
     try {
       return await runVisionModel(PRIMARY_MODEL, args);

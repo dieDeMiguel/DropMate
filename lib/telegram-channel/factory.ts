@@ -41,7 +41,7 @@ import {
   getSessionIdForChat,
   setSessionIdForChat,
 } from "../redis.js";
-import { fetchTelegramFile } from "./file.js";
+import { getTelegramFileUrl } from "./file.js";
 import {
   answerCallbackQuery,
   editMessageReplyMarkup,
@@ -105,7 +105,7 @@ export function telegramChannel(config: TelegramChannelConfig) {
             setSessionIdForChat,
             drainSession: (session, chatId) =>
               drainSessionToTelegram(session, chatId, { token }),
-            fetchFile: (fileId) => fetchTelegramFile(token, fileId),
+            getFileUrl: (fileId) => getTelegramFileUrl(token, fileId),
             parseLabel: async (input) => {
               // No silent catch: errors propagate to process-update.ts's
               // catch which logs with stack + chatId. A silent `return
