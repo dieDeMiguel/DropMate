@@ -68,6 +68,7 @@ interface BuiltDeps {
   answerCallback: ReturnType<typeof vi.fn>;
   stripKeyboard: ReturnType<typeof vi.fn>;
   getPackageRecipientId: ReturnType<typeof vi.fn>;
+  recordTelegramObservation: ReturnType<typeof vi.fn>;
 }
 
 type ParsedLabel = NonNullable<
@@ -116,6 +117,7 @@ function buildDeps(overrides: {
     .mockResolvedValue(
       "packageRecipientId" in overrides ? overrides.packageRecipientId : null,
     );
+  const recordTelegramObservation = vi.fn().mockResolvedValue(undefined);
   return {
     sendToAsh,
     waitUntil,
@@ -127,6 +129,7 @@ function buildDeps(overrides: {
     answerCallback,
     stripKeyboard,
     getPackageRecipientId,
+    recordTelegramObservation,
     deps: {
       expectedSecret:
         "expectedSecret" in overrides ? overrides.expectedSecret : SECRET,
@@ -140,6 +143,7 @@ function buildDeps(overrides: {
       answerCallback,
       stripKeyboard,
       getPackageRecipientId,
+      recordTelegramObservation,
     },
   };
 }
@@ -521,6 +525,72 @@ describe("processInboundTelegramUpdate", () => {
     expect(getFileUrl).not.toHaveBeenCalled();
     expect(parseLabel).not.toHaveBeenCalled();
   });
+
+  it("records a KnownTelegramUser observation for every actionable inbound message (#45 passive directory)", async () => {
+    const { deps, recordTelegramObservation } = buildDeps();
+
+    await processInboundTelegramUpdate(
+      makeRequest({
+        update_id: 1,
+        message: {
+          message_id: 1,
+          chat: { id: 5, type: "supergroup" },
+          text: "moin",
+          from: {
+            id: 999,
+            is_bot: false,
+            first_name: "Diego",
+            last_name: "de Miguel",
+            username: "diego_demiguel",
+            language_code: "de",
+          },
+        },
+      }),
+      deps,
+    );
+
+    expect(recordTelegramObservation).toHaveBeenCalledTimes(1);
+    expect(recordTelegramObservation).toHaveBeenCalledWith({
+      userId: 999,
+      firstName: "Diego",
+      lastName: "de Miguel",
+      username: "diego_demiguel",
+      languageCode: "de",
+      chatId: 5,
+    });
+  });
+
+  it("does not record an observation when the inbound update has no fromUserId (anonymous group post)", async () => {
+    const { deps, recordTelegramObservation } = buildDeps();
+
+    await processInboundTelegramUpdate(
+      makeRequest({
+        update_id: 1,
+        message: {
+          message_id: 1,
+          chat: { id: 5, type: "supergroup" },
+          text: "anon",
+          // no `from`
+        },
+      }),
+      deps,
+    );
+
+    expect(recordTelegramObservation).not.toHaveBeenCalled();
+  });
+
+  it("does not crash the turn when recordTelegramObservation throws (best-effort)", async () => {
+    const { deps, recordTelegramObservation, sendToAsh } = buildDeps();
+    recordTelegramObservation.mockRejectedValueOnce(new Error("redis exploded"));
+
+    const response = await processInboundTelegramUpdate(
+      makeRequest(dmUpdate({ chatId: 5, text: "hi", fromUserId: 99 })),
+      deps,
+    );
+
+    expect(response.status).toBe(204);
+    expect(sendToAsh).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("processInboundTelegramUpdate — callback_query", () => {
@@ -755,6 +825,50 @@ describe("processInboundTelegramUpdate — callback_query", () => {
 
     expect(getPackageRecipientId).not.toHaveBeenCalled();
     expect(sendToAsh).toHaveBeenCalledTimes(1);
+  });
+
+  it("records a KnownTelegramUser observation on every callback tap, including rejected ones (#45)", async () => {
+    // Wrong tapper on a group confirm_pickup — the scope guard rejects and
+    // sendToAsh is NOT called, but the bot has still seen this user and
+    // must capture them so they can be mentioned later.
+    const { deps, sendToAsh, recordTelegramObservation } = buildDeps({
+      existingSessionId: "sess_x",
+      packageRecipientId: "different-user",
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest({
+        update_id: 1,
+        callback_query: {
+          id: "cb_abc",
+          data: "confirm_pickup:pkg_42",
+          from: {
+            id: 4242,
+            is_bot: false,
+            first_name: "Natascha",
+            last_name: "Elter",
+            username: "natascha_elter",
+            language_code: "de",
+          },
+          message: {
+            message_id: 555,
+            chat: { id: -1001, type: "supergroup" },
+          },
+        },
+      }),
+      deps,
+    );
+
+    expect(sendToAsh).not.toHaveBeenCalled();
+    expect(recordTelegramObservation).toHaveBeenCalledTimes(1);
+    expect(recordTelegramObservation).toHaveBeenCalledWith({
+      userId: 4242,
+      firstName: "Natascha",
+      lastName: "Elter",
+      username: "natascha_elter",
+      languageCode: "de",
+      chatId: -1001,
+    });
   });
 
   it("continues to drive the agent even if answerCallback or stripKeyboard throw", async () => {

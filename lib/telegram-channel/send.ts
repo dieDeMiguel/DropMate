@@ -44,11 +44,30 @@ export interface InlineKeyboardMarkup {
   readonly inline_keyboard: ReadonlyArray<ReadonlyArray<InlineKeyboardButton>>;
 }
 
+/**
+ * `text_mention` Telegram MessageEntity — used to render a user's name
+ * in a group post as a tap-to-DM link that also pings them. Offsets are
+ * measured in UTF-16 code units (Telegram's spec), so the caller must
+ * convert from UTF-8/Unicode-grapheme positions before constructing
+ * this. Currently only `text_mention` is supported because it's the
+ * only entity type DropMate produces; adding bold/italics later is just
+ * widening this union.
+ *
+ * @see https://core.telegram.org/bots/api#messageentity
+ */
+export interface TelegramMessageEntity {
+  readonly type: "text_mention";
+  readonly offset: number;
+  readonly length: number;
+  readonly user: { readonly id: number };
+}
+
 export async function sendTelegramMessage(
   token: string,
   chatId: number,
   text: string,
   replyMarkup?: InlineKeyboardMarkup,
+  entities?: ReadonlyArray<TelegramMessageEntity>,
 ): Promise<void> {
   if (token.length === 0) {
     throw new Error("Telegram bot token is empty.");
@@ -56,6 +75,7 @@ export async function sendTelegramMessage(
   if (text.length === 0) return;
   const body: Record<string, unknown> = { chat_id: chatId, text };
   if (replyMarkup) body.reply_markup = replyMarkup;
+  if (entities && entities.length > 0) body.entities = entities;
   const res = await fetch(
     `https://api.telegram.org/bot${token}/sendMessage`,
     {

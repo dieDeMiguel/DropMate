@@ -27,7 +27,68 @@ import { defineTool } from "experimental-ash/tools";
 import { z } from "zod";
 
 import { postToGroup } from "../../lib/telegram-channel/notify.js";
-import type { InlineKeyboardMarkup } from "../../lib/telegram-channel/send.js";
+import type {
+  InlineKeyboardMarkup,
+  TelegramMessageEntity,
+} from "../../lib/telegram-channel/send.js";
+
+/**
+ * Compute Telegram `text_mention` entities for the supplied names. The
+ * Bot API spec requires `offset` + `length` to be expressed in UTF-16
+ * code units (the same unit JavaScript strings use natively). Using
+ * `String.indexOf` and `name.length` on the JS string therefore lands
+ * the correct offsets without manual code-point arithmetic — JS strings
+ * are already UTF-16-indexed, surrogate pairs and all.
+ *
+ * Each mention pins to the first occurrence of `name` in `text`. Names
+ * not found are silently skipped (with a `console.warn`) so a typo'd
+ * mention doesn't fail the whole post — the worst case is the recipient
+ * doesn't get pinged, which is better than the group post not appearing.
+ * The model owns producing matching text + mentions; the rejection log
+ * is the diagnostic trail.
+ */
+export function computeMentionEntities(
+  text: string,
+  mentions: ReadonlyArray<{ readonly name: string; readonly telegramUserId: number }>,
+): ReadonlyArray<TelegramMessageEntity> {
+  const out: TelegramMessageEntity[] = [];
+  for (const mention of mentions) {
+    const offset = text.indexOf(mention.name);
+    if (offset < 0) {
+      console.warn(
+        `[post_to_group] mention name not found in text — skipping. name='${mention.name}' userId=${mention.telegramUserId}`,
+      );
+      continue;
+    }
+    out.push({
+      type: "text_mention",
+      offset,
+      length: mention.name.length,
+      user: { id: mention.telegramUserId },
+    });
+  }
+  return out;
+}
+
+const mentionSchema = z.object({
+  name: z
+    .string()
+    .min(1)
+    .describe(
+      "Exact substring of `text` to wrap as a tap-to-DM mention. Must " +
+        "appear in `text` verbatim — if it doesn't, the mention is " +
+        "silently skipped.",
+    ),
+  telegramUserId: z
+    .number()
+    .int()
+    .describe(
+      "Telegram numeric `user_id` of the person being mentioned. Comes " +
+        "from `recipientResolution.telegram.userId` on a " +
+        "`register_package` result whose `recipientResolution.kind` was " +
+        "`'known_telegram'`.",
+    ),
+});
 
 const buttonSchema = z.object({
   text: z
@@ -55,6 +116,22 @@ const inputSchema = z.object({
       "Short summary line for the group. Holder name + carrier + " +
         "recipient names is plenty — never include buzzer or floor.",
     ),
+  mentions: z
+    .array(mentionSchema)
+    .min(1)
+    .optional()
+    .describe(
+      "Optional list of names to render as Telegram `text_mention` " +
+        "entities — each one is rewritten as a tap-to-DM link that " +
+        "pings the user. Use when `register_package` returned " +
+        "`recipientResolution.kind: 'known_telegram'`: the recipient " +
+        "can't receive a DM (they haven't started a chat with the bot) " +
+        "but they CAN be pinged in the group via this entity. The " +
+        "`name` MUST appear verbatim in `text`; mentions whose name " +
+        "isn't found are silently skipped. Omit when there's nobody to " +
+        "ping (registered residents already get a DM; unknown names " +
+        "have no `user_id`).",
+    ),
   buttons: z
     .array(z.array(buttonSchema).min(1).max(3))
     .min(1)
@@ -73,10 +150,11 @@ export default defineTool({
     "Post a single short message to the street group chat. Use for " +
     "package-arrival summaries and pickup announcements only. The text " +
     "should already be in the group's dominant language. Optionally " +
-    "attach inline-keyboard `buttons` for recipient-scoped actions. " +
-    "Returns `{ delivered: true }`.",
+    "attach `mentions` to ping unregistered recipients via " +
+    "`text_mention` entities, and `buttons` for recipient-scoped " +
+    "actions. Returns `{ delivered: true }`.",
   inputSchema,
-  async execute({ text, buttons }) {
+  async execute({ text, mentions, buttons }) {
     const token = process.env.TELEGRAM_BOT_TOKEN;
     if (!token) {
       throw new Error(
@@ -102,7 +180,16 @@ export default defineTool({
           ),
         }
       : undefined;
-    await postToGroup(token, groupChatId, text, replyMarkup);
+    const entities = mentions
+      ? computeMentionEntities(text, mentions)
+      : undefined;
+    await postToGroup(
+      token,
+      groupChatId,
+      text,
+      replyMarkup,
+      entities && entities.length > 0 ? entities : undefined,
+    );
     return { delivered: true };
   },
 });

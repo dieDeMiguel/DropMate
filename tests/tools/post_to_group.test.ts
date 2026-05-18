@@ -94,4 +94,75 @@ describe("post_to_group", () => {
       },
     });
   });
+
+  it("emits text_mention entities for `mentions` with the correct UTF-16 offsets (#45)", async () => {
+    await runExecute({
+      text: "Paket für Natascha Elter (Hs.71) bei Diego abgegeben.",
+      mentions: [
+        { name: "Natascha Elter", telegramUserId: 4242 },
+      ],
+    });
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    const body = JSON.parse(init?.body as string);
+    expect(body.entities).toEqual([
+      {
+        type: "text_mention",
+        offset: "Paket für ".length,
+        length: "Natascha Elter".length,
+        user: { id: 4242 },
+      },
+    ]);
+  });
+
+  it("silently skips mentions whose name is not present in the text (with a warn)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      await runExecute({
+        text: "Paket für Meyer bei Bremer.",
+        mentions: [
+          { name: "Meyer", telegramUserId: 1 },
+          { name: "Schmidt", telegramUserId: 2 }, // not in text
+        ],
+      });
+
+      const [, init] = fetchMock.mock.calls[0]!;
+      const body = JSON.parse(init?.body as string);
+      expect(body.entities).toEqual([
+        {
+          type: "text_mention",
+          offset: "Paket für ".length,
+          length: "Meyer".length,
+          user: { id: 1 },
+        },
+      ]);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0]![0]).toMatch(/Schmidt/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("omits the `entities` field entirely when no mentions are supplied (backwards compatible)", async () => {
+    await runExecute({ text: "Paket für Meyer bei Bremer." });
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    const body = JSON.parse(init?.body as string);
+    expect("entities" in body).toBe(false);
+  });
+
+  it("omits the `entities` field when every supplied mention's name is missing from the text", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      await runExecute({
+        text: "Paket für Meyer.",
+        mentions: [{ name: "Schmidt", telegramUserId: 99 }],
+      });
+      const [, init] = fetchMock.mock.calls[0]!;
+      const body = JSON.parse(init?.body as string);
+      expect("entities" in body).toBe(false);
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });

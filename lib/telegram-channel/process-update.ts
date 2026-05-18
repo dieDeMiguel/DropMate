@@ -197,6 +197,22 @@ export interface ProcessUpdateDeps {
   readonly getPackageRecipientId: (
     packageId: string,
   ) => Promise<string | null>;
+  /**
+   * Passive recording of every Telegram identity the bot sees. Fired
+   * once per inbound update (message OR callback) before the agent
+   * runs so even taps from previously-unseen users are captured.
+   * Errors are swallowed at the call site so a failure here doesn't
+   * crash the turn — the worst case is the user stays unmentionable
+   * until their next message succeeds.
+   */
+  readonly recordTelegramObservation: (input: {
+    readonly userId: number;
+    readonly firstName: string;
+    readonly lastName?: string;
+    readonly username?: string;
+    readonly languageCode?: string;
+    readonly chatId: number;
+  }) => Promise<void>;
 }
 
 /**
@@ -253,11 +269,57 @@ function synthesizeCallbackMessage(parsed: ParsedCallbackData): string {
   }
 }
 
+/**
+ * Best-effort passive recording of an inbound Telegram identity.
+ * Swallows errors — we never want a Redis hiccup to crash a turn that
+ * would otherwise have proceeded — but logs them so silent data loss
+ * is visible in the Vercel logs.
+ */
+async function recordInboundObservation(
+  deps: ProcessUpdateDeps,
+  observation: {
+    userId: number | null;
+    firstName: string | null;
+    lastName: string | null;
+    username: string | null;
+    languageCode: string | null;
+    chatId: number;
+  },
+): Promise<void> {
+  if (observation.userId === null || observation.firstName === null) return;
+  try {
+    await deps.recordTelegramObservation({
+      userId: observation.userId,
+      firstName: observation.firstName,
+      lastName: observation.lastName ?? undefined,
+      username: observation.username ?? undefined,
+      languageCode: observation.languageCode ?? undefined,
+      chatId: observation.chatId,
+    });
+  } catch (err) {
+    console.warn(
+      "[process-update] recordTelegramObservation failed (non-fatal):",
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
 async function handleCallbackQuery(
   cb: TelegramInboundCallback,
   deps: ProcessUpdateDeps,
 ): Promise<Response> {
   const parsed = parseCallbackData(cb.data);
+
+  // Passive directory update — fire before any short-circuit so even
+  // taps from non-recipients still teach the bot who's in the group.
+  await recordInboundObservation(deps, {
+    userId: cb.fromUserId,
+    firstName: cb.fromFirstName,
+    lastName: cb.fromLastName,
+    username: cb.fromUsername,
+    languageCode: cb.fromLanguageCode,
+    chatId: cb.chatId,
+  });
 
   // Group `confirm_pickup` taps: only the recipient may close the
   // package. DMs are inherently 1:1 so no check needed.
@@ -431,6 +493,19 @@ export async function processInboundTelegramUpdate(
     // acked so Telegram doesn't retry indefinitely.
     return new Response(null, { status: 204 });
   }
+
+  // Passive directory update — every actionable inbound message
+  // captures the sender so they can later be `text_mention`'d in the
+  // group post when a label names them. Best-effort: errors are logged
+  // but never crash the turn.
+  await recordInboundObservation(deps, {
+    userId: inbound.fromUserId,
+    firstName: inbound.fromFirstName,
+    lastName: inbound.fromLastName,
+    username: inbound.fromUsername,
+    languageCode: inbound.fromLanguageCode,
+    chatId: inbound.chatId,
+  });
 
   const existingSessionId = await deps.getSessionIdForChat(inbound.chatId);
   const continuationToken = existingSessionId ?? `tg:${inbound.chatId}`;

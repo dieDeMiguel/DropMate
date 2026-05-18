@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
+  KnownTelegramUser,
   Package,
   ReceptionRequest,
   Resident,
@@ -14,6 +15,7 @@ const requestStore = vi.hoisted(() => new Map<string, ReceptionRequest>());
 const requestStreetIndex = vi.hoisted(
   () => new Map<string, Set<string>>(),
 );
+const knownTgUserStore = vi.hoisted(() => new Map<number, KnownTelegramUser>());
 
 vi.mock("experimental-ash/context", () => ({
   getSession: () => sessionMock.value,
@@ -40,6 +42,22 @@ vi.mock("../../lib/redis.js", async () => {
         if (hay.includes(needle) || needle.includes(hay)) return r;
       }
       return null;
+    },
+    async findKnownTelegramUserByName(name: string) {
+      const trimmed = name.trim();
+      if (trimmed === "") return null;
+      const tokens = trimmed.toLowerCase().split(/\s+/).filter((t) => t.length > 0);
+      if (tokens.length === 0) return null;
+      const matches: KnownTelegramUser[] = [];
+      for (const u of knownTgUserStore.values()) {
+        const full = (u.lastName ? `${u.firstName} ${u.lastName}` : u.firstName).toLowerCase();
+        const user = u.username?.toLowerCase() ?? "";
+        const allHit = tokens.every((t) => full.includes(t) || user.includes(t));
+        if (allHit) matches.push(u);
+      }
+      if (matches.length === 0) return null;
+      matches.sort((a, b) => b.lastSeenAt - a.lastSeenAt);
+      return matches[0] ?? null;
     },
     async getPackage(id: string) {
       return packageStore.get(id) ?? null;
@@ -123,6 +141,20 @@ function withTelegramSession(
   };
 }
 
+function seedKnownTgUser(overrides: Partial<KnownTelegramUser> & { userId: number; firstName: string }): KnownTelegramUser {
+  const u: KnownTelegramUser = {
+    userId: overrides.userId,
+    firstName: overrides.firstName,
+    lastName: overrides.lastName,
+    username: overrides.username,
+    languageCode: overrides.languageCode,
+    lastSeenAt: overrides.lastSeenAt ?? Date.now(),
+    seenInChats: overrides.seenInChats ?? [],
+  };
+  knownTgUserStore.set(u.userId, u);
+  return u;
+}
+
 function seedResident(overrides: Partial<Resident> & { platformId: string }): Resident {
   const r: Resident = {
     id: overrides.id ?? overrides.platformId,
@@ -194,6 +226,7 @@ describe("register_package", () => {
     streetIndex.clear();
     requestStore.clear();
     requestStreetIndex.clear();
+    knownTgUserStore.clear();
     sessionMock.value = null;
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-05-17T10:00:00Z"));
@@ -215,7 +248,7 @@ describe("register_package", () => {
       carrier: "Hermes",
     })) as {
       package: Package;
-      recipientLinked: boolean;
+      recipientResolution: { kind: string };
       holder: {
         id: string;
         name: string;
@@ -232,7 +265,7 @@ describe("register_package", () => {
     expect(result.package.carrier).toBe("Hermes");
     expect(result.package.pickedUpAt).toBeNull();
     expect(result.package.reminded).toBe(false);
-    expect(result.recipientLinked).toBe(false);
+    expect(result.recipientResolution.kind).toBe("unknown");
     // Regression for #43 item 2b round 3: the holder summary must be in
     // the response so the model has the concrete name to paste into the
     // group post + recipient DM (instead of inventing or templatising).
@@ -254,6 +287,7 @@ describe("register_package", () => {
       id: "recipient-1",
       name: "Anna-Sophie Meyer",
       houseNumber: "92",
+      language: "de",
     });
     withTelegramSession("holder-1");
 
@@ -261,10 +295,107 @@ describe("register_package", () => {
       recipientName: "Meyer",
       recipientHouseNumber: "92",
       carrier: "Amazon",
-    })) as { package: Package; recipientLinked: boolean };
+    })) as {
+      package: Package;
+      recipientResolution:
+        | { kind: "resident"; resident: { id: string; name: string; houseNumber: string; language: string | null } }
+        | { kind: "known_telegram"; telegram: unknown }
+        | { kind: "unknown" };
+    };
 
-    expect(result.recipientLinked).toBe(true);
+    expect(result.recipientResolution.kind).toBe("resident");
+    if (result.recipientResolution.kind === "resident") {
+      expect(result.recipientResolution.resident).toEqual({
+        id: "recipient-1",
+        name: "Anna-Sophie Meyer",
+        houseNumber: "92",
+        language: "de",
+      });
+    }
     expect(result.package.recipientResidentId).toBe("recipient-1");
+  });
+
+  it("falls back to recipientResolution.kind='known_telegram' when no Resident matches but a passive Telegram observation does (#45)", async () => {
+    seedResident({ platformId: "holder-1", name: "Diego de Miguel", houseNumber: "69" });
+    seedKnownTgUser({
+      userId: 4242,
+      firstName: "Natascha",
+      lastName: "Elter",
+      username: "natascha_elter",
+      lastSeenAt: Date.now() - 1000,
+    });
+    withTelegramSession("holder-1");
+
+    const result = (await runExecute({
+      recipientName: "Natascha Elter",
+      recipientHouseNumber: "71",
+      carrier: "DHL",
+    })) as {
+      package: Package;
+      recipientResolution:
+        | { kind: "resident"; resident: unknown }
+        | { kind: "known_telegram"; telegram: { userId: number; firstName: string; lastName: string | null; username: string | null } }
+        | { kind: "unknown" };
+    };
+
+    expect(result.recipientResolution.kind).toBe("known_telegram");
+    if (result.recipientResolution.kind === "known_telegram") {
+      expect(result.recipientResolution.telegram).toEqual({
+        userId: 4242,
+        firstName: "Natascha",
+        lastName: "Elter",
+        username: "natascha_elter",
+      });
+    }
+    // recipientResidentId on the Package is still null — the known_telegram
+    // user isn't a Resident, just an identity we can ping.
+    expect(result.package.recipientResidentId).toBeNull();
+  });
+
+  it("returns recipientResolution.kind='unknown' when neither Resident nor known Telegram user match", async () => {
+    seedResident({ platformId: "holder-1", name: "Diego de Miguel", houseNumber: "69" });
+    seedKnownTgUser({
+      userId: 999,
+      firstName: "Someone",
+      lastName: "Else",
+      lastSeenAt: Date.now() - 1000,
+    });
+    withTelegramSession("holder-1");
+
+    const result = (await runExecute({
+      recipientName: "Natascha Elter",
+      recipientHouseNumber: "71",
+    })) as {
+      package: Package;
+      recipientResolution: { kind: string };
+    };
+
+    expect(result.recipientResolution.kind).toBe("unknown");
+  });
+
+  it("prefers resident match over known_telegram match when both exist", async () => {
+    seedResident({ platformId: "holder-1", name: "Diego", houseNumber: "69" });
+    seedResident({
+      platformId: "rec-1",
+      id: "rec-1",
+      name: "Natascha Elter",
+      houseNumber: "71",
+      language: "de",
+    });
+    seedKnownTgUser({
+      userId: 4242,
+      firstName: "Natascha",
+      lastName: "Elter",
+      lastSeenAt: Date.now() - 1000,
+    });
+    withTelegramSession("holder-1");
+
+    const result = (await runExecute({
+      recipientName: "Natascha Elter",
+      recipientHouseNumber: "71",
+    })) as { recipientResolution: { kind: string } };
+
+    expect(result.recipientResolution.kind).toBe("resident");
   });
 
   it("defaults carrier to 'unknown' when omitted", async () => {
@@ -353,7 +484,7 @@ describe("register_package", () => {
         carrier: "DHL",
       })) as {
         package: Package;
-        recipientLinked: boolean;
+        recipientResolution: { kind: string };
         receptionRequestFulfilled: {
           requestId: string;
           requester: {

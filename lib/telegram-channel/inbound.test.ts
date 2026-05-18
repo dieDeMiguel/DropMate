@@ -26,6 +26,9 @@ describe("extractInboundMessage", () => {
       isGroup: false,
       fromUserId: 200,
       fromLanguageCode: "en",
+      fromFirstName: null,
+      fromLastName: null,
+      fromUsername: null,
       photoFileId: null,
     });
   });
@@ -80,7 +83,33 @@ describe("extractInboundMessage", () => {
       isGroup: false,
       fromUserId: null,
       fromLanguageCode: null,
+      fromFirstName: null,
+      fromLastName: null,
+      fromUsername: null,
       photoFileId: null,
+    });
+  });
+
+  it("captures first_name / last_name / username when present (#45 passive directory)", () => {
+    const update: TelegramUpdatePayload = {
+      update_id: 99,
+      message: {
+        chat: { id: 100, type: "supergroup" },
+        text: "moin",
+        from: {
+          id: 4242,
+          language_code: "de",
+          first_name: "Diego",
+          last_name: "de Miguel",
+          username: "diego_demiguel",
+        },
+      },
+    };
+    expect(extractInboundMessage(update)).toMatchObject({
+      fromUserId: 4242,
+      fromFirstName: "Diego",
+      fromLastName: "de Miguel",
+      fromUsername: "diego_demiguel",
     });
   });
 
@@ -108,6 +137,9 @@ describe("extractInboundMessage", () => {
       isGroup: false,
       fromUserId: 200,
       fromLanguageCode: "de",
+      fromFirstName: null,
+      fromLastName: null,
+      fromUsername: null,
       photoFileId: "large",
     });
   });
@@ -181,6 +213,9 @@ describe("extractInboundCallback", () => {
       messageId: 555,
       fromUserId: 200,
       fromLanguageCode: "de",
+      fromFirstName: null,
+      fromLastName: null,
+      fromUsername: null,
       isGroup: false,
       data: "confirm_pickup:pkg_42",
     });
