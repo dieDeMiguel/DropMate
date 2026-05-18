@@ -64,16 +64,22 @@ interface BuiltDeps {
   setSessionIdForChat: ReturnType<typeof vi.fn>;
   drainSession: ReturnType<typeof vi.fn>;
   fetchFile: ReturnType<typeof vi.fn>;
+  parseLabel: ReturnType<typeof vi.fn>;
   answerCallback: ReturnType<typeof vi.fn>;
   stripKeyboard: ReturnType<typeof vi.fn>;
   getPackageRecipientId: ReturnType<typeof vi.fn>;
 }
+
+type ParsedLabel = NonNullable<
+  Awaited<ReturnType<ProcessUpdateDeps["parseLabel"]>>
+>;
 
 function buildDeps(overrides: {
   existingSessionId?: string | null;
   session?: Session;
   expectedSecret?: string | undefined;
   fetchedFile?: { bytes: Uint8Array; mediaType: string };
+  parsedLabel?: ParsedLabel | null;
   packageRecipientId?: string | null;
 } = {}): BuiltDeps {
   const session = overrides.session ?? makeSession("sess_new");
@@ -92,6 +98,19 @@ function buildDeps(overrides: {
         mediaType: "image/jpeg",
       },
     );
+  const defaultParsedLabel: ParsedLabel = {
+    carrier: "DHL",
+    recipientName: "Anna-Sophie Meyer",
+    recipientHouseNumber: "92",
+    trackingNumber: "00340434161094021899",
+    confidence: "high",
+    reason: "all fields legible",
+  };
+  const parseLabel = vi
+    .fn()
+    .mockResolvedValue(
+      "parsedLabel" in overrides ? overrides.parsedLabel : defaultParsedLabel,
+    );
   const answerCallback = vi.fn().mockResolvedValue(undefined);
   const stripKeyboard = vi.fn().mockResolvedValue(undefined);
   const getPackageRecipientId = vi
@@ -106,6 +125,7 @@ function buildDeps(overrides: {
     setSessionIdForChat,
     drainSession,
     fetchFile,
+    parseLabel,
     answerCallback,
     stripKeyboard,
     getPackageRecipientId,
@@ -118,6 +138,7 @@ function buildDeps(overrides: {
       setSessionIdForChat,
       drainSession,
       fetchFile,
+      parseLabel,
       answerCallback,
       stripKeyboard,
       getPackageRecipientId,
@@ -277,10 +298,17 @@ describe("processInboundTelegramUpdate", () => {
     });
   });
 
-  it("resolves a photo file_id and forwards a FilePart with inline bytes + mediaType and caption", async () => {
+  it("parses the label via parseLabel and forwards a synthetic text message naming the extracted fields", async () => {
     const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
-    const { deps, sendToAsh, fetchFile } = buildDeps({
+    const { deps, sendToAsh, fetchFile, parseLabel } = buildDeps({
       fetchedFile: { bytes, mediaType: "image/png" },
+      parsedLabel: {
+        carrier: "DHL",
+        recipientName: "Natascha Elter",
+        recipientHouseNumber: "88",
+        confidence: "high",
+        reason: "label legible",
+      },
     });
 
     const update = {
@@ -288,7 +316,7 @@ describe("processInboundTelegramUpdate", () => {
       message: {
         message_id: 1,
         date: 1,
-        caption: "Paket für Meyer",
+        caption: "Paket für Natascha",
         chat: { id: 42, type: "private" },
         from: { id: 99, is_bot: false, first_name: "T", language_code: "de" },
         photo: [
@@ -303,17 +331,27 @@ describe("processInboundTelegramUpdate", () => {
 
     expect(fetchFile).toHaveBeenCalledWith("large");
 
+    // parseLabel receives the bytes (base64-encoded) + mediaType + caption.
+    expect(parseLabel).toHaveBeenCalledTimes(1);
+    const parseArgs = parseLabel.mock.calls[0]![0];
+    expect(parseArgs.mediaType).toBe("image/png");
+    expect(parseArgs.caption).toBe("Paket für Natascha");
+    expect(typeof parseArgs.imageBase64).toBe("string");
+    expect(parseArgs.imageBase64.length).toBeGreaterThan(0);
+    // Round-trip the base64 — orchestrator must encode the bytes faithfully.
+    const decoded = Buffer.from(parseArgs.imageBase64, "base64");
+    expect(decoded.equals(Buffer.from(bytes))).toBe(true);
+
     const [message, options] = sendToAsh.mock.calls[0]!;
-    expect(Array.isArray(message)).toBe(true);
-    expect(message).toHaveLength(2);
-
-    const filePart = message[0];
-    expect(filePart.type).toBe("file");
-    expect(filePart.data).toBe(bytes);
-    expect(filePart.mediaType).toBe("image/png");
-
-    const textPart = message[1];
-    expect(textPart).toEqual({ type: "text", text: "Paket für Meyer" });
+    expect(typeof message).toBe("string");
+    expect(message).toContain("[label parsed]");
+    expect(message).toContain("carrier=DHL");
+    expect(message).toContain("recipient=Natascha Elter");
+    expect(message).toContain("house=88");
+    expect(message).toContain("confidence=high");
+    expect(message).toContain("caption='Paket für Natascha'");
+    // High confidence → no "please confirm" suffix.
+    expect(message).not.toMatch(/please confirm/);
 
     expect(options.state).toEqual<TelegramChannelState>({
       chatId: 42,
@@ -324,7 +362,7 @@ describe("processInboundTelegramUpdate", () => {
   });
 
   it("substitutes a placeholder caption when a photo arrives without text", async () => {
-    const { deps, sendToAsh, fetchFile } = buildDeps();
+    const { deps, sendToAsh, fetchFile, parseLabel } = buildDeps();
 
     const update = {
       update_id: 2,
@@ -340,13 +378,142 @@ describe("processInboundTelegramUpdate", () => {
     await processInboundTelegramUpdate(makeRequest(update), deps);
 
     expect(fetchFile).toHaveBeenCalledWith("only");
+    // No caption passed to parseLabel when the user didn't send one.
+    const parseArgs = parseLabel.mock.calls[0]![0];
+    expect(parseArgs.caption).toBeUndefined();
 
     const [message] = sendToAsh.mock.calls[0]!;
-    expect(message[1]).toEqual({ type: "text", text: "(photo, no caption)" });
+    expect(typeof message).toBe("string");
+    expect(message).toContain("caption='(no caption)'");
   });
 
-  it("does not call fetchFile on text-only updates", async () => {
-    const { deps, fetchFile } = buildDeps();
+  it("appends a please-confirm suffix when the vision tool returns low confidence", async () => {
+    const { deps, sendToAsh } = buildDeps({
+      parsedLabel: {
+        carrier: "unknown",
+        recipientName: "M?yer",
+        confidence: "low",
+        reason: "recipient name partially obscured",
+      },
+    });
+
+    const update = {
+      update_id: 3,
+      message: {
+        message_id: 3,
+        date: 1,
+        chat: { id: 42, type: "private" },
+        from: { id: 99, is_bot: false, first_name: "T" },
+        photo: [{ file_id: "only", file_size: 100, width: 90, height: 90 }],
+      },
+    };
+
+    await processInboundTelegramUpdate(makeRequest(update), deps);
+
+    const [message] = sendToAsh.mock.calls[0]!;
+    expect(message).toContain("confidence=low");
+    expect(message).toMatch(/please confirm/i);
+  });
+
+  it("falls back to a generic 'photo received, label could not be parsed' message when parseLabel returns null", async () => {
+    const { deps, sendToAsh, parseLabel } = buildDeps({ parsedLabel: null });
+
+    const update = {
+      update_id: 4,
+      message: {
+        message_id: 4,
+        date: 1,
+        caption: "kann das jemand lesen?",
+        chat: { id: 42, type: "private" },
+        from: { id: 99, is_bot: false, first_name: "T" },
+        photo: [{ file_id: "f", file_size: 100, width: 90, height: 90 }],
+      },
+    };
+
+    await processInboundTelegramUpdate(makeRequest(update), deps);
+
+    expect(parseLabel).toHaveBeenCalledTimes(1);
+    const [message] = sendToAsh.mock.calls[0]!;
+    expect(message).toContain("[photo received, label could not be parsed]");
+    expect(message).toContain("caption: kann das jemand lesen?");
+    expect(message).toMatch(/retype|type the recipient/i);
+  });
+
+  it("falls back to the parse-failure message when parseLabel throws", async () => {
+    const { deps, sendToAsh, parseLabel } = buildDeps();
+    parseLabel.mockRejectedValueOnce(new Error("vision provider down"));
+
+    const update = {
+      update_id: 5,
+      message: {
+        message_id: 5,
+        date: 1,
+        chat: { id: 42, type: "private" },
+        from: { id: 99, is_bot: false, first_name: "T" },
+        photo: [{ file_id: "f", file_size: 100, width: 90, height: 90 }],
+      },
+    };
+
+    await processInboundTelegramUpdate(makeRequest(update), deps);
+
+    const [message] = sendToAsh.mock.calls[0]!;
+    expect(message).toContain("[photo received, label could not be parsed]");
+  });
+
+  it("falls back to the parse-failure message when fetchFile throws", async () => {
+    const { deps, sendToAsh, parseLabel, fetchFile } = buildDeps();
+    fetchFile.mockRejectedValueOnce(new Error("Bot API 404"));
+
+    const update = {
+      update_id: 6,
+      message: {
+        message_id: 6,
+        date: 1,
+        chat: { id: 42, type: "private" },
+        from: { id: 99, is_bot: false, first_name: "T" },
+        photo: [{ file_id: "f", file_size: 100, width: 90, height: 90 }],
+      },
+    };
+
+    await processInboundTelegramUpdate(makeRequest(update), deps);
+
+    expect(parseLabel).not.toHaveBeenCalled();
+    const [message] = sendToAsh.mock.calls[0]!;
+    expect(message).toContain("[photo received, label could not be parsed]");
+  });
+
+  it("omits absent label fields from the synthetic message", async () => {
+    const { deps, sendToAsh } = buildDeps({
+      parsedLabel: {
+        carrier: "DHL",
+        // No recipientName, no recipientHouseNumber, no trackingNumber.
+        confidence: "medium",
+        reason: "only carrier visible",
+      },
+    });
+
+    const update = {
+      update_id: 7,
+      message: {
+        message_id: 7,
+        date: 1,
+        chat: { id: 42, type: "private" },
+        from: { id: 99, is_bot: false, first_name: "T" },
+        photo: [{ file_id: "f", file_size: 100, width: 90, height: 90 }],
+      },
+    };
+
+    await processInboundTelegramUpdate(makeRequest(update), deps);
+
+    const [message] = sendToAsh.mock.calls[0]!;
+    expect(message).toContain("carrier=DHL");
+    expect(message).not.toContain("recipient=");
+    expect(message).not.toContain("house=");
+    expect(message).not.toContain("tracking=");
+  });
+
+  it("does not call fetchFile or parseLabel on text-only updates", async () => {
+    const { deps, fetchFile, parseLabel } = buildDeps();
 
     await processInboundTelegramUpdate(
       makeRequest(dmUpdate({ chatId: 5, text: "hi", fromUserId: 99 })),
@@ -354,6 +521,7 @@ describe("processInboundTelegramUpdate", () => {
     );
 
     expect(fetchFile).not.toHaveBeenCalled();
+    expect(parseLabel).not.toHaveBeenCalled();
   });
 });
 

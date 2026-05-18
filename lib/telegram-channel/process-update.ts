@@ -34,19 +34,32 @@
  * confirm_pickup taps — gate on the tapper actually being the
  * package's recipient.
  *
+ * Photo path (#43 item 1): when an inbound update contains a photo,
+ * the orchestrator calls `parseLabel` BEFORE handing the turn to the
+ * conversational agent. Vision happens once, in a dedicated tool
+ * (`agent/tools/parse_label.ts`) routed through Vercel AI Gateway with
+ * Gemma 4 31B as primary and Claude Opus 4.5 as fallback. The result
+ * is folded into a synthetic text message ("[label parsed] carrier=DHL
+ * recipient=… …") that the conversational model (Gemini Flash) sees
+ * as text — eliminating the previous failure mode where Flash received
+ * a `FilePart` and hallucinated "I cannot read images." Low-confidence
+ * parses get a "— please confirm before registering" suffix so the
+ * agent asks rather than auto-registers.
+ *
  * @see lib/telegram-channel/verify.ts   — header check (same primitive)
  * @see lib/telegram-channel/inbound.ts  — payload → canonical message
  * @see lib/telegram-channel/outbound.ts — `drainSessionToTelegram`
  * @see lib/telegram-channel/keyboards.ts — answer + edit Bot API helpers
+ * @see agent/tools/parse_label.ts        — vision tool the photo path drives
  */
 
-import type { UserContent } from "ai";
 import type { Session } from "experimental-ash/channels";
 
 import {
   extractInboundCallback,
   extractInboundMessage,
   type TelegramInboundCallback,
+  type TelegramInboundMessage,
   type TelegramUpdatePayload,
 } from "./inbound.js";
 import { verifyTelegramSecretHeader } from "./verify.js";
@@ -89,9 +102,13 @@ export interface ProcessUpdateDeps {
    * Ash `send(...)`. Typed loosely so tests can substitute a spy
    * without importing the runtime — the spike's `RouteHandlerArgs`
    * passes the real function through verbatim.
+   *
+   * Always a plain `string`: photo updates are parsed via `parseLabel`
+   * before this is called and the result is folded into a synthetic
+   * text message (#43 item 1).
    */
   readonly sendToAsh: (
-    message: string | UserContent,
+    message: string,
     options: {
       readonly auth: TelegramSessionAuth | null;
       readonly continuationToken: string;
@@ -128,6 +145,29 @@ export interface ProcessUpdateDeps {
     readonly bytes: Uint8Array;
     readonly mediaType: string;
   }>;
+  /**
+   * Vision parser for shipping-label photos. Wired by the factory to
+   * `agent/tools/parse_label.ts`'s `execute({ imageBase64, mediaType,
+   * caption })`. The orchestrator calls this exactly once per inbound
+   * photo update; the result is folded into a synthetic text message
+   * the conversational agent reads as if the user had typed it.
+   *
+   * Returns `null` when parsing fails — the orchestrator falls back
+   * to a generic "I received a photo but couldn't read it" prompt so
+   * the agent can ask the holder to retype the recipient.
+   */
+  readonly parseLabel: (input: {
+    imageBase64: string;
+    mediaType: string;
+    caption?: string;
+  }) => Promise<{
+    carrier: string;
+    trackingNumber?: string;
+    recipientName?: string;
+    recipientHouseNumber?: string;
+    confidence: "high" | "medium" | "low";
+    reason: string;
+  } | null>;
   /**
    * Acks a `callback_query` so the Telegram client clears the tap
    * spinner. Optional `text` shows a brief toast to the tapper —
@@ -272,6 +312,77 @@ async function handleCallbackQuery(
 }
 
 /**
+ * Encode bytes as base64 without depending on Node's `Buffer` typing
+ * surfacing into the orchestrator's signature — the tool's `execute`
+ * handles the decode side itself.
+ */
+function bytesToBase64(bytes: Uint8Array): string {
+  return Buffer.from(bytes).toString("base64");
+}
+
+/**
+ * Photo path: fetch the file, parse the label via the vision tool,
+ * and produce a synthetic text message the conversational agent reads
+ * as if the user typed it. Tolerates failure at every step — the
+ * agent's final-resort message tells it a photo arrived but couldn't
+ * be parsed, so it can ask the holder to retype the recipient.
+ */
+async function buildSyntheticPhotoMessage(
+  inbound: TelegramInboundMessage,
+  deps: ProcessUpdateDeps,
+): Promise<string> {
+  const fileId = inbound.photoFileId;
+  if (fileId === null) {
+    // Defensive — caller already narrowed.
+    return inbound.text.length > 0 ? inbound.text : "(photo, no caption)";
+  }
+
+  const captionText = inbound.text.length > 0 ? inbound.text : undefined;
+  const captionForAgent = captionText ?? "(no caption)";
+
+  let parsed: Awaited<ReturnType<ProcessUpdateDeps["parseLabel"]>> = null;
+  try {
+    const { bytes, mediaType } = await deps.fetchFile(fileId);
+    parsed = await deps.parseLabel({
+      imageBase64: bytesToBase64(bytes),
+      mediaType,
+      caption: captionText,
+    });
+  } catch {
+    parsed = null;
+  }
+
+  if (parsed === null) {
+    return [
+      "[photo received, label could not be parsed]",
+      `caption: ${captionForAgent}`,
+      "Please ask the holder (in their language) to type the recipient's name and house number so the package can be registered.",
+    ].join(" ");
+  }
+
+  const parts: string[] = ["[label parsed]"];
+  parts.push(`carrier=${parsed.carrier}`);
+  if (parsed.recipientName) {
+    parts.push(`recipient=${parsed.recipientName}`);
+  }
+  if (parsed.recipientHouseNumber) {
+    parts.push(`house=${parsed.recipientHouseNumber}`);
+  }
+  if (parsed.trackingNumber) {
+    parts.push(`tracking=${parsed.trackingNumber}`);
+  }
+  parts.push(`confidence=${parsed.confidence}`);
+  parts.push(`caption='${captionForAgent}'`);
+
+  let synthetic = parts.join(" ");
+  if (parsed.confidence === "low") {
+    synthetic +=
+      " — please confirm with the holder before registering (the recipient name may be wrong).";
+  }
+  return synthetic;
+}
+
+/**
  * Runs one inbound Telegram webhook delivery through the agent.
  *
  * Returns the HTTP `Response` the route should reply with. Telegram
@@ -325,15 +436,9 @@ export async function processInboundTelegramUpdate(
             : {},
         };
 
-  let message: string | UserContent;
+  let message: string;
   if (inbound.photoFileId !== null) {
-    const { bytes, mediaType } = await deps.fetchFile(inbound.photoFileId);
-    const captionText =
-      inbound.text.length > 0 ? inbound.text : "(photo, no caption)";
-    message = [
-      { type: "file", data: bytes, mediaType },
-      { type: "text", text: captionText },
-    ];
+    message = await buildSyntheticPhotoMessage(inbound, deps);
   } else {
     message = inbound.text;
   }

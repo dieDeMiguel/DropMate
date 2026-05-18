@@ -35,6 +35,7 @@
 
 import { defineChannel, POST } from "experimental-ash/channels";
 
+import parseLabelTool from "../../agent/tools/parse_label.js";
 import {
   getPackage,
   getSessionIdForChat,
@@ -105,6 +106,27 @@ export function telegramChannel(config: TelegramChannelConfig) {
             drainSession: (session, chatId) =>
               drainSessionToTelegram(session, chatId, { token }),
             fetchFile: (fileId) => fetchTelegramFile(token, fileId),
+            parseLabel: async (input) => {
+              const execute = parseLabelTool.execute as (
+                input: unknown,
+                options: unknown,
+              ) => Promise<{
+                carrier: string;
+                trackingNumber?: string;
+                recipientName?: string;
+                recipientHouseNumber?: string;
+                confidence: "high" | "medium" | "low";
+                reason: string;
+              }>;
+              try {
+                return await execute(input, {
+                  toolCallId: `parse_label:${Date.now()}`,
+                  messages: [],
+                });
+              } catch {
+                return null;
+              }
+            },
             answerCallback: (callbackId, text) =>
               answerCallbackQuery(token, callbackId, text),
             stripKeyboard: (chatId, messageId) =>

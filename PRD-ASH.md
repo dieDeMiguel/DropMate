@@ -88,7 +88,7 @@ Bot → GROUP: "Package for Anna-Sophie Meyer picked up.
 
 **Agent surface used**:
 - `tools/classify_message.ts` — fast model decides package-related vs. noise (cheap, via AI Gateway)
-- `tools/parse_label.ts` — vision tool reads shipping labels (Gemini Flash → Claude Sonnet fallback)
+- `tools/parse_label.ts` — vision tool reads shipping labels (Gemma 4 31B → Claude Opus 4.5 fallback)
 - `tools/register_package.ts` — writes Package to Redis, returns confirmation
 - `tools/notify_recipient.ts` — DMs the owner in their preferred language
 
@@ -214,7 +214,7 @@ Each task routes to the optimal model for cost/quality. Ash's `defineAgent` uses
 | Task | Model | Cost | Trigger frequency |
 |---|---|---|---|
 | Message classification | `google/gemini-2.5-flash` (sort: cost) | ~$0.001 | Every group message |
-| Label photo parsing (vision) | `google/gemini-2.5-flash` → `anthropic/claude-sonnet-4` (fallback) | ~$0.01 | Only when photos sent |
+| Label photo parsing (vision) | `google/gemma-4-31b-it` → `anthropic/claude-opus-4.5` (fallback) | ~$0.005 | Only when photos sent |
 | Multilingual NLU | `anthropic/claude-sonnet-4` | ~$0.005 | Package-related messages only |
 | Response generation + translation | `google/gemini-2.5-flash` (sort: cost) | ~$0.001 | Bot responses |
 
