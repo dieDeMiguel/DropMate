@@ -2,9 +2,10 @@
  * `register_package` — record that the calling resident has received a
  * package on behalf of a neighbor.
  *
- * Use one call per detected package: "Pakete für Ritter und Meyer" →
- * two calls. The model parses the free-text (or label-photo output in
- * a later slice) into the structured fields below.
+ * Use one call per detected package: a message naming two recipients
+ * (e.g. "Pakete für <recipient-a> und <recipient-b>") → two calls. The
+ * model parses the free-text (or label-photo output in a later slice)
+ * into the structured fields below.
  *
  * The holder (caller) is identified from session auth — same pattern
  * as `register_resident`. The holder MUST already be a registered
@@ -93,8 +94,8 @@ const inputSchema = z.object({
     .string()
     .min(1)
     .describe(
-      "Name on the label / in the message, as the holder wrote it. " +
-        "E.g. 'Ritter', 'Anna-Sophie Meyer'.",
+      "Name on the label / in the message, as the holder wrote it " +
+        "(family name alone, or full given + family name).",
     ),
   recipientHouseNumber: z
     .string()
@@ -123,8 +124,8 @@ const inputSchema = z.object({
 export default defineTool({
   description:
     "Record that the calling resident has received a package for a " +
-    "neighbor. Call this ONCE PER PACKAGE — e.g. 'Pakete für Ritter und " +
-    "Meyer' is two calls. The holder is identified by session auth, so " +
+    "neighbor. Call this ONCE PER PACKAGE — a message naming two " +
+    "recipients is two calls. The holder is identified by session auth, so " +
     "do not ask for an id. The holder must be registered (via " +
     "`register_resident`) before calling this. Returns the stored " +
     "Package record, whether the recipient could be linked to an " +

@@ -17,7 +17,7 @@
  * Returns the updated Package plus `remainingHeldOnStreet` — the
  * number of packages on the same street still in `status: "held"`
  * after this confirmation. The model uses that count to phrase the
- * group announcement ("1 remaining at Bremer", or "all packages
+ * group announcement ("1 remaining at <holder-name>", or "all packages
  * picked up") per PRD §5 Flow 1.
  */
 

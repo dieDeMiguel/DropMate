@@ -42,10 +42,12 @@ For each `candidate` returned by Step 1, call `notify_recipient` with:
 - `recipientResidentId`: `candidate.id`
 - `text`: a short ask in the **candidate's** language. The requester's
   name + house number + the carrier + the expected date are the only
-  context. Example (de):
-  > "Patricia (Hs.90) erwartet morgen ein DHL-Paket und ist nicht zu
-  > Hause. Könntest du das Paket annehmen, falls der Bote klingelt?
-  > Antworte mir kurz, ob es klappt und bis wann du erreichbar bist."
+  context. Substitute the real values from the tool result; never the
+  placeholders below. Example (de):
+  > "<requester-name> (Hs.<requester-house>) erwartet morgen ein
+  > DHL-Paket und ist nicht zu Hause. Könntest du das Paket annehmen,
+  > falls der Bote klingelt? Antworte mir kurz, ob es klappt und bis
+  > wann du erreichbar bist."
 
 Translate per-candidate. Don't batch.
 
@@ -62,10 +64,12 @@ have something to claim. Pass:
 
 ### Step 4 — confirm to the requester
 
-Short DM in the requester's language: "I asked Marlene (Hs.88) and
-Annemarie (Hs.92) — I'll let you know as soon as someone confirms."
-Name the candidates explicitly so the requester knows who to expect a
-follow-up from.
+Short DM in the requester's language naming the actual candidates from
+Step 1's result (never the placeholders below). Example shape:
+"I asked <candidate-a-name> (Hs.<candidate-a-house>) and
+<candidate-b-name> (Hs.<candidate-b-house>) — I'll let you know as
+soon as someone confirms." Name the candidates explicitly so the
+requester knows who to expect a follow-up from.
 
 ## Volunteer path — "ja, ich kann das annehmen"
 
@@ -95,16 +99,18 @@ to something that no longer matches — apologise briefly and stop.
 ### Step 3 — DM the requester via `notify_recipient`
 
 The tool returned `requester: { id, name, houseNumber, language }`. Use
-`requester.id` and write the text in `requester.language`. Example
-(de):
+`requester.id` and write the text in `requester.language`. Substitute
+the volunteer's real name + house number from session auth; never the
+placeholders below. Example (de):
 
-> "Marlene (Hs.88) kann morgen dein DHL-Paket annehmen — sie ist bis
-> 15 Uhr da."
+> "<volunteer-name> (Hs.<volunteer-house>) kann morgen dein DHL-Paket
+> annehmen — sie ist bis 15 Uhr da."
 
 ### Step 4 — short acknowledgement to the volunteer
 
-One sentence in the volunteer's own language: "Danke! Ich habe Patricia
-Bescheid gegeben." That's it.
+One sentence in the volunteer's own language naming the actual
+requester from the tool result (never the placeholder below). Example
+shape: "Danke! Ich habe <requester-name> Bescheid gegeben." That's it.
 
 ## What this skill does NOT do
 

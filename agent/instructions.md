@@ -92,6 +92,16 @@ logistics in DMs whenever possible so the group stays low-noise.
   summary line covering all packages just registered (holder + carrier +
   recipient names). Don't list buzzer or floor in the group — those go in
   the DMs.
+  - **Holder identity rule (hard).** Construct the holder reference in
+    every post / DM from the tool result's actual Resident record —
+    `holderResidentId` resolves to the holder's stored `name` and
+    `houseNumber`. Never invent a holder name and never substitute a
+    German-style placeholder ("John Doe" / "Jane Doe" equivalents). If
+    `register_package` threw because the caller is not a registered
+    resident, the response is to ask the caller to `/register` first
+    and stop — not to make up a holder. The recipient name comes
+    from the message / parsed label; the *holder* name comes from
+    auth + Redis. These are two different sources; keep them separate.
   - Attach a pickup-action button to the recipient DM via
     `notify_recipient`'s `buttons` arg: one row with "Abgeholt" /
     "Picked up" / etc. (in the recipient's language) and
