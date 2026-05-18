@@ -33,7 +33,7 @@
  * @see agent/channels/telegram.ts — the one-line caller (slice 3)
  */
 
-import { defineChannel, POST } from "experimental-ash/channels";
+import { defineChannel, GET, POST } from "experimental-ash/channels";
 
 import parseLabelTool from "../../agent/tools/parse_label.js";
 import {
@@ -41,7 +41,10 @@ import {
   getSessionIdForChat,
   setSessionIdForChat,
 } from "../redis.js";
-import { getTelegramFileUrl } from "./file.js";
+import {
+  buildFileProxyUrl,
+  handleFileProxyRequest,
+} from "./file-proxy.js";
 import {
   answerCallbackQuery,
   editMessageReplyMarkup,
@@ -94,9 +97,29 @@ export function telegramChannel(config: TelegramChannelConfig) {
     state: undefined as unknown as TelegramChannelState,
     context: (state) => ({ chatId: state.chatId, fromUserId: state.fromUserId }),
     routes: [
+      // GET proxy for shipping-label photos. The Gateway server fetches
+      // this URL (instead of Telegram's CDN directly) so we can override
+      // the content-type that the CDN sometimes mis-reports as
+      // `application/octet-stream` — vision providers reject anything
+      // that isn't `image/*`. See `file-proxy.ts` for the full rationale.
+      GET<TelegramChannelState>(
+        "/api/telegram-file/:id",
+        async (req, { params }) => {
+          return handleFileProxyRequest(req, params.id, {
+            token,
+            secret: webhookSecret,
+          });
+        },
+      ),
       POST<TelegramChannelState>(
         "/api/telegram",
         async (req, { send, waitUntil }) => {
+          // The proxy URL must be absolute (the AI Gateway fetches it
+          // server-side, not from the user's browser). Capture the
+          // origin from the inbound webhook so the URL works on both
+          // production (`drop-mate-delta.vercel.app`) and preview
+          // deploys without an explicit env var.
+          const origin = new URL(req.url).origin;
           return processInboundTelegramUpdate(req, {
             expectedSecret: webhookSecret,
             sendToAsh: send,
@@ -105,7 +128,8 @@ export function telegramChannel(config: TelegramChannelConfig) {
             setSessionIdForChat,
             drainSession: (session, chatId) =>
               drainSessionToTelegram(session, chatId, { token }),
-            getFileUrl: (fileId) => getTelegramFileUrl(token, fileId),
+            getFileUrl: async (fileId) =>
+              buildFileProxyUrl(origin, fileId, webhookSecret),
             parseLabel: async (input) => {
               // No silent catch: errors propagate to process-update.ts's
               // catch which logs with stack + chatId. A silent `return
