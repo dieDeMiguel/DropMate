@@ -1,8 +1,9 @@
 /**
  * `notify_recipient` — DM a resident privately.
  *
- * Use after `register_package` returned `recipientLinked: true`, to tell
- * the recipient where their package is (holder name, house number,
+ * Use after `register_package` returned `recipientResolution.kind:
+ * "resident"`, to tell the recipient where their package is (holder
+ * name, house number,
  * floor, buzzer, availability). The model produces the message text
  * already localised to the recipient's language — `language_detection`
  * injects the recipient's stored language into the system message — so
@@ -86,11 +87,12 @@ const inputSchema = z.object({
 export default defineTool({
   description:
     "Send a 1:1 Telegram DM to a registered resident. Use after a " +
-    "`register_package` call that linked the recipient (or any time a " +
-    "private message is appropriate). The text must already be in the " +
-    "recipient's language. Optionally attach inline-keyboard `buttons` " +
-    "for quick actions (pickup confirmation, reception-request yes/no). " +
-    "Returns `{ delivered: true, language }`.",
+    "`register_package` call whose `recipientResolution.kind` was " +
+    "`'resident'` (or any time a private message is appropriate). The " +
+    "text must already be in the recipient's language. Optionally " +
+    "attach inline-keyboard `buttons` for quick actions (pickup " +
+    "confirmation, reception-request yes/no). Returns " +
+    "`{ delivered: true, language }`.",
   inputSchema,
   async execute({ recipientResidentId, text, buttons }) {
     const token = process.env.TELEGRAM_BOT_TOKEN;
