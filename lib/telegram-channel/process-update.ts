@@ -34,17 +34,27 @@
  * confirm_pickup taps — gate on the tapper actually being the
  * package's recipient.
  *
- * Photo path (#43 item 1): when an inbound update contains a photo,
- * the orchestrator calls `parseLabel` BEFORE handing the turn to the
- * conversational agent. Vision happens once, in a dedicated tool
- * (`agent/tools/parse_label.ts`) routed through Vercel AI Gateway with
- * Gemma 4 31B as primary and Claude Opus 4.5 as fallback. The result
- * is folded into a synthetic text message ("[label parsed] carrier=DHL
- * recipient=… …") that the conversational model (Gemini Flash) sees
- * as text — eliminating the previous failure mode where Flash received
- * a `FilePart` and hallucinated "I cannot read images." Low-confidence
- * parses get a "— please confirm before registering" suffix so the
- * agent asks rather than auto-registers.
+ * Photo path: when an inbound update contains a photo, the
+ * orchestrator runs ONE vision parser BEFORE handing the turn to the
+ * conversational agent and folds the result into a synthetic text
+ * message the agent reads as if the user typed it. Which parser fires
+ * depends on the chat type:
+ *
+ *   group  → `parseLabel`         (Flow 1, shipping-label scan)
+ *   DM     → `parseTrackingPage`  (Flow 2, /receive entry via screenshot)
+ *
+ * Both parsers are sibling tools in `agent/tools/` routed via Vercel AI
+ * Gateway (Gemini 3.1 Flash Lite primary, Claude Sonnet 4.6 fallback).
+ * The split matches where each flow actually triggers — labels are
+ * announced in the group, reception requests start in DM — and lets
+ * each parser keep a tight, single-purpose prompt instead of one
+ * over-loaded "what kind of photo is this?" classifier. Low-confidence
+ * parses get a "— please confirm before <next-step>" suffix so the
+ * agent asks rather than auto-actioning on a guess. The model itself
+ * still owns the final disambiguation (per `agent/instructions.md`):
+ * a `[tracking page parsed]` message can produce either a /receive
+ * card or a clarifying question depending on the surrounding DM
+ * context.
  *
  * @see lib/telegram-channel/verify.ts   — header check (same primitive)
  * @see lib/telegram-channel/inbound.ts  — payload → canonical message
@@ -166,6 +176,31 @@ export interface ProcessUpdateDeps {
     trackingNumber?: string;
     recipientName?: string;
     recipientHouseNumber?: string;
+    confidence: "high" | "medium" | "low";
+    reason: string;
+  } | null>;
+  /**
+   * Vision parser for carrier tracking-page screenshots (Flow 2 entry
+   * via `/receive`). Wired by the factory to
+   * `agent/tools/parse_tracking_page.ts`'s `execute({ imageUrl, caption })`.
+   * The orchestrator calls this exactly once per inbound DM photo
+   * update (groups still route to `parseLabel`); the result is folded
+   * into a synthetic text message the conversational agent reads as if
+   * the requester had typed the carrier/tracking/window themselves.
+   *
+   * Throws when the underlying model + fallback both fail — the
+   * orchestrator's catch logs the error and falls back to a generic
+   * "screenshot couldn't be read" prompt so the agent can ask the
+   * requester to type the fields manually.
+   */
+  readonly parseTrackingPage: (input: {
+    imageUrl: string;
+    caption?: string;
+  }) => Promise<{
+    carrier: string;
+    trackingNumber?: string;
+    expectedWindowStartAt?: string;
+    expectedWindowEndAt?: string;
     confidence: "high" | "medium" | "low";
     reason: string;
   } | null>;
@@ -409,11 +444,17 @@ async function handleCallbackQuery(
 }
 
 /**
- * Photo path: resolve the file URL, parse the label via the vision tool,
+ * Photo path: resolve the file URL, run the appropriate vision parser,
  * and produce a synthetic text message the conversational agent reads
  * as if the user typed it. Tolerates failure at every step — the
  * agent's final-resort message tells it a photo arrived but couldn't
- * be parsed, so it can ask the holder to retype the recipient.
+ * be parsed, so it can ask the user to retype the fields.
+ *
+ * Routing: group photos run through `parseLabel` (Flow 1 — shipping
+ * label scan); DM photos run through `parseTrackingPage` (Flow 2 —
+ * /receive entry via tracking-page screenshot). The split matches
+ * where each flow actually triggers and keeps each parser's prompt
+ * tight.
  */
 async function buildSyntheticPhotoMessage(
   inbound: TelegramInboundMessage,
@@ -428,17 +469,52 @@ async function buildSyntheticPhotoMessage(
   const captionText = inbound.text.length > 0 ? inbound.text : undefined;
   const captionForAgent = captionText ?? "(no caption)";
 
+  let imageUrl: string;
+  try {
+    imageUrl = await deps.getFileUrl(fileId);
+  } catch (err) {
+    console.error(
+      "[photo] file-url resolution failed for chatId",
+      inbound.chatId,
+      "— error:",
+      err instanceof Error
+        ? { name: err.name, message: err.message, stack: err.stack }
+        : err,
+    );
+    return buildPhotoFallbackMessage(inbound.isGroup, captionForAgent);
+  }
+
+  if (inbound.isGroup) {
+    return buildSyntheticLabelMessage(inbound, deps, imageUrl, captionText, captionForAgent);
+  }
+  return buildSyntheticTrackingPageMessage(inbound, deps, imageUrl, captionText, captionForAgent);
+}
+
+function buildPhotoFallbackMessage(isGroup: boolean, captionForAgent: string): string {
+  if (isGroup) {
+    return [
+      "[photo received, label could not be parsed]",
+      `caption: ${captionForAgent}`,
+      "Please ask the holder (in their language) to type the recipient's name and house number so the package can be registered.",
+    ].join(" ");
+  }
+  return [
+    "[photo received, tracking page could not be parsed]",
+    `caption: ${captionForAgent}`,
+    "Please ask the requester (in their language) to type the carrier and expected delivery time so the reception request can be posted.",
+  ].join(" ");
+}
+
+async function buildSyntheticLabelMessage(
+  inbound: TelegramInboundMessage,
+  deps: ProcessUpdateDeps,
+  imageUrl: string,
+  captionText: string | undefined,
+  captionForAgent: string,
+): Promise<string> {
   let parsed: Awaited<ReturnType<ProcessUpdateDeps["parseLabel"]>> = null;
   try {
-    const imageUrl = await deps.getFileUrl(fileId);
-    parsed = await deps.parseLabel({
-      imageUrl,
-      caption: captionText,
-    });
-    // Log every successful parse so we can tell apart "model never got
-    // called" from "model returned confidence=low with no recipientName".
-    // URL excluded from the log (contains the bot token); only the
-    // structured output and chatId.
+    parsed = await deps.parseLabel({ imageUrl, caption: captionText });
     console.info(
       "[parse_label] ok for chatId",
       inbound.chatId,
@@ -446,10 +522,6 @@ async function buildSyntheticPhotoMessage(
       parsed,
     );
   } catch (err) {
-    // Don't crash the turn — the agent has a "couldn't parse" branch that
-    // asks the holder to retype. But DO log: silent failure here is what
-    // hid Gateway model/auth errors during #43 item 1 rollout, so every
-    // photo turn that ends in "couldn't read the label" now leaves a trail.
     console.error(
       "[parse_label] failed for chatId",
       inbound.chatId,
@@ -460,11 +532,7 @@ async function buildSyntheticPhotoMessage(
   }
 
   if (parsed === null) {
-    return [
-      "[photo received, label could not be parsed]",
-      `caption: ${captionForAgent}`,
-      "Please ask the holder (in their language) to type the recipient's name and house number so the package can be registered.",
-    ].join(" ");
+    return buildPhotoFallbackMessage(true, captionForAgent);
   }
 
   const parts: string[] = ["[label parsed]"];
@@ -485,6 +553,67 @@ async function buildSyntheticPhotoMessage(
   if (parsed.confidence === "low") {
     synthetic +=
       " — please confirm with the holder before registering (the recipient name may be wrong).";
+  }
+  return synthetic;
+}
+
+async function buildSyntheticTrackingPageMessage(
+  inbound: TelegramInboundMessage,
+  deps: ProcessUpdateDeps,
+  imageUrl: string,
+  captionText: string | undefined,
+  captionForAgent: string,
+): Promise<string> {
+  let parsed: Awaited<ReturnType<ProcessUpdateDeps["parseTrackingPage"]>> = null;
+  try {
+    parsed = await deps.parseTrackingPage({ imageUrl, caption: captionText });
+    console.info(
+      "[parse_tracking_page] ok for chatId",
+      inbound.chatId,
+      "result:",
+      parsed,
+    );
+  } catch (err) {
+    console.error(
+      "[parse_tracking_page] failed for chatId",
+      inbound.chatId,
+      "— error:",
+      err instanceof Error
+        ? { name: err.name, message: err.message, stack: err.stack }
+        : err,
+    );
+    parsed = null;
+  }
+
+  if (parsed === null) {
+    return buildPhotoFallbackMessage(false, captionForAgent);
+  }
+
+  const parts: string[] = ["[tracking page parsed]"];
+  parts.push(`carrier=${parsed.carrier}`);
+  if (parsed.trackingNumber) {
+    parts.push(`tracking=${parsed.trackingNumber}`);
+  }
+  if (parsed.expectedWindowStartAt) {
+    parts.push(`windowStart=${parsed.expectedWindowStartAt}`);
+  }
+  if (parsed.expectedWindowEndAt) {
+    parts.push(`windowEnd=${parsed.expectedWindowEndAt}`);
+  }
+  parts.push(`confidence=${parsed.confidence}`);
+  // Surface the Telegram file_id so the agent can pass it through to
+  // `create_reception_request` as `screenshotFileId`. The volunteer's
+  // operational DM at accept time uses this to attach the screenshot
+  // on a low-confidence parse — see #52's accept handler.
+  if (inbound.photoFileId !== null) {
+    parts.push(`screenshotFileId=${inbound.photoFileId}`);
+  }
+  parts.push(`caption='${captionForAgent}'`);
+
+  let synthetic = parts.join(" ");
+  if (parsed.confidence === "low") {
+    synthetic +=
+      " — please confirm the parsed fields with the requester before posting the group card (the ETA window may be wrong).";
   }
   return synthetic;
 }

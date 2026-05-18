@@ -36,6 +36,7 @@
 import { defineChannel, GET, POST } from "experimental-ash/channels";
 
 import parseLabelTool from "../../agent/tools/parse_label.js";
+import parseTrackingPageTool from "../../agent/tools/parse_tracking_page.js";
 import {
   getPackage,
   getResident,
@@ -152,6 +153,26 @@ export function telegramChannel(config: TelegramChannelConfig) {
               }>;
               return execute(input, {
                 toolCallId: `parse_label:${Date.now()}`,
+                messages: [],
+              });
+            },
+            parseTrackingPage: async (input) => {
+              // Sibling of parseLabel for Flow 2 — DM screenshots of
+              // carrier tracking pages. Same no-silent-catch rule: let
+              // the orchestrator's catch log the failure once.
+              const execute = parseTrackingPageTool.execute as (
+                input: unknown,
+                options: unknown,
+              ) => Promise<{
+                carrier: string;
+                trackingNumber?: string;
+                expectedWindowStartAt?: string;
+                expectedWindowEndAt?: string;
+                confidence: "high" | "medium" | "low";
+                reason: string;
+              }>;
+              return execute(input, {
+                toolCallId: `parse_tracking_page:${Date.now()}`,
                 messages: [],
               });
             },
