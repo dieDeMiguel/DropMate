@@ -348,6 +348,20 @@ async function buildSyntheticPhotoMessage(
       mediaType,
       caption: captionText,
     });
+    // Log every successful parse too — without this we can't tell apart
+    // "model never got called" from "model returned confidence=low with
+    // no recipientName" when the agent ends up asking the holder to
+    // retype anyway. Bytes excluded; only the structured output.
+    console.info(
+      "[parse_label] ok for chatId",
+      inbound.chatId,
+      "mediaType=",
+      mediaType,
+      "bytes=",
+      bytes.byteLength,
+      "result:",
+      parsed,
+    );
   } catch (err) {
     // Don't crash the turn — the agent has a "couldn't parse" branch that
     // asks the holder to retype. But DO log: silent failure here is what
