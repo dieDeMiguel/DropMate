@@ -17,7 +17,11 @@
  *     Redis lookup without touching the helper.
  */
 
-import { sendTelegramMessage, type InlineKeyboardMarkup } from "./send.js";
+import {
+  sendTelegramMessage,
+  type InlineKeyboardMarkup,
+  type TelegramMessageEntity,
+} from "./send.js";
 import type { Resident } from "../redis.js";
 
 export async function dmResident(
@@ -39,6 +43,7 @@ export async function postToGroup(
   groupChatId: number,
   text: string,
   replyMarkup?: InlineKeyboardMarkup,
+  entities?: ReadonlyArray<TelegramMessageEntity>,
 ): Promise<void> {
-  await sendTelegramMessage(token, groupChatId, text, replyMarkup);
+  await sendTelegramMessage(token, groupChatId, text, replyMarkup, entities);
 }

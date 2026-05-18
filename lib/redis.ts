@@ -385,6 +385,148 @@ export async function listResidentsForStreet(
 }
 
 /**
+ * Lightweight directory of every Telegram identity the bot has seen,
+ * whether or not they've completed `/register`. Keyed by the Telegram
+ * numeric `user_id`. Used by `register_package` to fall back from
+ * "registered Resident match" to "known Telegram user match" before
+ * declaring a recipient unknown.
+ *
+ * The Telegram Bot API forbids initiating a DM to a user who has not
+ * started a private chat with the bot, so a `KnownTelegramUser` record
+ * alone is never enough to DM the recipient. It IS enough to render a
+ * `text_mention` MessageEntity in a group post (the entity carries the
+ * `user_id` directly), which pings the user without requiring a prior
+ * DM. See `post_to_group`'s `mentions` arg.
+ *
+ * Fields are upserted on every inbound message (text, photo, callback
+ * tap). `seenInChats` is a small set so a single user observed in
+ * multiple group chats is still findable.
+ */
+export interface KnownTelegramUser {
+  readonly userId: number;
+  readonly firstName: string;
+  readonly lastName?: string;
+  readonly username?: string;
+  readonly languageCode?: string;
+  readonly lastSeenAt: number;
+  readonly seenInChats: readonly number[];
+}
+
+const KNOWN_TG_USER_KEY_PREFIX = "tg_user:";
+
+function knownTelegramUserKey(userId: number): string {
+  return `${KNOWN_TG_USER_KEY_PREFIX}${userId}`;
+}
+
+export async function getKnownTelegramUser(
+  userId: number,
+): Promise<KnownTelegramUser | null> {
+  const redis = getRedis();
+  return (
+    (await redis.get<KnownTelegramUser>(knownTelegramUserKey(userId))) ?? null
+  );
+}
+
+/**
+ * Upsert observation of a Telegram user. Merges the existing record's
+ * `seenInChats` with the new chat id (deduped, max 32 entries — past
+ * the limit we drop the oldest to keep the record bounded). All other
+ * fields take the latest observation's value when present.
+ *
+ * Caller is the inbound orchestrator — failure to write must not crash
+ * the turn, so this helper is wrapped in a try/catch at the call site
+ * rather than swallowing here.
+ */
+export async function upsertKnownTelegramUser(
+  observation: Omit<KnownTelegramUser, "lastSeenAt" | "seenInChats"> & {
+    readonly chatId: number;
+    readonly seenAt?: number;
+  },
+): Promise<KnownTelegramUser> {
+  const redis = getRedis();
+  const existing = await getKnownTelegramUser(observation.userId);
+  const seenAt = observation.seenAt ?? Date.now();
+  const mergedChats = new Set<number>(existing?.seenInChats ?? []);
+  mergedChats.add(observation.chatId);
+  const trimmedChats = Array.from(mergedChats).slice(-32);
+  const next: KnownTelegramUser = {
+    userId: observation.userId,
+    firstName: observation.firstName,
+    lastName: observation.lastName,
+    username: observation.username,
+    languageCode: observation.languageCode,
+    lastSeenAt: seenAt,
+    seenInChats: trimmedChats,
+  };
+  await redis.set(knownTelegramUserKey(observation.userId), next);
+  return next;
+}
+
+/**
+ * Best-effort name lookup across the known-user directory. Used by
+ * `register_package` to resolve a label-string recipient ("Natascha
+ * Elter") to a Telegram identity that can be `text_mention`'d in the
+ * group post even when the recipient hasn't completed `/register`.
+ *
+ * Matching mirrors `findResidentByNameAndHouse`'s name rule: a
+ * case-insensitive substring match in either direction across the
+ * concatenated `firstName lastName` (or `firstName` alone when there's
+ * no last name). The needle (`name`) is split on whitespace and every
+ * non-empty token must hit either the full name or the username — that
+ * stops the "Anna" from matching the candidate "Hannah Brown" via the
+ * three-letter overlap. `houseNumber` is NOT a constraint here — known
+ * Telegram users have no address; the holder's house-number default
+ * still applies to the Package record itself.
+ *
+ * Returns the most recently observed match (by `lastSeenAt`) when more
+ * than one candidate matches.
+ *
+ * Spike scale (≤ a few hundred users across a building's groups) makes
+ * a SCAN acceptable. V2 should add a username / token index.
+ */
+export async function findKnownTelegramUserByName(
+  name: string,
+): Promise<KnownTelegramUser | null> {
+  const trimmed = name.trim();
+  if (trimmed === "") return null;
+  const needleTokens = trimmed
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((tok) => tok.length > 0);
+  if (needleTokens.length === 0) return null;
+  const redis = getRedis();
+  let cursor: string = "0";
+  const matches: KnownTelegramUser[] = [];
+  do {
+    const result: [string, string[]] = await redis.scan(cursor, {
+      match: `${KNOWN_TG_USER_KEY_PREFIX}*`,
+      count: 100,
+    });
+    const nextCursor: string = result[0];
+    const keys: string[] = result[1];
+    if (keys.length > 0) {
+      const rows = await redis.mget<(KnownTelegramUser | null)[]>(...keys);
+      for (const u of rows ?? []) {
+        if (!u) continue;
+        const fullName = u.lastName
+          ? `${u.firstName} ${u.lastName}`
+          : u.firstName;
+        const haystackFull = fullName.toLowerCase();
+        const haystackUser = u.username?.toLowerCase() ?? "";
+        const allHit = needleTokens.every(
+          (tok) => haystackFull.includes(tok) || haystackUser.includes(tok),
+        );
+        if (allHit) matches.push(u);
+      }
+    }
+    cursor = nextCursor;
+  } while (cursor !== "0");
+  if (matches.length === 0) return null;
+  matches.sort((a, b) => b.lastSeenAt - a.lastSeenAt);
+  return matches[0] ?? null;
+}
+
+/**
  * Reception request record. A resident DMs the bot "I'm not home
  * tomorrow, expecting a DHL package" — the bot writes one of these,
  * DMs candidate neighbors, and updates it when a volunteer accepts.

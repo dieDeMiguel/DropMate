@@ -29,6 +29,9 @@ export interface TelegramInboundMessage {
   readonly isGroup: boolean;
   readonly fromUserId: number | null;
   readonly fromLanguageCode: string | null;
+  readonly fromFirstName: string | null;
+  readonly fromLastName: string | null;
+  readonly fromUsername: string | null;
   /**
    * `file_id` of the largest photo variant on this message, or `null`
    * when the inbound update has no `photo[]`. The orchestrator turns
@@ -52,6 +55,9 @@ export interface TelegramInboundCallback {
   readonly messageId: number;
   readonly fromUserId: number;
   readonly fromLanguageCode: string | null;
+  readonly fromFirstName: string | null;
+  readonly fromLastName: string | null;
+  readonly fromUsername: string | null;
   readonly isGroup: boolean;
   readonly data: string;
 }
@@ -86,6 +92,9 @@ export interface TelegramUpdatePayload {
     readonly from?: {
       readonly id: number;
       readonly language_code?: string;
+      readonly first_name?: string;
+      readonly last_name?: string;
+      readonly username?: string;
     };
   };
   readonly callback_query?: {
@@ -94,6 +103,9 @@ export interface TelegramUpdatePayload {
     readonly from: {
       readonly id: number;
       readonly language_code?: string;
+      readonly first_name?: string;
+      readonly last_name?: string;
+      readonly username?: string;
     };
     readonly message?: {
       readonly message_id: number;
@@ -144,6 +156,9 @@ export function extractInboundCallback(
     messageId: cb.message.message_id,
     fromUserId: cb.from.id,
     fromLanguageCode: cb.from.language_code ?? null,
+    fromFirstName: cb.from.first_name ?? null,
+    fromLastName: cb.from.last_name ?? null,
+    fromUsername: cb.from.username ?? null,
     isGroup: cb.message.chat.type !== "private",
     data: cb.data,
   };
@@ -177,6 +192,9 @@ export function extractInboundMessage(
     isGroup: msg.chat.type !== "private",
     fromUserId: msg.from?.id ?? null,
     fromLanguageCode: msg.from?.language_code ?? null,
+    fromFirstName: msg.from?.first_name ?? null,
+    fromLastName: msg.from?.last_name ?? null,
+    fromUsername: msg.from?.username ?? null,
     photoFileId: photo?.file_id ?? null,
   };
 }

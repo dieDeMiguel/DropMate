@@ -14,9 +14,12 @@
  * behalf of someone who hasn't done `/register` yet, this tool throws
  * and the orchestrating model should ask the holder to register first.
  *
- * `recipientResidentId` is populated when a Resident exists matching
- * `recipientName` + `recipientHouseNumber`; otherwise it is `null`.
- * That keeps the registry usable even before everyone has signed up.
+ * `recipientResidentId` on the Package record is populated when a
+ * Resident matches `recipientName` + `recipientHouseNumber`; otherwise
+ * it is `null` so the registry stays usable before everyone has signed
+ * up. The richer `recipientResolution` return field tells the model
+ * how to route the notification: registered Resident (DM), known
+ * Telegram user (group `text_mention`), or unknown (ask the group).
  */
 
 import { defineTool } from "experimental-ash/tools";
@@ -24,12 +27,14 @@ import { getSession } from "experimental-ash/context";
 import { z } from "zod";
 
 import {
+  findKnownTelegramUserByName,
   findOpenReceptionRequestForRecipient,
   findResidentByNameAndHouse,
   getResident,
   newPackageId,
   setPackage,
   setReceptionRequest,
+  type KnownTelegramUser,
   type Package,
   type PackageCarrier,
   type ReceptionRequest,
@@ -45,6 +50,55 @@ const CARRIERS: readonly PackageCarrier[] = [
   "Amazon",
   "unknown",
 ];
+
+/**
+ * Summary of the resident who already exists in the directory and whom
+ * the recipient label resolved to. Mirrors the shape used elsewhere
+ * when the model needs to DM a recipient — id + name + house number,
+ * which is enough to call `notify_recipient`.
+ */
+export interface ResidentRecipientSummary {
+  readonly id: string;
+  readonly name: string;
+  readonly houseNumber: string;
+  readonly language: string | null;
+}
+
+/**
+ * Summary of a known Telegram user (someone who has posted in the
+ * group or DM'd the bot but hasn't completed `/register`). The bot
+ * cannot DM them — Telegram blocks bot-initiated DMs to users who
+ * haven't started a private chat — but it CAN render their name as a
+ * `text_mention` in a group post via `post_to_group`'s `mentions` arg.
+ */
+export interface KnownTelegramRecipientSummary {
+  readonly userId: number;
+  readonly firstName: string;
+  readonly lastName: string | null;
+  readonly username: string | null;
+}
+
+/**
+ * Discriminated outcome of the recipient-resolution step inside
+ * `register_package`. The model branches on `kind`:
+ *
+ *   - `"resident"` → DM the recipient via `notify_recipient` with
+ *     `resident.id`. Plain text group post is fine (DM already pings).
+ *   - `"known_telegram"` → DM is NOT possible. Group post should
+ *     `text_mention` the recipient by passing `mentions: [{ name,
+ *     telegramUserId }]` to `post_to_group`. Optionally append a brief
+ *     "they haven't registered yet — /register to receive DMs" note.
+ *   - `"unknown"` → no DM, no mention. The group post asks the group
+ *     who the recipient is. The auto-expiry follow-up (#46) cleans up
+ *     records that stay unresolved.
+ */
+export type RecipientResolution =
+  | { readonly kind: "resident"; readonly resident: ResidentRecipientSummary }
+  | {
+      readonly kind: "known_telegram";
+      readonly telegram: KnownTelegramRecipientSummary;
+    }
+  | { readonly kind: "unknown" };
 
 /**
  * Summary of the resident who pre-announced the package (Flow 2a). Only
@@ -86,6 +140,28 @@ function summariseHolder(holder: Resident): FulfillmentHolderSummary {
     houseNumber: holder.houseNumber,
     floor: holder.floor ?? null,
     buzzerName: holder.buzzerName ?? null,
+  };
+}
+
+function summariseResidentRecipient(
+  resident: Resident,
+): ResidentRecipientSummary {
+  return {
+    id: resident.id,
+    name: resident.name,
+    houseNumber: resident.houseNumber,
+    language: resident.language ?? null,
+  };
+}
+
+function summariseKnownTelegramRecipient(
+  user: KnownTelegramUser,
+): KnownTelegramRecipientSummary {
+  return {
+    userId: user.userId,
+    firstName: user.firstName,
+    lastName: user.lastName ?? null,
+    username: user.username ?? null,
   };
 }
 
@@ -131,11 +207,16 @@ export default defineTool({
     "Package record, a `holder` summary (the actual name, house number, " +
     "floor, and buzzer name of the registered holder — use these strings " +
     "verbatim when composing the group post and recipient DM, do NOT " +
-    "invent or templatise them), whether the recipient could be linked " +
-    "to an existing Resident, and — if this package fulfils a pending " +
-    "'I won't be home' reception request — a `receptionRequestFulfilled` " +
-    "block with the requester + holder summary so you can DM the " +
-    "requester their pickup directions.",
+    "invent or templatise them), a `recipientResolution` discriminator " +
+    "describing how the recipient was identified (`kind` is one of " +
+    "`'resident'` → a registered neighbour, DM them via " +
+    "`notify_recipient`; `'known_telegram'` → a Telegram user the bot " +
+    "has seen in the group but who hasn't registered, render their name " +
+    "as a `text_mention` in the group post via `post_to_group`'s " +
+    "`mentions` arg; `'unknown'` → nobody matched, ask the group), and " +
+    "— if this package fulfils a pending 'I won't be home' reception " +
+    "request — a `receptionRequestFulfilled` block with the requester + " +
+    "holder summary so you can DM the requester their pickup directions.",
   inputSchema,
   async execute({ recipientName, recipientHouseNumber, carrier, trackingNumber }) {
     const session = getSession();
@@ -159,6 +240,24 @@ export default defineTool({
       recipientName,
       recipientHouseNumber,
     );
+
+    let resolution: RecipientResolution;
+    if (recipient) {
+      resolution = {
+        kind: "resident",
+        resident: summariseResidentRecipient(recipient),
+      };
+    } else {
+      const knownUser = await findKnownTelegramUserByName(recipientName);
+      if (knownUser) {
+        resolution = {
+          kind: "known_telegram",
+          telegram: summariseKnownTelegramRecipient(knownUser),
+        };
+      } else {
+        resolution = { kind: "unknown" };
+      }
+    }
 
     const openRequest = await findOpenReceptionRequestForRecipient(
       holder.street,
@@ -215,7 +314,7 @@ export default defineTool({
       // template-looking field-path tokens from the instructions
       // verbatim. See issue #43 item 2b round 3.
       holder: summariseHolder(holder),
-      recipientLinked: recipient !== null,
+      recipientResolution: resolution,
       receptionRequestFulfilled: fulfillment,
     };
   },

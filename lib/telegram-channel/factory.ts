@@ -40,6 +40,7 @@ import {
   getPackage,
   getSessionIdForChat,
   setSessionIdForChat,
+  upsertKnownTelegramUser,
 } from "../redis.js";
 import {
   buildFileProxyUrl,
@@ -160,6 +161,9 @@ export function telegramChannel(config: TelegramChannelConfig) {
             getPackageRecipientId: async (packageId) => {
               const pkg = await getPackage(packageId);
               return pkg?.recipientResidentId ?? null;
+            },
+            recordTelegramObservation: async (input) => {
+              await upsertKnownTelegramUser(input);
             },
           });
         },
