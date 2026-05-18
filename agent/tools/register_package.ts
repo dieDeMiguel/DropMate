@@ -128,8 +128,11 @@ export default defineTool({
     "recipients is two calls. The holder is identified by session auth, so " +
     "do not ask for an id. The holder must be registered (via " +
     "`register_resident`) before calling this. Returns the stored " +
-    "Package record, whether the recipient could be linked to an " +
-    "existing Resident, and — if this package fulfils a pending " +
+    "Package record, a `holder` summary (the actual name, house number, " +
+    "floor, and buzzer name of the registered holder — use these strings " +
+    "verbatim when composing the group post and recipient DM, do NOT " +
+    "invent or templatise them), whether the recipient could be linked " +
+    "to an existing Resident, and — if this package fulfils a pending " +
     "'I won't be home' reception request — a `receptionRequestFulfilled` " +
     "block with the requester + holder summary so you can DM the " +
     "requester their pickup directions.",
@@ -205,6 +208,13 @@ export default defineTool({
 
     return {
       package: pkg,
+      // Always include the holder summary — the conversational model
+      // needs the *actual* name + house number + buzzer to compose the
+      // group post and the recipient DM. Without this, the model
+      // hallucinates a German-style placeholder name or copies
+      // template-looking field-path tokens from the instructions
+      // verbatim. See issue #43 item 2b round 3.
+      holder: summariseHolder(holder),
       recipientLinked: recipient !== null,
       receptionRequestFulfilled: fulfillment,
     };

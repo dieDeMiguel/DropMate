@@ -200,14 +200,30 @@ describe("register_package", () => {
   });
 
   it("writes a held Package and indexes it under the holder's street", async () => {
-    seedResident({ platformId: "holder-1", name: "Annemarie Bremer", houseNumber: "92" });
+    seedResident({
+      platformId: "holder-1",
+      name: "Annemarie Bremer",
+      houseNumber: "92",
+      floor: "V. Etage",
+      buzzerName: "Bremer",
+    });
     withTelegramSession("holder-1");
 
     const result = (await runExecute({
       recipientName: "Ritter",
       recipientHouseNumber: "92",
       carrier: "Hermes",
-    })) as { package: Package; recipientLinked: boolean };
+    })) as {
+      package: Package;
+      recipientLinked: boolean;
+      holder: {
+        id: string;
+        name: string;
+        houseNumber: string;
+        floor: string | null;
+        buzzerName: string | null;
+      };
+    };
 
     expect(result.package.status).toBe("held");
     expect(result.package.receivedAt).toBe(new Date("2026-05-17T10:00:00Z").getTime());
@@ -217,6 +233,16 @@ describe("register_package", () => {
     expect(result.package.pickedUpAt).toBeNull();
     expect(result.package.reminded).toBe(false);
     expect(result.recipientLinked).toBe(false);
+    // Regression for #43 item 2b round 3: the holder summary must be in
+    // the response so the model has the concrete name to paste into the
+    // group post + recipient DM (instead of inventing or templatising).
+    expect(result.holder).toEqual({
+      id: "holder-1",
+      name: "Annemarie Bremer",
+      houseNumber: "92",
+      floor: "V. Etage",
+      buzzerName: "Bremer",
+    });
     // street index populated
     expect(streetIndex.get("Methfesselstraße")?.has(result.package.id)).toBe(true);
   });
