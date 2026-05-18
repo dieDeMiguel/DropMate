@@ -51,6 +51,15 @@ export interface DueUnansweredEntry {
   readonly notes: string | null;
   readonly candidateResidentIds: readonly string[];
   readonly requester: DueUnansweredRequesterSummary | null;
+  /**
+   * Group chat id + message id of the public `/receive` card, when the
+   * request was created via the group-card path. Absent on records
+   * written by the soft-deprecated DM-3-candidates path. The 4h schedule
+   * uses these to call `edit_group_card` with a "⏰ Zeit abgelaufen…"
+   * text; records without them noop on the edit step.
+   */
+  readonly groupCardChatId: number | null;
+  readonly groupCardMessageId: number | null;
 }
 
 function summariseRequester(
@@ -70,9 +79,12 @@ export default defineTool({
     "List every open ReceptionRequest whose 4h candidate-response " +
     "window has elapsed (status=`open` + createdAt < now-4h). Each " +
     "entry includes a requester summary so you can DM them without a " +
-    "second tool call. Use only from the `reception_request_4h_timeout` " +
-    "schedule. After DMing, call `mark_reception_request_expired` per " +
-    "entry to flip status to `expired`.",
+    "second tool call, plus `groupCardChatId`/`groupCardMessageId` " +
+    "when the request was posted via the group-card path so you can " +
+    "call `edit_group_card` to close out the public card. Use only " +
+    "from the `reception_request_4h_timeout` schedule. After DMing " +
+    "and editing the card, call `mark_reception_request_expired` " +
+    "per entry to flip status to `expired`.",
   inputSchema: z.object({}),
   async execute() {
     const now = Date.now();
@@ -94,6 +106,8 @@ export default defineTool({
         notes: r.notes ?? null,
         candidateResidentIds: r.candidateResidentIds,
         requester: summariseRequester(requester),
+        groupCardChatId: r.groupCardChatId ?? null,
+        groupCardMessageId: r.groupCardMessageId ?? null,
       });
     }
     return { entries, now };

@@ -65,6 +65,8 @@ function seedRequest(
     status: overrides.status ?? "open",
     createdAt: overrides.createdAt ?? Date.now(),
     respondedAt: overrides.respondedAt ?? null,
+    groupCardChatId: overrides.groupCardChatId,
+    groupCardMessageId: overrides.groupCardMessageId,
   };
   requestStore.set(r.id, r);
   return r;
@@ -209,5 +211,37 @@ describe("scan_due_unanswered_requests", () => {
     };
     expect(result.entries[0].expectedAt).toBe(expectedAt);
     expect(result.entries[0].notes).toBeNull();
+  });
+
+  it("surfaces groupCardChatId + groupCardMessageId when populated", async () => {
+    seedResident({ platformId: "patricia" });
+    seedRequest({
+      id: "req-1",
+      streetId: "S",
+      status: "open",
+      createdAt: NOW - H4 - 1000,
+      groupCardChatId: -1001234567890,
+      groupCardMessageId: 4242,
+    });
+    const result = (await runExecute()) as {
+      entries: Array<{ groupCardChatId: number | null; groupCardMessageId: number | null }>;
+    };
+    expect(result.entries[0].groupCardChatId).toBe(-1001234567890);
+    expect(result.entries[0].groupCardMessageId).toBe(4242);
+  });
+
+  it("returns groupCardChatId + groupCardMessageId as null on DM-3-path records", async () => {
+    seedResident({ platformId: "patricia" });
+    seedRequest({
+      id: "req-1",
+      streetId: "S",
+      status: "open",
+      createdAt: NOW - H4 - 1000,
+    });
+    const result = (await runExecute()) as {
+      entries: Array<{ groupCardChatId: number | null; groupCardMessageId: number | null }>;
+    };
+    expect(result.entries[0].groupCardChatId).toBeNull();
+    expect(result.entries[0].groupCardMessageId).toBeNull();
   });
 });

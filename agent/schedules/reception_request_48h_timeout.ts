@@ -49,12 +49,29 @@ Procedure — follow exactly, no creative liberties:
           angekommen — sag Bescheid, wenn es trotzdem noch
           auftaucht, dann frage ich nochmal nach."
 
-   b. Call \`mark_reception_request_expired\` with
-      \`requestId: entry.requestId\`. Order matters — DM first, then
-      expire, so a mid-run crash leaves the requester informed
-      rather than silently flipping records.
-4. Never post to the group from this schedule. Reception requests are
-   strictly private (PRD §9).
+   b. If \`entry.groupCardMessageId\` is non-null AND
+      \`entry.groupCardChatId\` is non-null, call \`edit_group_card\`
+      with those ids and a short German closing line — exactly:
+
+          "❌ Paket nie angekommen — abgelaufen."
+
+      The button on the card was already stripped at accept time
+      (slice #52), so this is purely a text replacement. Records
+      without a \`groupCardMessageId\` (the soft-deprecated
+      DM-3-candidates path) have no public card to rewrite — skip
+      the edit on those. If the edit throws (message deleted by the
+      user, chat lost, permissions revoked), log it in your summary
+      and continue — the Redis record is the source of truth, a
+      stale card is cosmetic only.
+
+   c. Call \`mark_reception_request_expired\` with
+      \`requestId: entry.requestId\`. Order matters — DM and edit first,
+      then expire, so a mid-run crash leaves the requester informed
+      and the card closed out rather than silently flipping records.
+4. Never post a NEW message to the group from this schedule. Reception
+   requests are strictly private (PRD §9). Editing the original card
+   in place via \`edit_group_card\` is allowed — that's the same
+   public surface the request originally appeared on, not a new one.
 5. If any tool call throws, log it in your final reply and move on to
    the next entry. Don't let one bad request poison the rest.
 

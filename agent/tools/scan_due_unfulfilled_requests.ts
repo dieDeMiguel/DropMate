@@ -52,6 +52,16 @@ export interface DueUnfulfilledEntry {
   readonly notes: string | null;
   readonly requester: DueUnfulfilledResidentSummary | null;
   readonly volunteer: DueUnfulfilledResidentSummary | null;
+  /**
+   * Group chat id + message id of the matched `/receive` card. Absent
+   * on records created via the soft-deprecated DM-3-candidates path —
+   * the 48h schedule's edit step noops on those. The button on the
+   * card was already stripped at accept time (slice #52), so the
+   * timeout edit is purely a text replacement to
+   * "❌ Paket nie angekommen — abgelaufen.".
+   */
+  readonly groupCardChatId: number | null;
+  readonly groupCardMessageId: number | null;
 }
 
 function summarise(
@@ -71,8 +81,11 @@ export default defineTool({
     "List every matched ReceptionRequest whose 48h fulfilment window " +
     "has elapsed (status=`matched` + respondedAt < now-48h). Each " +
     "entry includes requester + volunteer summaries so you can DM the " +
-    "requester without a second tool call. Use only from the " +
-    "`reception_request_48h_timeout` schedule. After DMing, call " +
+    "requester without a second tool call, plus `groupCardChatId`/" +
+    "`groupCardMessageId` when the request was posted via the " +
+    "group-card path so you can call `edit_group_card` to close out " +
+    "the public card. Use only from the `reception_request_48h_timeout` " +
+    "schedule. After DMing and editing the card, call " +
     "`mark_reception_request_expired` per entry.",
   inputSchema: z.object({}),
   async execute() {
@@ -102,6 +115,8 @@ export default defineTool({
         notes: r.notes ?? null,
         requester: summarise(requester),
         volunteer: summarise(volunteer),
+        groupCardChatId: r.groupCardChatId ?? null,
+        groupCardMessageId: r.groupCardMessageId ?? null,
       });
     }
     return { entries, now };
