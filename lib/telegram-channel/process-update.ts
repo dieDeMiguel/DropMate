@@ -348,7 +348,17 @@ async function buildSyntheticPhotoMessage(
       mediaType,
       caption: captionText,
     });
-  } catch {
+  } catch (err) {
+    // Don't crash the turn — the agent has a "couldn't parse" branch that
+    // asks the holder to retype. But DO log: silent failure here is what
+    // hid Gateway model/auth errors during #43 item 1 rollout, so every
+    // photo turn that ends in "couldn't read the label" now leaves a trail.
+    console.error(
+      "[parse_label] failed for chatId",
+      inbound.chatId,
+      "mediaType-via-fetch (sanitised) — error:",
+      err instanceof Error ? { name: err.name, message: err.message, stack: err.stack } : err,
+    );
     parsed = null;
   }
 
