@@ -62,17 +62,36 @@ export interface TelegramMessageEntity {
   readonly user: { readonly id: number };
 }
 
+/**
+ * Result of a successful `sendMessage` call.
+ *
+ * `messageId` is populated when the Bot API responds with `ok: true`
+ * and a parseable `result.message_id`. It is left undefined when the
+ * caller passed an empty text (early-return path) so the helper can
+ * always return the same shape without branching at the call site.
+ *
+ * Flow 2 v2 needs the message id of the neutral group card so a later
+ * volunteer-accept callback (and the 4h / 48h timeout schedules) can
+ * edit the card in place. Every other caller of `sendTelegramMessage`
+ * (DMs, group-summary posts, schedule outbound) currently ignores the
+ * return value, so promoting it from `void` to `SendMessageResult` is
+ * a no-op for them.
+ */
+export interface SendMessageResult {
+  readonly messageId?: number;
+}
+
 export async function sendTelegramMessage(
   token: string,
   chatId: number,
   text: string,
   replyMarkup?: InlineKeyboardMarkup,
   entities?: ReadonlyArray<TelegramMessageEntity>,
-): Promise<void> {
+): Promise<SendMessageResult> {
   if (token.length === 0) {
     throw new Error("Telegram bot token is empty.");
   }
-  if (text.length === 0) return;
+  if (text.length === 0) return {};
   const body: Record<string, unknown> = { chat_id: chatId, text };
   if (replyMarkup) body.reply_markup = replyMarkup;
   if (entities && entities.length > 0) body.entities = entities;
@@ -90,4 +109,12 @@ export async function sendTelegramMessage(
       `Telegram sendMessage failed: ${res.status} ${res.statusText} ${failureBody}`,
     );
   }
+  const parsed = (await res
+    .json()
+    .catch(() => null)) as { ok?: boolean; result?: { message_id?: number } } | null;
+  const messageId =
+    parsed && parsed.ok && typeof parsed.result?.message_id === "number"
+      ? parsed.result.message_id
+      : undefined;
+  return messageId !== undefined ? { messageId } : {};
 }

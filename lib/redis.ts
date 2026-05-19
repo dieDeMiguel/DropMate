@@ -560,12 +560,47 @@ export interface ReceptionRequest {
   readonly carrier: PackageCarrier;
   readonly expectedAt: number | null;
   readonly notes?: string;
+  /**
+   * Snapshot of the candidate resident ids the bot DM'd in the
+   * soft-deprecated DM-3-candidates flow (#42). Empty array when the
+   * request was created via the one-shot Flow 2 v2 group-card path
+   * (#66) — that path asks the whole group instead of pre-selecting
+   * neighbours, so there's nobody to snapshot. The legacy
+   * `accept_reception_request` gate that requires the caller to be
+   * in this list is bypassed when the array is empty (the new
+   * `accept_reception_group:<id>` callback path falls back to
+   * "any registered resident on the same street can claim").
+   */
   readonly candidateResidentIds: readonly string[];
   readonly volunteerResidentId: string | null;
   readonly volunteerAvailability: string | null;
   readonly status: ReceptionRequestStatus;
   readonly createdAt: number;
   readonly respondedAt: number | null;
+  /**
+   * Optional expected-delivery window in Unix ms, Europe/Berlin
+   * timezone. Both endpoints come from the single-shot extraction in
+   * Flow 2 v2 (#66) — when the requester writes "morgen 14-16 Uhr"
+   * the model converts that to a concrete date range. Either both
+   * are set or both are absent; pre-#66 records and DM-3 path
+   * records have neither.
+   */
+  readonly expectedWindowStartAt?: number;
+  readonly expectedWindowEndAt?: number;
+  /**
+   * The Telegram chat id and message id of the neutral group card
+   * posted for this request via the Flow 2 v2 one-shot path. Used
+   * by:
+   *   - the volunteer-accept callback handler to edit the card in
+   *     place when someone taps `[Ich kann helfen]`;
+   *   - the 4h / 48h timeout schedules to edit the card to its
+   *     terminal state ("⏰ Zeit abgelaufen" / "❌ Paket nie
+   *     angekommen").
+   * Absent on records created via the soft-deprecated DM-3 flow —
+   * those never had a public card to edit.
+   */
+  readonly groupCardChatId?: number;
+  readonly groupCardMessageId?: number;
 }
 
 const RECEPTION_REQUEST_KEY_PREFIX = "reception_request:";

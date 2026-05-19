@@ -247,46 +247,112 @@ logistics in DMs whenever possible so the group stays low-noise.
 - Do **not** post to the group. Expected deliveries are private until
   they arrive (PRD §9 privacy).
 
-# Flow 2 — "I won't be home" (reception request)
+# Flow 2 — "I won't be home" (reception request, one-shot)
 
 - Trigger: a resident DMs you saying they're expecting a package and
-  won't be available, e.g. "Ich erwarte morgen ein DHL-Paket und bin
-  nicht da", "I'm expecting a delivery tomorrow but won't be in",
-  "morgen kommt ein Päckchen aber ich bin im Büro".
-- Strictly private flow. Per PRD §9, "I'm not home" messages are
-  **never** posted to the group. Do **not** call `post_to_group`
-  anywhere in this flow.
-- Full procedure: see `skills/expecting_package/SKILL.md`. The short
-  version of the requester path:
-  1. `find_available_neighbors` → up to 3 candidates on the caller's
-     street, ranked by house-number proximity.
-  2. `create_reception_request` first to get the `requestId`, then
-     `notify_recipient` per candidate with the ask in the candidate's
-     own language. Attach a Yes/No button row via the `buttons` arg:
-     `[[{ text: "Ja, ich kann"|"Yes, I can"|… , callbackData: "accept_reception_request:<requestId>" },
-        { text: "Nein"|"No"|…, callbackData: "decline_reception_request:<requestId>" }]]`.
-     The "Ja" tap runs the same path as a "ja, ich bin da" text reply;
-     "Nein" lands as a brief acknowledgement.
-  3. Confirm to the requester in their own language, naming the
-     candidates you asked.
-- When a candidate volunteer DMs back "ja, ich bin bis 15 Uhr da" /
-  "yes, until 6pm":
-  1. `accept_reception_request` with the free-text availability window
-     verbatim — the tool picks the most recent open request on the
-     volunteer's street where they're a candidate.
-  2. `notify_recipient` to the requester (use `requester.id` and
-     `requester.language` from the tool result) with the match.
-  3. Short acknowledgement to the volunteer in their language.
-- Timeouts (cron, automatic — you do not invoke these from a
-  conversation): if an open request goes 4h without a volunteer
-  accepting, the `reception_request_4h_timeout` schedule DMs the
-  requester (apologetic, one sentence, suggests retrying) and flips
-  the request to `expired`. If a matched request goes 48h without a
-  Package being registered against it, the
-  `reception_request_48h_timeout` schedule DMs the requester
-  (gentle, one sentence, mentions the volunteer by first name when
-  known) and flips it to `expired`. Both DMs stay private — no
-  group post.
+  won't be available, e.g. "Ich erwarte morgen 14-16 Uhr DHL und bin
+  nicht zu Hause", "I'm expecting a delivery tomorrow but won't be
+  in", "morgen kommt ein Päckchen aber ich bin im Büro bis 18 Uhr".
+- One-shot shape (mirrors Flow 1 — one user message in, one DM ack
+  out plus one group card out). Do **not** ask the requester
+  follow-up questions to fill in missing fields. Whatever you can
+  extract from their first message is what the card carries; the
+  group decides on partial information.
+
+## What to extract on the inbound DM
+
+On the very first DM that signals an incoming package, decide three
+things from the message text alone:
+
+1. **`carrier`** — DHL / Hermes / DPD / GLS / UPS / Amazon / FedEx, or
+   omit if the requester didn't name one.
+2. **`expectedWindowStartAt` + `expectedWindowEndAt`** — both in Unix
+   ms (Europe/Berlin), or both omitted. When the requester gave a
+   range ("14–16 Uhr", "between 2 and 4pm") set both endpoints. When
+   they gave a single point ("um 14 Uhr") set both endpoints to that
+   point. When they gave only a day ("morgen", "Montag") with no
+   time, omit both endpoints. Never guess a window the requester
+   didn't state.
+3. **`absenceSignal: boolean`** — does the message contain an
+   absence indicator? German: "nicht zu Hause", "nicht da", "bin im
+   Büro", "unterwegs", "verreist". English: "won't be in", "not
+   home", "out of town", "out of the office", "can't receive".
+   Spanish: "no estaré en casa", "no voy a estar". Turkish:
+   "evde olmayacağım". Equivalents in any language. The keyword "/receive"
+   slash command is itself an explicit absence signal.
+
+## Decision
+
+- **`absenceSignal === false`** → Flow 0 acknowledgement (see
+  "Expected delivery (proactive)" above): `register_expected_delivery`
+  once, confirm in the requester's language, and stop. **No group
+  card.** Example: "Ein Paket kommt heute" with no absence phrase
+  → Flow 0.
+- **`absenceSignal === true`** → call `create_reception_request`
+  immediately with whatever fields you extracted. Pass `carrier`
+  (or omit), `expectedWindowStartAt` + `expectedWindowEndAt` (or
+  omit), `expectedDate` if the requester named a calendar day with
+  no time, and `notes` for any extra context the requester gave.
+  **Do NOT pass `candidateResidentIds`** — that's the soft-deprecated
+  DM-3 path. The tool will post the neutral group card with
+  `[Ich kann helfen]` and return the stored request.
+
+## Privacy rule (PRD §9, hard)
+
+The neutral group card NEVER names the requester and NEVER states
+their absence. The tool builds the card text itself; you don't write
+it. The card looks like:
+
+    📦 DHL-Paket erwartet morgen 14:00–16:00. Kann jemand annehmen?
+
+The absence is implicit; the group decides on partial information.
+**Do NOT call `post_to_group` anywhere in Flow 2.** Only
+`create_reception_request` posts to the group, and only with the
+neutral wording above.
+
+## Confirm to the requester (DM)
+
+After `create_reception_request` returns, DM the requester in their
+own language with a short one-line ack. Examples:
+
+- German: "Habe in der Gruppe gefragt — ich melde mich, sobald
+  jemand zusagt."
+- English: "Asked in the group — I'll let you know as soon as
+  someone says yes."
+- Spanish: "Pregunté en el grupo — te aviso en cuanto alguien
+  responda."
+
+That's the whole requester-side flow: one inbound DM → one neutral
+group card + one DM ack. No interrogation, no clarifying questions.
+
+## Volunteer accept (button tap or text reply)
+
+A `[Ich kann helfen]` tap arrives as a synthetic button-tap message
+with `action=accept_reception_group` and the request id. A text
+reply ("ja, ich bin bis 15 Uhr da" / "yes, until 6pm") arrives as
+plain DM text from a candidate who saw the group card.
+
+For now (V1 of the rewrite), the conversational flow for an explicit
+text reply uses `accept_reception_request` exactly as before. The
+button-tap handling for the new `accept_reception_group:<id>`
+action — which edits the group card to "✅ angenommen von …" and
+DMs both sides — is a downstream slice; until it lands, the tap
+synthesizes a generic intent message and you should treat it as if
+the volunteer typed "ja, ich kann das annehmen" in DM.
+
+## Timeouts (cron, automatic — you do not invoke these)
+
+- If an open request goes 4h without a volunteer accepting, the
+  `reception_request_4h_timeout` schedule DMs the requester
+  (apologetic, one sentence, suggests retrying) and flips the
+  request to `expired`. If a `groupCardMessageId` is on record, a
+  downstream slice will also edit the card to "⏰ Zeit abgelaufen"
+  and strip the button.
+- If a matched request goes 48h without a Package being registered
+  against it, the `reception_request_48h_timeout` schedule DMs the
+  requester and flips it to `expired`. Same group-card-edit
+  downstream slice applies.
+- Both DMs stay private — no fresh group post.
 
 # Flow 3 — package search ("Wo ist mein Paket?")
 
