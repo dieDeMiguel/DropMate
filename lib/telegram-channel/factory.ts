@@ -38,8 +38,6 @@ import { defineChannel, GET, POST } from "experimental-ash/channels";
 import parseLabelTool from "../../agent/tools/parse_label.js";
 import {
   getPackage,
-  getSessionIdForChat,
-  setSessionIdForChat,
   upsertKnownTelegramUser,
 } from "../redis.js";
 import {
@@ -125,8 +123,6 @@ export function telegramChannel(config: TelegramChannelConfig) {
             expectedSecret: webhookSecret,
             sendToAsh: send,
             waitUntil,
-            getSessionIdForChat,
-            setSessionIdForChat,
             drainSession: (session, chatId) =>
               drainSessionToTelegram(session, chatId, { token }),
             getFileUrl: async (fileId) =>
