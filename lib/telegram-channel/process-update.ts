@@ -2,8 +2,9 @@
  * Phase 2 channel — inbound update orchestrator.
  *
  * Owns the full inbound pipeline for a single Telegram webhook
- * delivery: verify → parse → narrow → resolve session id → drive
- * `send(...)` → persist session id → background the outbound drain.
+ * delivery: verify → parse → narrow → drive `send(...)` with the
+ * stable `tg:<chatId>` continuation token → background the outbound
+ * drain.
  *
  * Lives here so:
  *
@@ -127,13 +128,6 @@ export interface ProcessUpdateDeps {
   ) => Promise<Session>;
   /** Vercel/Ash `waitUntil` for backgrounding the outbound drain. */
   readonly waitUntil: (task: Promise<unknown>) => void;
-  /** Returns the previously-stored Ash session id for this chat, if any. */
-  readonly getSessionIdForChat: (chatId: number) => Promise<string | null>;
-  /** Persists the Ash session id for this chat (idempotent). */
-  readonly setSessionIdForChat: (
-    chatId: number,
-    sessionId: string,
-  ) => Promise<void>;
   /** Starts the outbound drain for the resolved session + chat. */
   readonly drainSession: (session: Session, chatId: number) => Promise<void>;
   /**
@@ -411,8 +405,13 @@ async function handleCallbackQuery(
 
   const syntheticMessage = synthesizeCallbackMessage(parsed);
 
-  const existingSessionId = await deps.getSessionIdForChat(cb.chatId);
-  const continuationToken = existingSessionId ?? `tg:${cb.chatId}`;
+  // Stable chat-keyed continuation token. The Ash session id returned
+  // from a previous turn is a per-run workflow id (e.g. `wrun_…`) that
+  // becomes invalid after the run completes; reusing it caused every
+  // follow-up turn to fail delivery ("deliver failed, starting new
+  // session") and silently restart a context-free session. `tg:<chatId>`
+  // is the stable key Ash actually keys session continuity on — see #65.
+  const continuationToken = `tg:${cb.chatId}`;
 
   const auth: TelegramSessionAuth = {
     principalId: String(cb.fromUserId),
@@ -433,10 +432,6 @@ async function handleCallbackQuery(
       fromLanguageCode: cb.fromLanguageCode,
     },
   });
-
-  if (session.id !== existingSessionId) {
-    await deps.setSessionIdForChat(cb.chatId, session.id);
-  }
 
   deps.waitUntil(deps.drainSession(session, cb.chatId));
 
@@ -670,8 +665,14 @@ export async function processInboundTelegramUpdate(
     chatId: inbound.chatId,
   });
 
-  const existingSessionId = await deps.getSessionIdForChat(inbound.chatId);
-  const continuationToken = existingSessionId ?? `tg:${inbound.chatId}`;
+  // Stable chat-keyed continuation token. The previous design stored the
+  // returned `session.id` (a per-run workflow id like `wrun_…`) and
+  // reused it as next turn's continuation — but those ids become invalid
+  // after the run completes, so every subsequent webhook saw
+  // "deliver failed, starting new session" and silently spawned a fresh
+  // session, losing all prior context. `tg:<chatId>` is the stable key
+  // Ash actually keys session continuity on. See #65.
+  const continuationToken = `tg:${inbound.chatId}`;
 
   const auth: TelegramSessionAuth | null =
     inbound.fromUserId === null
@@ -702,17 +703,6 @@ export async function processInboundTelegramUpdate(
       fromLanguageCode: inbound.fromLanguageCode,
     },
   });
-
-  if (session.id !== existingSessionId) {
-    // Persist immediately so a concurrent retry doesn't open a
-    // second session for the same chat. We re-pin on *every* id
-    // change (not just the no-prior-id case) because the Ash channel
-    // silently spawns a fresh session when delivery to the stored
-    // continuation fails — without re-pinning, the stale id stays in
-    // Redis for the 7d TTL and every subsequent turn restarts a
-    // context-free session.
-    await deps.setSessionIdForChat(inbound.chatId, session.id);
-  }
 
   // Hand off the outbound drain to the caller's `waitUntil` so the
   // webhook response returns before the assistant finishes — Telegram

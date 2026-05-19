@@ -40,8 +40,6 @@ import parseTrackingPageTool from "../../agent/tools/parse_tracking_page.js";
 import {
   getPackage,
   getResident,
-  getSessionIdForChat,
-  setSessionIdForChat,
   upsertKnownTelegramUser,
 } from "../redis.js";
 import {
@@ -127,8 +125,6 @@ export function telegramChannel(config: TelegramChannelConfig) {
             expectedSecret: webhookSecret,
             sendToAsh: send,
             waitUntil,
-            getSessionIdForChat,
-            setSessionIdForChat,
             drainSession: (session, chatId) =>
               drainSessionToTelegram(session, chatId, { token }),
             getFileUrl: async (fileId) =>

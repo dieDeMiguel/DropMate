@@ -60,8 +60,6 @@ interface BuiltDeps {
   deps: ProcessUpdateDeps;
   sendToAsh: ReturnType<typeof vi.fn>;
   waitUntil: ReturnType<typeof vi.fn>;
-  getSessionIdForChat: ReturnType<typeof vi.fn>;
-  setSessionIdForChat: ReturnType<typeof vi.fn>;
   drainSession: ReturnType<typeof vi.fn>;
   getFileUrl: ReturnType<typeof vi.fn>;
   parseLabel: ReturnType<typeof vi.fn>;
@@ -82,7 +80,6 @@ type ParsedTrackingPage = NonNullable<
 >;
 
 function buildDeps(overrides: {
-  existingSessionId?: string | null;
   session?: Session;
   expectedSecret?: string | undefined;
   fileUrl?: string;
@@ -94,10 +91,6 @@ function buildDeps(overrides: {
   const session = overrides.session ?? makeSession("sess_new");
   const sendToAsh = vi.fn().mockResolvedValue(session);
   const waitUntil = vi.fn();
-  const getSessionIdForChat = vi
-    .fn()
-    .mockResolvedValue(overrides.existingSessionId ?? null);
-  const setSessionIdForChat = vi.fn().mockResolvedValue(undefined);
   const drainSession = vi.fn().mockResolvedValue(undefined);
   const getFileUrl = vi
     .fn()
@@ -149,8 +142,6 @@ function buildDeps(overrides: {
   return {
     sendToAsh,
     waitUntil,
-    getSessionIdForChat,
-    setSessionIdForChat,
     drainSession,
     getFileUrl,
     parseLabel,
@@ -165,8 +156,6 @@ function buildDeps(overrides: {
         "expectedSecret" in overrides ? overrides.expectedSecret : SECRET,
       sendToAsh: sendToAsh as ProcessUpdateDeps["sendToAsh"],
       waitUntil,
-      getSessionIdForChat,
-      setSessionIdForChat,
       drainSession,
       getFileUrl,
       parseLabel,
@@ -221,10 +210,9 @@ describe("processInboundTelegramUpdate", () => {
     expect(waitUntil).not.toHaveBeenCalled();
   });
 
-  it("creates a new session, persists the session id, and backgrounds the drain", async () => {
+  it("drives the agent with the stable tg:<chatId> continuation token and backgrounds the drain", async () => {
     const session = makeSession("sess_abc");
-    const { deps, sendToAsh, getSessionIdForChat, setSessionIdForChat, waitUntil, drainSession } =
-      buildDeps({ existingSessionId: null, session });
+    const { deps, sendToAsh, waitUntil, drainSession } = buildDeps({ session });
 
     const res = await processInboundTelegramUpdate(
       makeRequest(
@@ -234,8 +222,6 @@ describe("processInboundTelegramUpdate", () => {
     );
 
     expect(res.status).toBe(204);
-
-    expect(getSessionIdForChat).toHaveBeenCalledWith(42);
 
     expect(sendToAsh).toHaveBeenCalledTimes(1);
     const [text, options] = sendToAsh.mock.calls[0]!;
@@ -254,51 +240,30 @@ describe("processInboundTelegramUpdate", () => {
       fromLanguageCode: "de",
     });
 
-    expect(setSessionIdForChat).toHaveBeenCalledWith(42, "sess_abc");
     expect(waitUntil).toHaveBeenCalledTimes(1);
     // The backgrounded task is the drain — invoking it should not throw.
     await waitUntil.mock.calls[0]![0];
     expect(drainSession).toHaveBeenCalledWith(session, 42);
   });
 
-  it("reuses an existing session id as the continuation token without re-persisting", async () => {
-    const session = makeSession("sess_existing");
-    const { deps, sendToAsh, setSessionIdForChat } = buildDeps({
-      existingSessionId: "sess_existing",
-      session,
-    });
+  it("uses tg:<chatId> as the continuation token on every turn (no per-run id reuse — #65)", async () => {
+    // Regression test for #65: previously the orchestrator stored the
+    // returned session.id (a per-run wrun_… id) and reused it next turn,
+    // which caused Ash to log "deliver failed, starting new session"
+    // and spawn a fresh, context-free session on every webhook. The fix
+    // is to use the stable chat-keyed token unconditionally.
+    const session = makeSession("wrun_01KRZEH9RHK4EPTWZ6BDGGTSVQ");
+    const { deps, sendToAsh } = buildDeps({ session });
 
-    const res = await processInboundTelegramUpdate(
+    await processInboundTelegramUpdate(
       makeRequest(dmUpdate({ chatId: 7, text: "follow-up", fromUserId: 99 })),
       deps,
     );
 
-    expect(res.status).toBe(204);
     const options = sendToAsh.mock.calls[0]![1];
-    expect(options.continuationToken).toBe("sess_existing");
-    expect(setSessionIdForChat).not.toHaveBeenCalled();
-  });
-
-  it("re-pins the chatId→sessionId mapping when the Ash channel returns a new session id (zombie eviction)", async () => {
-    // Reproduces the production bug: Redis holds a stale sessionId from a
-    // failed turn; the Ash channel silently spawns a new session via
-    // runtime.run(...) and returns the new id. Without re-pinning, every
-    // subsequent turn restarts a context-free session.
-    const replacement = makeSession("sess_fresh");
-    const { deps, sendToAsh, setSessionIdForChat } = buildDeps({
-      existingSessionId: "sess_zombie",
-      session: replacement,
-    });
-
-    const res = await processInboundTelegramUpdate(
-      makeRequest(dmUpdate({ chatId: 7, text: "follow-up", fromUserId: 99 })),
-      deps,
-    );
-
-    expect(res.status).toBe(204);
-    const options = sendToAsh.mock.calls[0]![1];
-    expect(options.continuationToken).toBe("sess_zombie");
-    expect(setSessionIdForChat).toHaveBeenCalledWith(7, "sess_fresh");
+    expect(options.continuationToken).toBe("tg:7");
+    // No per-run id leaks into the continuation token.
+    expect(options.continuationToken).not.toMatch(/^wrun_/);
   });
 
   it("omits auth when the inbound message has no sender", async () => {
@@ -853,7 +818,7 @@ describe("processInboundTelegramUpdate — callback_query", () => {
   it("acks, strips the keyboard, and synthesizes a confirm_pickup message into the session (DM)", async () => {
     const session = makeSession("sess_cb");
     const { deps, sendToAsh, answerCallback, stripKeyboard, waitUntil, drainSession } =
-      buildDeps({ existingSessionId: "sess_cb", session });
+      buildDeps({ session });
 
     const res = await processInboundTelegramUpdate(
       makeRequest(
@@ -875,7 +840,7 @@ describe("processInboundTelegramUpdate — callback_query", () => {
     expect(sendToAsh).toHaveBeenCalledTimes(1);
     const [text, options] = sendToAsh.mock.calls[0]!;
     expect(text).toMatch(/confirm.*pickup.*pkg_42/i);
-    expect(options.continuationToken).toBe("sess_cb");
+    expect(options.continuationToken).toBe("tg:42");
     expect(options.auth).toEqual<TelegramSessionAuth>({
       principalId: "99",
       principalType: "user",
@@ -894,12 +859,12 @@ describe("processInboundTelegramUpdate — callback_query", () => {
     expect(drainSession).toHaveBeenCalledWith(session, 42);
   });
 
-  it("persists a new session id when no session existed for the chat", async () => {
-    const session = makeSession("sess_new_cb");
-    const { deps, setSessionIdForChat } = buildDeps({
-      existingSessionId: null,
-      session,
-    });
+  it("uses tg:<chatId> as the callback continuation token on every tap (#65)", async () => {
+    // Same regression guard as the message-path test: the per-run id
+    // returned by Ash must never leak into next turn's continuation
+    // token. Callback path has the same fix.
+    const session = makeSession("wrun_01KRZEH9RHK4EPTWZ6BDGGTSVQ");
+    const { deps, sendToAsh } = buildDeps({ session });
 
     await processInboundTelegramUpdate(
       makeRequest(
@@ -908,28 +873,13 @@ describe("processInboundTelegramUpdate — callback_query", () => {
       deps,
     );
 
-    expect(setSessionIdForChat).toHaveBeenCalledWith(42, "sess_new_cb");
-  });
-
-  it("re-pins the chatId→sessionId mapping on a callback tap when the Ash channel returns a fresh session id", async () => {
-    const replacement = makeSession("sess_fresh_cb");
-    const { deps, setSessionIdForChat } = buildDeps({
-      existingSessionId: "sess_zombie_cb",
-      session: replacement,
-    });
-
-    await processInboundTelegramUpdate(
-      makeRequest(
-        cbUpdate({ chatId: 42, messageId: 1, fromUserId: 99, data: "confirm_pickup:pkg_1" }),
-      ),
-      deps,
-    );
-
-    expect(setSessionIdForChat).toHaveBeenCalledWith(42, "sess_fresh_cb");
+    const options = sendToAsh.mock.calls[0]![1];
+    expect(options.continuationToken).toBe("tg:42");
+    expect(options.continuationToken).not.toMatch(/^wrun_/);
   });
 
   it("synthesizes an accept_reception_request message when 'accept_reception_request:req_99' is tapped", async () => {
-    const { deps, sendToAsh } = buildDeps({ existingSessionId: "sess_x" });
+    const { deps, sendToAsh } = buildDeps();
     await processInboundTelegramUpdate(
       makeRequest(
         cbUpdate({
@@ -946,7 +896,7 @@ describe("processInboundTelegramUpdate — callback_query", () => {
   });
 
   it("synthesizes a decline message that tells the agent to acknowledge briefly", async () => {
-    const { deps, sendToAsh } = buildDeps({ existingSessionId: "sess_x" });
+    const { deps, sendToAsh } = buildDeps();
     await processInboundTelegramUpdate(
       makeRequest(
         cbUpdate({
@@ -993,7 +943,6 @@ describe("processInboundTelegramUpdate — callback_query", () => {
   it("admits group confirm_pickup when the tapper IS the recipient", async () => {
     const { deps, sendToAsh, stripKeyboard } = buildDeps({
       packageRecipientId: "99",
-      existingSessionId: "sess_grp",
     });
 
     await processInboundTelegramUpdate(
@@ -1036,9 +985,7 @@ describe("processInboundTelegramUpdate — callback_query", () => {
   });
 
   it("does NOT apply the recipient-scope check in a DM (1:1 already scoped to the tapper)", async () => {
-    const { deps, sendToAsh, getPackageRecipientId } = buildDeps({
-      existingSessionId: "sess_dm",
-    });
+    const { deps, sendToAsh, getPackageRecipientId } = buildDeps();
 
     await processInboundTelegramUpdate(
       makeRequest(
@@ -1061,7 +1008,6 @@ describe("processInboundTelegramUpdate — callback_query", () => {
     // sendToAsh is NOT called, but the bot has still seen this user and
     // must capture them so they can be mentioned later.
     const { deps, sendToAsh, recordTelegramObservation } = buildDeps({
-      existingSessionId: "sess_x",
       packageRecipientId: "different-user",
     });
 
@@ -1101,9 +1047,7 @@ describe("processInboundTelegramUpdate — callback_query", () => {
   });
 
   it("continues to drive the agent even if answerCallback or stripKeyboard throw", async () => {
-    const { deps, sendToAsh, answerCallback, stripKeyboard } = buildDeps({
-      existingSessionId: "sess_x",
-    });
+    const { deps, sendToAsh, answerCallback, stripKeyboard } = buildDeps();
     answerCallback.mockRejectedValueOnce(new Error("ack failed"));
     stripKeyboard.mockRejectedValueOnce(new Error("edit failed"));
 
@@ -1129,7 +1073,7 @@ describe("processInboundTelegramUpdate — callback_query", () => {
   });
 
   it("handles an unknown action by synthesizing a permissive message", async () => {
-    const { deps, sendToAsh } = buildDeps({ existingSessionId: "sess_x" });
+    const { deps, sendToAsh } = buildDeps();
     await processInboundTelegramUpdate(
       makeRequest(
         cbUpdate({
@@ -1147,7 +1091,7 @@ describe("processInboundTelegramUpdate — callback_query", () => {
 
   it("admits accept_reception_group taps from a registered resident and synthesizes a request-id intent", async () => {
     const { deps, sendToAsh, stripKeyboard, answerCallback, isRegisteredResident } =
-      buildDeps({ existingSessionId: "sess_x", isRegisteredResident: true });
+      buildDeps({ isRegisteredResident: true });
 
     await processInboundTelegramUpdate(
       makeRequest(
@@ -1228,9 +1172,7 @@ describe("processInboundTelegramUpdate — callback_query", () => {
   });
 
   it("does not call isRegisteredResident for non-accept-group actions", async () => {
-    const { deps, isRegisteredResident } = buildDeps({
-      existingSessionId: "sess_x",
-    });
+    const { deps, isRegisteredResident } = buildDeps();
 
     await processInboundTelegramUpdate(
       makeRequest(
