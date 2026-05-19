@@ -916,3 +916,60 @@ describe("processInboundTelegramUpdate — callback_query", () => {
     expect(text).toMatch(/weird_action/);
   });
 });
+
+describe("processInboundTelegramUpdate — trace integration (#58)", () => {
+  it("emits a `webhook.start` event inside the surrounding runWithTrace scope", async () => {
+    // Import dynamically to avoid leaking subscribers into the
+    // top-level test scope (the trace bus is process-wide).
+    const { runWithTrace, subscribe } = await import("../trace.js");
+    const events: Array<{ stage: string; phase: string; traceId: string }> = [];
+    const unsubscribe = subscribe((e) =>
+      events.push({ stage: e.stage, phase: e.phase, traceId: e.traceId }),
+    );
+
+    try {
+      const { deps } = buildDeps();
+      await runWithTrace(
+        { traceId: "trace_smoke", kind: "text" },
+        () =>
+          processInboundTelegramUpdate(
+            makeRequest(dmUpdate({ chatId: 17, text: "hi", fromUserId: 99 })),
+            deps,
+          ),
+      );
+
+      // The orchestrator's first action is `emitTrace("webhook", "start")`.
+      // Any future per-stage emits (#59/#60/#61) just add entries; this
+      // assertion only cares the smoke-test signal fires.
+      const smokeEvents = events.filter((e) => e.traceId === "trace_smoke");
+      expect(smokeEvents.length).toBeGreaterThanOrEqual(1);
+      expect(smokeEvents[0]).toMatchObject({
+        stage: "webhook",
+        phase: "start",
+        traceId: "trace_smoke",
+      });
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("is a silent no-op when called without a surrounding trace scope", async () => {
+    const { subscribe } = await import("../trace.js");
+    const events: unknown[] = [];
+    const unsubscribe = subscribe((e) => events.push(e));
+
+    try {
+      const { deps } = buildDeps();
+      // No `runWithTrace` wrapper — the orchestrator's emitTrace call
+      // must be a no-op so this code path is safe in cron schedules,
+      // the built-in Ash API channel, and unit tests that don't care.
+      await processInboundTelegramUpdate(
+        makeRequest(dmUpdate({ chatId: 18, text: "hi", fromUserId: 100 })),
+        deps,
+      );
+      expect(events).toEqual([]);
+    } finally {
+      unsubscribe();
+    }
+  });
+});
