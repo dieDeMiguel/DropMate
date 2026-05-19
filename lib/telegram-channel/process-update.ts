@@ -55,7 +55,8 @@
 
 import type { Session } from "experimental-ash/channels";
 
-import { emitTrace } from "../trace.js";
+import { PRIMARY_MODEL as PARSE_LABEL_PRIMARY_MODEL } from "../../agent/tools/parse_label.js";
+import { emitTrace, runWithTrace } from "../trace.js";
 import {
   extractInboundCallback,
   extractInboundMessage,
@@ -399,10 +400,14 @@ async function buildSyntheticPhotoMessage(
   try {
     const imageUrl = await deps.getFileUrl(fileId);
     // Vision call boundary — the diagram lights up the parse_label box
-    // (only on photo trace kinds). #60 enriches with primary→fallback
-    // retry visuals; for now this just bookends the call so the V1
-    // animation engine has a clean start/end pair to render.
-    emitTrace("parse_label", "start");
+    // for the duration of the call and updates the box's sub-label to
+    // the active model name. The tool itself fires
+    // `parse_label.primary_failed` + `parse_label.fallback_start` if the
+    // primary model errors, so the diagram renders the retry visual
+    // (#60). `model` extras feed the sub-label updater on the page.
+    emitTrace("parse_label", "start", {
+      model: PARSE_LABEL_PRIMARY_MODEL,
+    });
     parsed = await deps.parseLabel({
       imageUrl,
       caption: captionText,

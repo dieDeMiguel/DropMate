@@ -59,6 +59,33 @@ describe("handleFirstLightPageRequest", () => {
     expect(body).toContain("--photo-accent");
     expect(body).toContain("--callback-accent");
   });
+
+  it("declares the red-flash terminal-failure accent + CSS class (#60)", async () => {
+    // #60 paints `parse_label.primary_failed` and `*.error` with the
+    // red-flash visual. Both the accent variable and the keyframed
+    // animation class need to ship in the static HTML so the runtime
+    // engine can apply them.
+    const body = await handleFirstLightPageRequest().text();
+    expect(body).toContain("--error-accent");
+    expect(body).toContain(".flash-error");
+    expect(body).toContain("@keyframes flash-error");
+  });
+
+  it("registers per-event sub-label updates so visitors see the active model name (#60)", async () => {
+    // The diagram engine reads `event.extras.model` on parse_label.start
+    // and parse_label.fallback_start to update the box's sub-label.
+    // The shipped JS must include the logic that does so.
+    const body = await handleFirstLightPageRequest().text();
+    expect(body).toContain("extras.model");
+    // Renders short slug (no provider prefix).
+    expect(body).toContain("shortModelName");
+  });
+
+  it("handles parse_label.primary_failed + parse_label.fallback_start phases in the animation engine (#60)", async () => {
+    const body = await handleFirstLightPageRequest().text();
+    expect(body).toContain("primary_failed");
+    expect(body).toContain("fallback_start");
+  });
 });
 
 describe("handleTraceSseRequest", () => {

@@ -132,6 +132,84 @@ describe("parse_label", () => {
     expect(generateObjectMock.mock.calls[1]![0].model).toBe(fallback);
   });
 
+  it("emits parse_label.primary_failed + parse_label.fallback_start on the retry path (#60 retry visual)", async () => {
+    // The diagram (#60) reads `primary_failed` as the cue to red-flash
+    // the parse_label box, and `fallback_start` as the cue to re-ignite
+    // it with the fallback model in the sub-label. Both events must
+    // include `extras.model` so the page can update the sub-label.
+    generateObjectMock.mockRejectedValueOnce(new Error("primary down"));
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        carrier: "DHL",
+        confidence: "medium",
+        reason: "fallback recovered",
+      },
+    });
+
+    const { runWithTrace, subscribe } = await import("../../lib/trace.js");
+    const events: Array<{
+      stage: string;
+      phase: string;
+      extras?: Record<string, unknown>;
+    }> = [];
+    const unsubscribe = subscribe((e) => {
+      if (e.traceId !== "trace_parse_retry") return;
+      events.push({ stage: e.stage, phase: e.phase, extras: e.extras });
+    });
+    try {
+      await runWithTrace(
+        { traceId: "trace_parse_retry", kind: "photo" },
+        () => runExecute({ imageUrl: sampleUrl }),
+      );
+    } finally {
+      unsubscribe();
+    }
+
+    const phases = events.map((e) => `${e.stage}.${e.phase}`);
+    expect(phases).toContain("parse_label.primary_failed");
+    expect(phases).toContain("parse_label.fallback_start");
+    // primary_failed must fire BEFORE fallback_start so the diagram
+    // renders red-flash → re-ignite, not the other way around.
+    const primaryFailedIdx = phases.indexOf("parse_label.primary_failed");
+    const fallbackStartIdx = phases.indexOf("parse_label.fallback_start");
+    expect(primaryFailedIdx).toBeLessThan(fallbackStartIdx);
+
+    // Model names ride on extras so the page can update the sub-label.
+    const { primary, fallback } = await loadModelSlugs();
+    const failedEvent = events.find((e) => e.phase === "primary_failed");
+    expect(failedEvent?.extras?.model).toBe(primary);
+    const fallbackEvent = events.find((e) => e.phase === "fallback_start");
+    expect(fallbackEvent?.extras?.model).toBe(fallback);
+  });
+
+  it("does NOT emit primary_failed or fallback_start on the happy path", async () => {
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        carrier: "DHL",
+        confidence: "high",
+        reason: "ok",
+      },
+    });
+
+    const { runWithTrace, subscribe } = await import("../../lib/trace.js");
+    const events: string[] = [];
+    const unsubscribe = subscribe((e) => {
+      if (e.traceId !== "trace_parse_happy") return;
+      events.push(`${e.stage}.${e.phase}`);
+    });
+    try {
+      await runWithTrace(
+        { traceId: "trace_parse_happy", kind: "photo" },
+        () => runExecute({ imageUrl: sampleUrl }),
+      );
+    } finally {
+      unsubscribe();
+    }
+
+    expect(events).not.toContain("parse_label.primary_failed");
+    expect(events).not.toContain("parse_label.fallback_start");
+  });
+
   it("re-throws the primary's error when BOTH primary and fallback fail (preserves the most diagnostic signal)", async () => {
     const primaryErr = new Error("gemma down");
     generateObjectMock.mockRejectedValueOnce(primaryErr);

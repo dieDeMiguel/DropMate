@@ -42,7 +42,11 @@ import {
   setSessionIdForChat,
   upsertKnownTelegramUser,
 } from "../redis.js";
-import { getCurrentTraceContext, runWithTrace } from "../trace.js";
+import {
+  getCurrentTraceContext,
+  runWithTrace,
+  type TraceKind,
+} from "../trace.js";
 import {
   buildFileProxyUrl,
   handleFileProxyRequest,
@@ -139,12 +143,17 @@ export function telegramChannel(config: TelegramChannelConfig) {
           // production (`drop-mate-delta.vercel.app`) and preview
           // deploys without an explicit env var.
           const origin = new URL(req.url).origin;
-          // Live-diagram tracer (#58): every inbound webhook gets a
-          // fresh trace scope. `kind` is hard-coded to "text" here;
-          // #59/#60/#61 refine the detection (photo / callback) once
-          // the payload has been narrowed.
+          // Live-diagram tracer: every inbound webhook gets a fresh trace
+          // scope. Peek at the payload via `req.clone()` so we can set the
+          // right `kind` (#60: photo → amber; #61: callback → magenta)
+          // BEFORE processInboundTelegramUpdate runs. A clone is cheap
+          // (Vercel's `Request` body is a stream we read once via
+          // `.json()` — clone teeable-shares the underlying source) and
+          // it avoids re-entering `runWithTrace` mid-pipeline, which
+          // would mean `webhook.start` emitted with the wrong kind.
           const traceId = crypto.randomUUID().slice(0, 8);
-          return runWithTrace({ traceId, kind: "text" }, () =>
+          const kind = await detectTraceKind(req);
+          return runWithTrace({ traceId, kind }, () =>
             processInboundTelegramUpdate(req, {
               expectedSecret: webhookSecret,
               sendToAsh: send,
@@ -210,4 +219,37 @@ export function telegramChannel(config: TelegramChannelConfig) {
       ),
     ],
   });
+}
+
+/**
+ * Best-effort trace-kind detection from a Telegram webhook payload.
+ *
+ *   - `callback_query` present → "callback" (#61 magenta)
+ *   - `message.photo[]` non-empty → "photo" (#60 amber)
+ *   - anything else → "text" (default cyan)
+ *
+ * Reads the body via `req.clone().json()` so the downstream
+ * `processInboundTelegramUpdate` call still gets a fresh, unconsumed
+ * body to parse. Any error (malformed JSON, missing fields, network
+ * read failure on the clone) falls through to "text" — the diagram
+ * just renders the trace in the default colour and the orchestrator's
+ * own validation handles the bad-input case.
+ *
+ * Exported only for tests; production callers go through the POST
+ * route which uses it internally.
+ */
+export async function detectTraceKind(req: Request): Promise<TraceKind> {
+  try {
+    const peek = (await req.clone().json()) as {
+      callback_query?: unknown;
+      message?: { photo?: ReadonlyArray<unknown> };
+    };
+    if (peek && peek.callback_query) return "callback";
+    if (peek && peek.message?.photo && peek.message.photo.length > 0) {
+      return "photo";
+    }
+    return "text";
+  } catch {
+    return "text";
+  }
 }

@@ -26,7 +26,19 @@
 
 import { describe, expect, it } from "vitest";
 
-import { telegramChannel, type TelegramChannelConfig } from "./factory.js";
+import {
+  detectTraceKind,
+  telegramChannel,
+  type TelegramChannelConfig,
+} from "./factory.js";
+
+function makeJsonRequest(body: unknown): Request {
+  return new Request("https://example.com/api/telegram", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
 
 describe("telegramChannel", () => {
   const config: TelegramChannelConfig = {
@@ -81,5 +93,94 @@ describe("telegramChannel", () => {
         webhookSecret: longSecret,
       }),
     ).not.toThrow();
+  });
+});
+
+describe("detectTraceKind (#60 / #61 — trace-kind detection at webhook entry)", () => {
+  it("returns 'photo' when the inbound update has a non-empty photo[]", async () => {
+    const req = makeJsonRequest({
+      update_id: 1,
+      message: {
+        message_id: 1,
+        chat: { id: 42, type: "private" },
+        from: { id: 99, is_bot: false, first_name: "Test" },
+        photo: [{ file_id: "AgAC", file_size: 100, width: 90, height: 90 }],
+      },
+    });
+    expect(await detectTraceKind(req)).toBe("photo");
+  });
+
+  it("returns 'callback' when the inbound update is a callback_query", async () => {
+    const req = makeJsonRequest({
+      update_id: 2,
+      callback_query: {
+        id: "cb1",
+        data: "confirm_pickup:pkg_1",
+        from: { id: 99, is_bot: false, first_name: "Test" },
+        message: {
+          message_id: 3,
+          chat: { id: 42, type: "supergroup" },
+        },
+      },
+    });
+    expect(await detectTraceKind(req)).toBe("callback");
+  });
+
+  it("returns 'text' for a plain text DM", async () => {
+    const req = makeJsonRequest({
+      update_id: 3,
+      message: {
+        message_id: 4,
+        chat: { id: 42, type: "private" },
+        text: "Hallo",
+      },
+    });
+    expect(await detectTraceKind(req)).toBe("text");
+  });
+
+  it("falls back to 'text' on malformed JSON (defensive)", async () => {
+    const req = new Request("https://example.com/api/telegram", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "not json {{{",
+    });
+    expect(await detectTraceKind(req)).toBe("text");
+  });
+
+  it("does not consume the request body — downstream code can still call req.json()", async () => {
+    const req = makeJsonRequest({
+      update_id: 4,
+      message: {
+        message_id: 5,
+        chat: { id: 42, type: "private" },
+        photo: [{ file_id: "AgAC", file_size: 100, width: 90, height: 90 }],
+      },
+    });
+    const kind = await detectTraceKind(req);
+    expect(kind).toBe("photo");
+    // Downstream re-read must work.
+    const json = (await req.json()) as { update_id: number };
+    expect(json.update_id).toBe(4);
+  });
+
+  it("returns 'callback' for a callback even when message.photo[] is also present (defensive against weird payloads)", async () => {
+    // Bot API doesn't mix these in practice, but `extractInboundCallback`
+    // takes precedence in the orchestrator, so this matches the
+    // downstream routing.
+    const req = makeJsonRequest({
+      update_id: 5,
+      callback_query: {
+        id: "cb2",
+        data: "x:y",
+        from: { id: 1, is_bot: false, first_name: "T" },
+        message: { message_id: 1, chat: { id: 1, type: "private" } },
+      },
+      message: {
+        message_id: 1,
+        chat: { id: 1, type: "private" },
+        photo: [{ file_id: "AgAC", file_size: 100, width: 90, height: 90 }],
+      },
+    });
+    expect(await detectTraceKind(req)).toBe("callback");
   });
 });

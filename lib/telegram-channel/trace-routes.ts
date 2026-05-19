@@ -149,6 +149,7 @@ const LIVE_DIAGRAM_HTML = `<!doctype html>
       --text-accent: #00e5ff;
       --photo-accent: #ffb547;
       --callback-accent: #ff5cf2;
+      --error-accent: #ff3860;
       --label: #6a6a8a;
       --label-bright: #d8d8ff;
     }
@@ -189,6 +190,23 @@ const LIVE_DIAGRAM_HTML = `<!doctype html>
     rect.edge { stroke: #1f1f30; }
     rect.edge.heartbeat { animation-duration: 4s; }
     rect.edge.ignite { stroke: var(--accent, var(--text-accent)); fill: rgba(0, 229, 255, 0.04); }
+
+    /* Red-flash terminal-failure visual (#60). Fires on
+       parse_label.primary_failed and on terminal-failure events
+       (drain.error, *.error without a matching .end, trace timeout).
+       Brief ~400ms flash so the visitor registers the failure
+       without losing the in-progress trace. */
+    rect.box.flash-error {
+      stroke: var(--error-accent);
+      fill: rgba(255, 56, 96, 0.08);
+      filter: drop-shadow(0 0 12px var(--error-accent));
+      animation: flash-error 400ms ease-out;
+    }
+    @keyframes flash-error {
+      0% { filter: drop-shadow(0 0 4px var(--error-accent)); }
+      40% { filter: drop-shadow(0 0 16px var(--error-accent)); }
+      100% { filter: drop-shadow(0 0 8px var(--error-accent)); }
+    }
 
     text.label {
       fill: var(--label);
@@ -374,9 +392,17 @@ const LIVE_DIAGRAM_HTML = `<!doctype html>
       const allBoxes = Array.from(document.querySelectorAll("rect.box"));
       const allCables = Array.from(document.querySelectorAll("path.cable"));
 
+      // Persisted at boot so we can restore the parse_label sub-label
+      // back to its idle value ("vision · ai gateway") between traces
+      // — without this, the last-seen model name sticks around forever.
+      const idleSubText = new Map();
+      for (const sub of document.querySelectorAll("text.sub")) {
+        idleSubText.set(sub.id, sub.textContent || "");
+      }
+
       function setIdle() {
         for (const b of allBoxes) {
-          b.classList.remove("ignite", "hold");
+          b.classList.remove("ignite", "hold", "flash-error");
           b.classList.add("heartbeat");
           b.style.removeProperty("--accent");
         }
@@ -386,6 +412,10 @@ const LIVE_DIAGRAM_HTML = `<!doctype html>
         }
         const labels = document.querySelectorAll("text.label");
         for (const l of labels) l.classList.remove("ignite", "hold");
+        for (const [id, text] of idleSubText.entries()) {
+          const sub = document.getElementById(id);
+          if (sub) sub.textContent = text;
+        }
       }
 
       // Per-trace runtime state. The engine queues events for one trace
@@ -468,6 +498,12 @@ const LIVE_DIAGRAM_HTML = `<!doctype html>
           setTimeout(() => {
             // Restore idle heartbeats once the fade has finished.
             for (const b of holdBoxes) b.classList.add("heartbeat");
+            // Restore sub-labels so the parse_label box doesn't show
+            // a stale model name between traces.
+            for (const [id, text] of idleSubText.entries()) {
+              const sub = document.getElementById(id);
+              if (sub) sub.textContent = text;
+            }
             activeTrace = null;
             traceIdEl.textContent = "—";
             if (traceQueue.length > 0) {
@@ -476,6 +512,29 @@ const LIVE_DIAGRAM_HTML = `<!doctype html>
             }
           }, POST_FADE_MS);
         }, POST_HOLD_MS);
+      }
+
+      // Short, visitor-readable display name for a model slug. The
+       // sub-label space is narrow (~150px @ 9px font) so we trim the
+       // provider prefix and the size suffix to keep it on one line.
+       // Examples:
+       //   "google/gemini-3.1-flash-lite"  → "gemini-3.1-flash-lite"
+       //   "anthropic/claude-sonnet-4.6"   → "claude-sonnet-4.6"
+      function shortModelName(slug) {
+        if (typeof slug !== "string") return "";
+        const slash = slug.indexOf("/");
+        return slash >= 0 ? slug.slice(slash + 1) : slug;
+      }
+
+      function flashError(box, label) {
+        // Brief red-flash visual (#60). The keyframe is 400ms; we remove
+        // the class shortly after so the box can resume its trace-coloured
+        // ignite/hold appearance on the next event (e.g. fallback_start).
+        box.classList.add("flash-error");
+        setTimeout(() => {
+          box.classList.remove("flash-error");
+        }, 400);
+        if (label) label.classList.add("ignite");
       }
 
       function step(event) {
@@ -487,11 +546,50 @@ const LIVE_DIAGRAM_HTML = `<!doctype html>
         const accent = ACCENT_VAR[event.kind] || ACCENT_VAR.text;
         const box = $("box-" + plan.box);
         const label = $("label-" + plan.box);
+        const sub = $("sub-" + plan.box);
         const cable = plan.cable ? $(plan.cable) : null;
         if (!box) return;
         // Set the accent on the box + cable so CSS reads it.
         box.style.setProperty("--accent", accent);
         if (cable) cable.style.setProperty("--accent", accent);
+
+        // Sub-label: show the active model name when extras.model is
+        // supplied. Used by parse_label.start (primary) and
+        // parse_label.fallback_start (fallback) so visitors see the
+        // primary→fallback retry visual at sub-cell granularity.
+        if (sub && event.extras && typeof event.extras.model === "string") {
+          sub.textContent = shortModelName(event.extras.model);
+        }
+
+        if (event.phase === "primary_failed") {
+          // #60: red flash on the parse_label box so the visitor sees
+          // the primary model failed. The .fallback_start event that
+          // follows re-ignites the box with the (still-accent-coloured)
+          // hold + sub-label update.
+          flashError(box, label);
+          return;
+        }
+        if (event.phase === "fallback_start") {
+          // Re-ignite the box in the trace's accent colour. The
+          // sub-label was already updated above to the fallback model
+          // name; from here the engine treats this like a fresh start
+          // event so the keyframes restart.
+          box.classList.remove("flash-error");
+          box.classList.remove("heartbeat");
+          box.classList.remove("hold");
+          // Force reflow so the ignite animation restarts visually.
+          void box.getBoundingClientRect();
+          box.classList.add("ignite");
+          if (label) label.classList.add("ignite");
+          setTimeout(() => {
+            if (box.classList.contains("ignite")) {
+              box.classList.replace("ignite", "hold");
+              if (label) label.classList.replace("ignite", "hold");
+            }
+          }, MIN_HOP_MS);
+          return;
+        }
+
         if (event.phase === "start") {
           if (cable) {
             // Reset animation by removing + reapplying the class.
@@ -527,13 +625,13 @@ const LIVE_DIAGRAM_HTML = `<!doctype html>
             cable.classList.add("hold");
           }
         } else if (event.phase === "error") {
-          // For #59 we don't yet ship the red-flash terminal-failure
-          // visual (#60 does). Treat error like end so the trace
-          // doesn't stall waiting for a phase that never arrives.
-          if (!box.classList.contains("ignite") && !box.classList.contains("hold")) {
-            box.classList.add("hold");
-            if (label) label.classList.add("hold");
-          }
+          // Terminal-failure visual (#60). Flash the box red, then
+          // schedule the post-trace hold+fade so the diagram doesn't
+          // get stuck waiting for an .end that never arrives.
+          flashError(box, label);
+          // The MAX_HOP_MS timer in scheduleTraceEnd() already covers
+          // the case where no further events arrive; the flash is the
+          // visitor-readable signal.
         }
       }
 
