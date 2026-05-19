@@ -265,6 +265,19 @@ export default defineTool({
       recipientHouseNumber,
     );
 
+    // When nobody on the street matches the recipient name on the
+    // label, the package record would otherwise sit in Redis with
+    // `recipientResidentId: null` indefinitely — polluting the
+    // reminder + escalation scans and leaving the holder confused.
+    // Set a 3-day deadline so the auto-expiry schedule (see issue
+    // #46 / `expire_unknown_recipient_3d`) can clean it up if nobody
+    // identifies the recipient in that window.
+    const UNKNOWN_RECIPIENT_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
+    const recipientResolutionDeadline =
+      resolution.kind === "unknown"
+        ? Date.now() + UNKNOWN_RECIPIENT_WINDOW_MS
+        : undefined;
+
     const pkg: Package = {
       id: newPackageId(),
       streetId: holder.street,
@@ -279,6 +292,7 @@ export default defineTool({
       pickedUpAt: null,
       reminded: false,
       receptionRequestId: openRequest?.id,
+      recipientResolutionDeadline,
     };
 
     await setPackage(pkg);

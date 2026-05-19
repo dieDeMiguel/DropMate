@@ -236,6 +236,17 @@ export interface Package {
    * package the requester was waiting for ever arrive?".
    */
   readonly receptionRequestId?: string;
+  /**
+   * Unix ms deadline by which the recipient must be identified before
+   * the package record is auto-deleted by the
+   * `expire_unknown_recipient_3d` schedule. Set by `register_package`
+   * to `now + 3d` when `recipientResolution.kind === "unknown"` (no
+   * registered Resident and no known Telegram user matched). Stays
+   * `undefined` for any package whose recipient WAS resolved at
+   * registration time — those follow the normal 48h reminder + 7d
+   * escalation lifecycle. See issue #46.
+   */
+  readonly recipientResolutionDeadline?: number;
 }
 
 /**
@@ -274,6 +285,27 @@ export async function setPackage(pkg: Package): Promise<void> {
   const redis = getRedis();
   await redis.set(packageKey(pkg.id), pkg);
   await redis.sadd(streetPackagesKey(pkg.streetId), pkg.id);
+}
+
+/**
+ * Removes the Package record AND de-indexes its id from
+ * `street:<streetId>:packages`. Idempotent — calling on an id that
+ * was already deleted is a no-op (Redis `del` returns 0 silently,
+ * Redis `srem` on a missing member returns 0 silently).
+ *
+ * Used by `delete_package` (the auto-expiry path for unknown-recipient
+ * packages, see issue #46). The street-id is required because the
+ * package may already be gone by the time we try to clean up — we
+ * cannot look up the street id from the record itself in that case,
+ * so the caller passes it in alongside the package id.
+ */
+export async function deletePackage(
+  id: string,
+  streetId: string,
+): Promise<void> {
+  const redis = getRedis();
+  await redis.del(packageKey(id));
+  await redis.srem(streetPackagesKey(streetId), id);
 }
 
 /**

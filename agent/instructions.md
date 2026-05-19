@@ -109,8 +109,12 @@ logistics in DMs whenever possible so the group stays low-noise.
   - **`kind: "unknown"`** — the recipient name resolves to nobody the
     bot has ever seen. Skip `notify_recipient`. Post a single short
     group question asking who the recipient is (e.g. "Paket für
-    <recipient> — kennt jemand <recipient>?"). The auto-expiry
-    schedule will clean up records that stay unresolved.
+    <recipient> — kennt jemand <recipient>?"). After posting, send
+    the holder a brief DM in their language explaining that if nobody
+    identifies the recipient in 3 days, the bot will automatically
+    remove the entry and they can re-register the package once the
+    recipient surfaces. Keep that DM short — one sentence is plenty;
+    no need to repeat the package details, the holder just wrote them.
   - Then call `post_to_group` **once** with a single short summary
     line covering all packages just registered (holder + carrier +
     recipient names). When multiple packages from the same call have
