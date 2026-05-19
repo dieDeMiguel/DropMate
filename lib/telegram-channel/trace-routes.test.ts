@@ -86,6 +86,74 @@ describe("handleFirstLightPageRequest", () => {
     expect(body).toContain("primary_failed");
     expect(body).toContain("fallback_start");
   });
+
+  it("renders 5 named tool sub-cells inside the Tools row (#61)", async () => {
+    // The Tools row splits into 5 named sub-cells so visitors see WHICH
+    // tool the agent picked, not just THAT a tool fired. Sub-cell ids
+    // are addressed by the animation engine as `box-tool-<name>` so the
+    // id pattern is load-bearing.
+    const body = await handleFirstLightPageRequest().text();
+    for (const name of [
+      "register_resident",
+      "register_package",
+      "notify_recipient",
+      "post_to_group",
+      "confirm_pickup",
+    ]) {
+      expect(body).toContain(`id="box-tool-${name}"`);
+    }
+    // The outer Tools-row container stays — it's the cable target
+    // (cable-ash-tools terminates at the row, sub-cells sit underneath).
+    expect(body).toContain('id="box-tool"');
+    // Outer container is the dashed scaffolding, NOT a box (boxes ignite;
+    // the container deliberately doesn't).
+    expect(body).toContain('class="tools-row"');
+  });
+
+  it("routes tool events with extras.name to the matching sub-cell (#61)", async () => {
+    // The animation engine reads `event.extras.name` on tool events and
+    // resolves `box-tool-<name>` instead of `box-tool`. The shipped JS
+    // must include the allowlist set and the lookup branch.
+    const body = await handleFirstLightPageRequest().text();
+    expect(body).toContain("TOOL_SUB_CELLS");
+    expect(body).toContain("extras.name");
+    // The allowlist must enumerate the 5 active tools so an unknown
+    // name falls through to the container as a defensive default.
+    expect(body).toContain('"register_resident"');
+    expect(body).toContain('"register_package"');
+    expect(body).toContain('"notify_recipient"');
+    expect(body).toContain('"post_to_group"');
+    expect(body).toContain('"confirm_pickup"');
+  });
+
+  it("ships the callback-kind ACCENT_VAR mapping for magenta button-tap traces (#61)", async () => {
+    // The factory's detectTraceKind already returns "callback" for
+    // callback_query webhooks (landed in #60). The page must map that
+    // kind to the magenta accent so the cable + box ignites render
+    // distinctly from text (cyan) and photo (amber).
+    const body = await handleFirstLightPageRequest().text();
+    // Both the ACCENT_VAR table entry and the CSS variable need to ship.
+    expect(body).toMatch(/callback:\s*"var\(--callback-accent\)"/);
+    expect(body).toContain("--callback-accent");
+    // The footer legend lists all three kinds so booth visitors can
+    // map cable colour back to entry type at a glance.
+    expect(body).toContain("swatch-callback");
+  });
+
+  it("renders the right-side trace log panel (#61)", async () => {
+    // Scrolling text feed of the last ~20 events so visitors who
+    // can't tell the cables apart can read the raw stream. Container
+    // ids are stable so the engine can append entries to them.
+    const body = await handleFirstLightPageRequest().text();
+    expect(body).toContain('id="trace-log"');
+    expect(body).toContain('id="trace-log-body"');
+    // The cap + append helpers must ship in the static HTML.
+    expect(body).toContain("LOG_MAX");
+    expect(body).toContain("appendLog");
+    // Autoscroll: scrollTop is set to scrollHeight after each entry so
+    // the freshest entry stays in view.
+    expect(body).toContain("scrollHeight");
+  });
 });
 
 describe("handleTraceSseRequest", () => {

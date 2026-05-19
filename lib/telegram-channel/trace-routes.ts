@@ -157,8 +157,57 @@ const LIVE_DIAGRAM_HTML = `<!doctype html>
     html, body { margin: 0; padding: 0; background: var(--bg); color: #e6e6f0; font-family: ui-monospace, "SF Mono", Menlo, monospace; height: 100%; overflow: hidden; }
     body { display: flex; flex-direction: column; align-items: center; gap: 1rem; padding: 1.25rem; }
     h1 { font-size: 0.85rem; letter-spacing: 0.32em; text-transform: uppercase; color: var(--label); font-weight: 500; margin: 0; }
-    .stage { width: 100%; max-width: 920px; flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; }
+    /* Stage splits into diagram (left, ~80%) + trace log (right, ~20%) — #61. */
+    .stage { width: 100%; max-width: 1200px; flex: 1; min-height: 0; display: flex; align-items: stretch; justify-content: center; gap: 1rem; }
+    .diagram { flex: 1 1 80%; display: flex; align-items: center; justify-content: center; min-width: 0; }
     svg { width: 100%; height: 100%; max-height: 80vh; }
+
+    /* Right-side trace log panel (#61). Scrolling text feed of the
+       last ~20 events; visitors who can't tell the cables apart at a
+       glance can read the raw stream and follow along. */
+    #trace-log {
+      flex: 0 0 20%;
+      min-width: 220px;
+      max-width: 280px;
+      display: flex;
+      flex-direction: column;
+      background: rgba(20, 20, 32, 0.55);
+      border: 1px solid var(--idle);
+      border-radius: 6px;
+      padding: 0.6rem 0.65rem;
+      font-size: 10px;
+      letter-spacing: 0.02em;
+      color: var(--label);
+      overflow: hidden;
+    }
+    #trace-log header {
+      font-size: 9px;
+      letter-spacing: 0.32em;
+      text-transform: uppercase;
+      color: var(--label);
+      opacity: 0.7;
+      padding-bottom: 0.45rem;
+      margin-bottom: 0.45rem;
+      border-bottom: 1px solid var(--idle);
+    }
+    #trace-log-body {
+      flex: 1;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      scrollbar-width: thin;
+      scrollbar-color: var(--idle) transparent;
+    }
+    #trace-log-body::-webkit-scrollbar { width: 6px; }
+    #trace-log-body::-webkit-scrollbar-thumb { background: var(--idle); border-radius: 3px; }
+    .log-entry { color: var(--label-bright); opacity: 0.85; line-height: 1.35; word-break: break-word; }
+    .log-entry .ts { color: var(--label); opacity: 0.6; margin-right: 0.4rem; }
+    .log-entry .stage-phase { color: var(--accent, var(--text-accent)); margin-right: 0.4rem; }
+    .log-entry.kind-text { --accent: var(--text-accent); }
+    .log-entry.kind-photo { --accent: var(--photo-accent); }
+    .log-entry.kind-callback { --accent: var(--callback-accent); }
+    .log-entry.flash-error-line { color: var(--error-accent); }
 
     /* Boxes: idle by default; ignite + post-hold drive their own classes. */
     rect.box {
@@ -190,6 +239,41 @@ const LIVE_DIAGRAM_HTML = `<!doctype html>
     rect.edge { stroke: #1f1f30; }
     rect.edge.heartbeat { animation-duration: 4s; }
     rect.edge.ignite { stroke: var(--accent, var(--text-accent)); fill: rgba(0, 229, 255, 0.04); }
+
+    /* Tools-row container (#61): never ignites. Pure visual frame that
+       wraps the 5 named sub-cells. Stroke is even dimmer than .edge so
+       it reads as scaffolding, not a stage. */
+    rect.tools-row {
+      fill: rgba(20, 20, 32, 0.35);
+      stroke: #1a1a28;
+      stroke-width: 1;
+      stroke-dasharray: 4 4;
+    }
+    /* Tool sub-cells (#61): same ignite/hold/heartbeat shape as
+       regular boxes but with a slightly tighter glow so 5-in-a-row
+       doesn't bleed into each other. */
+    rect.sub-cell.ignite {
+      stroke: var(--accent, var(--text-accent));
+      filter: drop-shadow(0 0 7px var(--accent, var(--text-accent)));
+    }
+    rect.sub-cell.hold {
+      stroke: var(--accent, var(--text-accent));
+      filter: drop-shadow(0 0 4px var(--accent, var(--text-accent)));
+    }
+    /* Tool sub-cell labels: smaller than top-level box labels and split
+       across two lines so longer tool names ("notify recipient") fit. */
+    text.tool-label {
+      fill: var(--label);
+      font-size: 9px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      text-anchor: middle;
+      font-weight: 500;
+      transition: fill 200ms ease;
+      pointer-events: none;
+    }
+    text.tool-label.ignite { fill: var(--label-bright); }
+    text.tool-label.hold { fill: var(--label-bright); }
 
     /* Red-flash terminal-failure visual (#60). Fires on
        parse_label.primary_failed and on terminal-failure events
@@ -281,11 +365,12 @@ const LIVE_DIAGRAM_HTML = `<!doctype html>
 <body>
   <h1>DropMate · live diagram</h1>
   <div class="stage">
-    <svg viewBox="0 0 920 640" role="img" aria-label="trace pipeline" preserveAspectRatio="xMidYMid meet">
+    <div class="diagram">
+    <svg viewBox="0 0 920 660" role="img" aria-label="trace pipeline" preserveAspectRatio="xMidYMid meet">
       <!-- Zone labels -->
       <text class="zone" x="20" y="40">Telegram</text>
       <text class="zone" x="20" y="200">Vercel</text>
-      <text class="zone" x="20" y="500">External</text>
+      <text class="zone" x="20" y="510">External</text>
 
       <!-- Cables: drawn BEFORE boxes so boxes overlay cable endpoints cleanly. -->
       <!-- TELEGRAM → WEBHOOK -->
@@ -296,12 +381,12 @@ const LIVE_DIAGRAM_HTML = `<!doctype html>
       <path class="cable" id="cable-orchestrator-parse" d="M380 320 L240 320 L240 380" />
       <!-- ORCHESTRATOR → ASH_SESSION (right branch) -->
       <path class="cable" id="cable-orchestrator-ash" d="M540 320 L680 320 L680 380" />
-      <!-- ASH_SESSION → TOOLS -->
+      <!-- ASH_SESSION → TOOLS row (cable ends at the row's top edge — sub-cells under it). -->
       <path class="cable" id="cable-ash-tools" d="M680 440 L680 470 L460 470 L460 500" />
       <!-- TOOLS → AI GATEWAY -->
-      <path class="cable" id="cable-tools-gateway" d="M540 530 L760 530 L760 570" />
+      <path class="cable" id="cable-tools-gateway" d="M730 580 L760 580 L760 605" />
       <!-- TOOLS → REDIS -->
-      <path class="cable" id="cable-tools-redis" d="M380 530 L160 530 L160 570" />
+      <path class="cable" id="cable-tools-redis" d="M190 580 L160 580 L160 605" />
       <!-- ASH_SESSION → WEBHOOK (outbound return path) -->
       <path class="cable" id="cable-ash-outbound" d="M680 410 L840 410 L840 200 L520 200" />
 
@@ -330,19 +415,51 @@ const LIVE_DIAGRAM_HTML = `<!doctype html>
       <text class="label" id="label-ash_send" x="680" y="415">Ash Session</text>
       <text class="sub" id="sub-ash_send" x="680" y="432">turn loop</text>
 
-      <!-- Tools (single block; sub-cells in #61) -->
-      <rect class="box heartbeat" id="box-tool" x="380" y="500" width="160" height="60" rx="6" />
-      <text class="label" id="label-tool" x="460" y="535">Tools</text>
-      <text class="sub" id="sub-tool" x="460" y="552">5 surfaces</text>
+      <!-- Tools row (#61): outer container (never ignites) + 5 named
+           sub-cells. A tool.* event with extras.name lights the matching
+           sub-cell. tool.* without a name (defensive default) falls
+           through to the container so visitors still see something. -->
+      <rect class="tools-row" id="box-tool" x="140" y="490" width="640" height="90" rx="6" />
+      <text class="zone" id="label-tool" x="148" y="484">Tools</text>
+      <!-- Sub-cells: 5 boxes, 110px wide, 16px gap, starting at x=150.
+           Total span = 5*110 + 4*16 = 614 (centred inside the 640-wide row). -->
+      <rect class="box sub-cell heartbeat" id="box-tool-register_resident" x="150" y="510" width="110" height="60" rx="5" />
+      <text class="tool-label" id="label-tool-register_resident" x="205" y="538">register</text>
+      <text class="tool-label" id="label-tool-register_resident-2" x="205" y="552">resident</text>
+
+      <rect class="box sub-cell heartbeat" id="box-tool-register_package" x="276" y="510" width="110" height="60" rx="5" />
+      <text class="tool-label" id="label-tool-register_package" x="331" y="538">register</text>
+      <text class="tool-label" id="label-tool-register_package-2" x="331" y="552">package</text>
+
+      <rect class="box sub-cell heartbeat" id="box-tool-notify_recipient" x="402" y="510" width="110" height="60" rx="5" />
+      <text class="tool-label" id="label-tool-notify_recipient" x="457" y="538">notify</text>
+      <text class="tool-label" id="label-tool-notify_recipient-2" x="457" y="552">recipient</text>
+
+      <rect class="box sub-cell heartbeat" id="box-tool-post_to_group" x="528" y="510" width="110" height="60" rx="5" />
+      <text class="tool-label" id="label-tool-post_to_group" x="583" y="538">post to</text>
+      <text class="tool-label" id="label-tool-post_to_group-2" x="583" y="552">group</text>
+
+      <rect class="box sub-cell heartbeat" id="box-tool-confirm_pickup" x="654" y="510" width="110" height="60" rx="5" />
+      <text class="tool-label" id="label-tool-confirm_pickup" x="709" y="538">confirm</text>
+      <text class="tool-label" id="label-tool-confirm_pickup-2" x="709" y="552">pickup</text>
 
       <!-- AI Gateway (edge, bottom-right) -->
-      <rect class="box edge heartbeat" id="box-gateway" x="680" y="570" width="160" height="50" rx="6" />
-      <text class="label" id="label-gateway" x="760" y="600">AI Gateway</text>
+      <rect class="box edge heartbeat" id="box-gateway" x="680" y="605" width="160" height="50" rx="6" />
+      <text class="label" id="label-gateway" x="760" y="635">AI Gateway</text>
 
       <!-- Redis (edge, bottom-left) -->
-      <rect class="box edge heartbeat" id="box-redis" x="80" y="570" width="160" height="50" rx="6" />
-      <text class="label" id="label-redis" x="160" y="600">Upstash · Redis</text>
+      <rect class="box edge heartbeat" id="box-redis" x="80" y="605" width="160" height="50" rx="6" />
+      <text class="label" id="label-redis" x="160" y="635">Upstash · Redis</text>
     </svg>
+    </div>
+    <!-- Trace log panel (#61). Scrolling text feed of the last ~20
+         events; visitors who can't tell the cables apart at a glance
+         can follow along by reading the raw stream. Autoscrolls to
+         latest entry. -->
+    <aside id="trace-log" aria-label="trace log">
+      <header>Trace log</header>
+      <div id="trace-log-body"></div>
+    </aside>
   </div>
   <footer>
     <div class="status" id="status">connecting…</div>
@@ -378,8 +495,25 @@ const LIVE_DIAGRAM_HTML = `<!doctype html>
         outbound:     { box: "webhook",      cable: "cable-ash-outbound" },
       };
 
+      // Tool sub-cells (#61). When a \`tool\` event carries an
+      // \`extras.name\` matching one of these, the engine routes the
+      // ignite to the matching sub-cell (\`box-tool-<name>\`) rather
+      // than the outer Tools container — so visitors see WHICH tool
+      // the agent picked, not just THAT a tool fired. Tool events
+      // without a recognised name fall through to the legacy
+      // container behaviour (defensive).
+      const TOOL_SUB_CELLS = new Set([
+        "register_resident",
+        "register_package",
+        "notify_recipient",
+        "post_to_group",
+        "confirm_pickup",
+      ]);
+
       // Accent CSS variable per trace kind. Read on each event so a
-      // trace's color survives mid-stream stage changes.
+      // trace's color survives mid-stream stage changes. Callback
+      // traces (button taps) light up in magenta — added in #61 once
+      // the factory's detectTraceKind started emitting kind="callback".
       const ACCENT_VAR = {
         text:     "var(--text-accent)",
         photo:    "var(--photo-accent)",
@@ -410,7 +544,9 @@ const LIVE_DIAGRAM_HTML = `<!doctype html>
           c.classList.remove("run", "hold");
           c.style.removeProperty("--accent");
         }
-        const labels = document.querySelectorAll("text.label");
+        // Include tool sub-cell labels (#61) so they drop back to idle
+        // colour alongside their parent boxes after a trace fades.
+        const labels = document.querySelectorAll("text.label, text.tool-label");
         for (const l of labels) l.classList.remove("ignite", "hold");
         for (const [id, text] of idleSubText.entries()) {
           const sub = document.getElementById(id);
@@ -544,9 +680,21 @@ const LIVE_DIAGRAM_HTML = `<!doctype html>
         const plan = STAGE_PLAN[event.stage];
         if (!plan) return;
         const accent = ACCENT_VAR[event.kind] || ACCENT_VAR.text;
-        const box = $("box-" + plan.box);
-        const label = $("label-" + plan.box);
-        const sub = $("sub-" + plan.box);
+        // Tool sub-cell routing (#61): when a \`tool\` event carries
+        // a recognised name, light the named sub-cell directly so
+        // visitors see WHICH tool fired. The outer \`box-tool\`
+        // container is a dashed frame (\`.tools-row\`) and is NOT in
+        // the ignite path. Unknown tool names fall through to the
+        // legacy container target as a defensive default.
+        let boxId = plan.box;
+        if (event.stage === "tool" && event.extras && typeof event.extras.name === "string") {
+          if (TOOL_SUB_CELLS.has(event.extras.name)) {
+            boxId = "tool-" + event.extras.name;
+          }
+        }
+        const box = $("box-" + boxId);
+        const label = $("label-" + boxId);
+        const sub = $("sub-" + boxId);
         const cable = plan.cable ? $(plan.cable) : null;
         if (!box) return;
         // Set the accent on the box + cable so CSS reads it.
@@ -635,6 +783,63 @@ const LIVE_DIAGRAM_HTML = `<!doctype html>
         }
       }
 
+      // Trace log panel (#61). Appends each event as a line to the
+      // right-side scrolling feed. Caps at LOG_MAX entries so a long
+      // booth session doesn't grow the DOM unbounded; autoscrolls to
+      // the latest entry. Reuses the same SSE events the diagram
+      // engine consumes — no separate transport.
+      const LOG_MAX = 20;
+      const logBody = $("trace-log-body");
+
+      function pad2(n) { return (n < 10 ? "0" : "") + n; }
+      function pad3(n) { return (n < 10 ? "00" : n < 100 ? "0" : "") + n; }
+      function formatTimestamp() {
+        const d = new Date();
+        return pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + ":" +
+          pad2(d.getSeconds()) + "." + pad3(d.getMilliseconds());
+      }
+      function formatExtras(extras) {
+        if (!extras || typeof extras !== "object") return "";
+        const parts = [];
+        for (const key of Object.keys(extras)) {
+          const value = extras[key];
+          if (value === null || value === undefined) continue;
+          if (typeof value === "object") continue;
+          parts.push(key + "=" + String(value));
+        }
+        return parts.length > 0 ? " " + parts.join(" ") : "";
+      }
+      function appendLog(event) {
+        if (!logBody) return;
+        const entry = document.createElement("div");
+        entry.className = "log-entry kind-" + (event.kind || "text");
+        if (event.phase === "error" || event.phase === "primary_failed") {
+          entry.classList.add("flash-error-line");
+        }
+        const ts = document.createElement("span");
+        ts.className = "ts";
+        ts.textContent = formatTimestamp();
+        const stagePhase = document.createElement("span");
+        stagePhase.className = "stage-phase";
+        stagePhase.textContent = event.stage + "." + event.phase;
+        const meta = document.createElement("span");
+        meta.className = "meta";
+        const traceShort = typeof event.traceId === "string" ? event.traceId.slice(0, 8) : "";
+        meta.textContent = "trace=" + traceShort + " " + (event.kind || "text") + formatExtras(event.extras);
+        entry.appendChild(ts);
+        entry.appendChild(stagePhase);
+        entry.appendChild(meta);
+        logBody.appendChild(entry);
+        // Cap the DOM size — drop oldest entries off the front.
+        while (logBody.childElementCount > LOG_MAX) {
+          const first = logBody.firstElementChild;
+          if (!first) break;
+          logBody.removeChild(first);
+        }
+        // Autoscroll to the freshest entry.
+        logBody.scrollTop = logBody.scrollHeight;
+      }
+
       const source = new EventSource("/api/trace");
       source.addEventListener("open", () => {
         statusEl.textContent = "live";
@@ -648,6 +853,7 @@ const LIVE_DIAGRAM_HTML = `<!doctype html>
         let event;
         try { event = JSON.parse(e.data); } catch { return; }
         if (!event || typeof event.stage !== "string") return;
+        appendLog(event);
         enqueue(event);
       });
 
