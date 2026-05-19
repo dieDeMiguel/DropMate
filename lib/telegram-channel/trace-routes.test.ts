@@ -19,6 +19,46 @@ describe("handleFirstLightPageRequest", () => {
     expect(body).toContain("/api/trace");
     expect(body).toContain("EventSource");
   });
+
+  it("renders the V1 layout with all 8 architecture boxes (#59)", async () => {
+    const body = await handleFirstLightPageRequest().text();
+    // Edge boxes (passive destinations) + active stages. The orchestrator
+    // emits per-stage events that target these by id; the diagram engine
+    // resolves `box-${stage}` so the id pattern is load-bearing.
+    for (const id of [
+      "box-telegram",
+      "box-webhook",
+      "box-orchestrator",
+      "box-parse_label",
+      "box-ash_send",
+      "box-tool",
+      "box-gateway",
+      "box-redis",
+    ]) {
+      expect(body).toContain(`id="${id}"`);
+    }
+  });
+
+  it("includes the PCB cables wiring orchestrator → ash session → tools → outbound (#59)", async () => {
+    const body = await handleFirstLightPageRequest().text();
+    for (const id of [
+      "cable-telegram-webhook",
+      "cable-webhook-orchestrator",
+      "cable-orchestrator-parse",
+      "cable-orchestrator-ash",
+      "cable-ash-tools",
+      "cable-ash-outbound",
+    ]) {
+      expect(body).toContain(`id="${id}"`);
+    }
+  });
+
+  it("declares the synthwave accent palette per trace kind", async () => {
+    const body = await handleFirstLightPageRequest().text();
+    expect(body).toContain("--text-accent");
+    expect(body).toContain("--photo-accent");
+    expect(body).toContain("--callback-accent");
+  });
 });
 
 describe("handleTraceSseRequest", () => {

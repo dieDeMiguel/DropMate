@@ -398,10 +398,16 @@ async function buildSyntheticPhotoMessage(
   let parsed: Awaited<ReturnType<ProcessUpdateDeps["parseLabel"]>> = null;
   try {
     const imageUrl = await deps.getFileUrl(fileId);
+    // Vision call boundary — the diagram lights up the parse_label box
+    // (only on photo trace kinds). #60 enriches with primary→fallback
+    // retry visuals; for now this just bookends the call so the V1
+    // animation engine has a clean start/end pair to render.
+    emitTrace("parse_label", "start");
     parsed = await deps.parseLabel({
       imageUrl,
       caption: captionText,
     });
+    emitTrace("parse_label", "end");
     // Log every successful parse so we can tell apart "model never got
     // called" from "model returned confidence=low with no recipientName".
     // URL excluded from the log (contains the bot token); only the
@@ -423,6 +429,10 @@ async function buildSyntheticPhotoMessage(
       "mediaType-via-fetch (sanitised) — error:",
       err instanceof Error ? { name: err.name, message: err.message, stack: err.stack } : err,
     );
+    // Surface the failure on the diagram too. #60 renders this as the
+    // red-flash terminal-failure visual; the V1 engine just stops
+    // animating the parse_label box and lets the trace move on.
+    emitTrace("parse_label", "error");
     parsed = null;
   }
 
@@ -468,10 +478,12 @@ export async function processInboundTelegramUpdate(
   req: Request,
   deps: ProcessUpdateDeps,
 ): Promise<Response> {
-  // Single emit point for the smoke-test slice (#58). The webhook
-  // factory wraps this call in `runWithTrace`, so the event picks up
-  // the trace id + kind for free. Later slices (#59/#60/#61) add the
-  // per-stage instrumentation; for now this proves the pipeline.
+  // Per-stage instrumentation for the live diagram (#59). The webhook
+  // factory wraps this call in `runWithTrace`, so every emit below
+  // inherits the same `traceId` + `kind`. `webhook.start` fires before
+  // any short-circuit (bad secret, malformed JSON) so the diagram still
+  // ignites for rejected webhooks; `orchestrator.start`/`.end` bookend
+  // the work that survives the early-exit branches.
   emitTrace("webhook", "start");
 
   const verified = verifyTelegramSecretHeader(req, deps.expectedSecret);
@@ -486,18 +498,23 @@ export async function processInboundTelegramUpdate(
     return new Response("bad json", { status: 400 });
   }
 
+  emitTrace("orchestrator", "start");
+
   // Callback queries are handled before regular messages — both branches
   // are exclusive at the Bot API level (a single update is either one or
   // the other, never both).
   const callback = extractInboundCallback(update);
   if (callback) {
-    return handleCallbackQuery(callback, deps);
+    const res = await handleCallbackQuery(callback, deps);
+    emitTrace("orchestrator", "end");
+    return res;
   }
 
   const inbound = extractInboundMessage(update);
   if (!inbound) {
     // Updates we don't handle yet (photos, edits, reactions, …) are
     // acked so Telegram doesn't retry indefinitely.
+    emitTrace("orchestrator", "end");
     return new Response(null, { status: 204 });
   }
 
@@ -536,6 +553,7 @@ export async function processInboundTelegramUpdate(
     message = inbound.text;
   }
 
+  emitTrace("ash_send", "start");
   const session = await deps.sendToAsh(message, {
     auth,
     continuationToken,
@@ -546,6 +564,7 @@ export async function processInboundTelegramUpdate(
       fromLanguageCode: inbound.fromLanguageCode,
     },
   });
+  emitTrace("ash_send", "end");
 
   if (session.id !== existingSessionId) {
     // Persist immediately so a concurrent retry doesn't open a
@@ -563,5 +582,6 @@ export async function processInboundTelegramUpdate(
   // retries if the webhook hangs.
   deps.waitUntil(deps.drainSession(session, inbound.chatId));
 
+  emitTrace("orchestrator", "end");
   return new Response(null, { status: 204 });
 }

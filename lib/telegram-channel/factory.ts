@@ -42,7 +42,7 @@ import {
   setSessionIdForChat,
   upsertKnownTelegramUser,
 } from "../redis.js";
-import { runWithTrace } from "../trace.js";
+import { getCurrentTraceContext, runWithTrace } from "../trace.js";
 import {
   buildFileProxyUrl,
   handleFileProxyRequest,
@@ -151,8 +151,23 @@ export function telegramChannel(config: TelegramChannelConfig) {
               waitUntil,
               getSessionIdForChat,
               setSessionIdForChat,
-              drainSession: (session, chatId) =>
-                drainSessionToTelegram(session, chatId, { token }),
+              drainSession: (session, chatId) => {
+                // ALS propagation across `waitUntil` is fragile on
+                // Vercel — depending on Promise wrapping the AsyncLocal
+                // store can be lost across the function boundary. We
+                // capture the current trace context here (still inside
+                // the inbound `runWithTrace` scope) and re-enter it
+                // synchronously inside the drain task so every
+                // downstream `emitTrace` inherits the right traceId +
+                // kind regardless of how Vercel's queue runs the task.
+                const ctx = getCurrentTraceContext();
+                if (!ctx) {
+                  return drainSessionToTelegram(session, chatId, { token });
+                }
+                return runWithTrace(ctx, () =>
+                  drainSessionToTelegram(session, chatId, { token }),
+                );
+              },
               getFileUrl: async (fileId) =>
                 buildFileProxyUrl(origin, fileId, webhookSecret),
               parseLabel: async (input) => {

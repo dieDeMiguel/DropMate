@@ -34,6 +34,7 @@
 
 import type { Session } from "experimental-ash/channels";
 
+import { emitTrace } from "../trace.js";
 import { sendTelegramMessage } from "./send.js";
 
 /**
@@ -89,6 +90,13 @@ export async function drainSessionToTelegram(
   const sendMessage =
     deps.sendMessage ?? buildDefaultSendMessage(deps.token);
   const logError = deps.logError ?? defaultLogError;
+  // Diagram boundary for the outbound drain (#59). All emits inside this
+  // function are no-ops outside a `runWithTrace` scope — production
+  // callers (the channel factory) supply one by capturing the inbound
+  // turn's trace context and re-entering it inside `waitUntil`; cron
+  // schedules and the built-in Ash API channel run without a scope and
+  // pay nothing.
+  emitTrace("drain", "start");
   try {
     const stream = await session.getEventStream();
     const reader = stream.getReader();
@@ -96,15 +104,47 @@ export async function drainSessionToTelegram(
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
+        // Tool sub-cells (#61) consume `name` and the action `id`; for
+        // V1 we emit one event per tool in the batch so the animation
+        // engine has the data ready when #61 adds the per-tool boxes.
+        if (value.type === "actions.requested") {
+          const actions = (value.data as { actions?: ReadonlyArray<{ id?: string; toolName?: string }> }).actions;
+          if (Array.isArray(actions)) {
+            for (const action of actions) {
+              emitTrace("tool", "start", {
+                name: action.toolName,
+                id: action.id,
+              });
+            }
+          }
+          continue;
+        }
+        if (value.type === "action.result") {
+          const data = value.data as {
+            result?: { toolCallId?: string; toolName?: string };
+            status?: string;
+            error?: { code?: string; message?: string };
+          };
+          emitTrace("tool", "end", {
+            name: data.result?.toolName,
+            id: data.result?.toolCallId,
+            status: data.status,
+          });
+          continue;
+        }
         if (value.type === "message.completed") {
           const text = value.data.message;
           if (typeof text === "string" && text.length > 0) {
+            emitTrace("outbound", "start");
             await sendMessage(chatId, text);
+            emitTrace("outbound", "end");
           }
           continue;
         }
         if (value.type === "session.failed") {
+          emitTrace("outbound", "start");
           await sendMessage(chatId, TELEGRAM_SESSION_FAILED_REPLY);
+          emitTrace("outbound", "end");
           continue;
         }
       }
@@ -113,7 +153,10 @@ export async function drainSessionToTelegram(
     }
   } catch (err) {
     logError("telegram outbound drain failed", err);
+    emitTrace("drain", "error");
+    return;
   }
+  emitTrace("drain", "end");
 }
 
 function defaultLogError(message: string, error: unknown): void {
