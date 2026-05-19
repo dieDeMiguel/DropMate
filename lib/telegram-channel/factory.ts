@@ -36,6 +36,7 @@
 import { defineChannel, GET, POST } from "experimental-ash/channels";
 
 import parseLabelTool from "../../agent/tools/parse_label.js";
+import parseTrackingPageTool from "../../agent/tools/parse_tracking_page.js";
 import {
   getPackage,
   getResident,
@@ -148,6 +149,29 @@ export function telegramChannel(config: TelegramChannelConfig) {
               }>;
               return execute(input, {
                 toolCallId: `parse_label:${Date.now()}`,
+                messages: [],
+              });
+            },
+            parseTrackingPage: async (input) => {
+              // Same no-silent-catch policy as parseLabel above: errors
+              // propagate to process-update.ts's catch which logs with
+              // stack + chatId, and the agent gets a "couldn't read"
+              // prompt to ask the requester for the carrier + window
+              // manually.
+              const execute = parseTrackingPageTool.execute as (
+                input: unknown,
+                options: unknown,
+              ) => Promise<{
+                carrier: string;
+                trackingNumber?: string;
+                expectedWindowStartAt?: string;
+                expectedWindowEndAt?: string;
+                absenceSignal?: boolean;
+                confidence: "high" | "medium" | "low";
+                reason: string;
+              }>;
+              return execute(input, {
+                toolCallId: `parse_tracking_page:${Date.now()}`,
                 messages: [],
               });
             },

@@ -63,6 +63,7 @@ interface BuiltDeps {
   drainSession: ReturnType<typeof vi.fn>;
   getFileUrl: ReturnType<typeof vi.fn>;
   parseLabel: ReturnType<typeof vi.fn>;
+  parseTrackingPage: ReturnType<typeof vi.fn>;
   answerCallback: ReturnType<typeof vi.fn>;
   stripKeyboard: ReturnType<typeof vi.fn>;
   getPackageRecipientId: ReturnType<typeof vi.fn>;
@@ -73,12 +74,16 @@ interface BuiltDeps {
 type ParsedLabel = NonNullable<
   Awaited<ReturnType<ProcessUpdateDeps["parseLabel"]>>
 >;
+type ParsedTrackingPage = NonNullable<
+  Awaited<ReturnType<ProcessUpdateDeps["parseTrackingPage"]>>
+>;
 
 function buildDeps(overrides: {
   session?: Session;
   expectedSecret?: string | undefined;
   fileUrl?: string;
   parsedLabel?: ParsedLabel | null;
+  parsedTrackingPage?: ParsedTrackingPage | null;
   packageRecipientId?: string | null;
   isRegisteredResident?: boolean;
 } = {}): BuiltDeps {
@@ -105,6 +110,22 @@ function buildDeps(overrides: {
     .mockResolvedValue(
       "parsedLabel" in overrides ? overrides.parsedLabel : defaultParsedLabel,
     );
+  const defaultParsedTrackingPage: ParsedTrackingPage = {
+    carrier: "DHL",
+    trackingNumber: "00340434161094021899",
+    expectedWindowStartAt: "2026-05-19T13:00:00Z",
+    expectedWindowEndAt: "2026-05-19T16:00:00Z",
+    absenceSignal: true,
+    confidence: "high",
+    reason: "all fields legible",
+  };
+  const parseTrackingPage = vi
+    .fn()
+    .mockResolvedValue(
+      "parsedTrackingPage" in overrides
+        ? overrides.parsedTrackingPage
+        : defaultParsedTrackingPage,
+    );
   const answerCallback = vi.fn().mockResolvedValue(undefined);
   const stripKeyboard = vi.fn().mockResolvedValue(undefined);
   const getPackageRecipientId = vi
@@ -126,6 +147,7 @@ function buildDeps(overrides: {
     drainSession,
     getFileUrl,
     parseLabel,
+    parseTrackingPage,
     answerCallback,
     stripKeyboard,
     getPackageRecipientId,
@@ -139,6 +161,7 @@ function buildDeps(overrides: {
       drainSession,
       getFileUrl,
       parseLabel,
+      parseTrackingPage,
       answerCallback,
       stripKeyboard,
       getPackageRecipientId,
@@ -276,19 +299,23 @@ describe("processInboundTelegramUpdate", () => {
     });
   });
 
-  it("parses the label via parseLabel and forwards a synthetic text message naming the extracted fields", async () => {
+  it("parses a GROUP label photo via parseLabel and forwards a synthetic text message naming the extracted fields", async () => {
+    // Group photos route through parseLabel (Flow 1). DM photos route
+    // through parseTrackingPage (Flow 2 v2 / #69) — see the dedicated
+    // describe block further down for those cases.
     const fileUrl =
       "https://api.telegram.org/file/bot111:AAA/photos/file_99.jpg";
-    const { deps, sendToAsh, getFileUrl, parseLabel } = buildDeps({
-      fileUrl,
-      parsedLabel: {
-        carrier: "DHL",
-        recipientName: "Natascha Elter",
-        recipientHouseNumber: "88",
-        confidence: "high",
-        reason: "label legible",
-      },
-    });
+    const { deps, sendToAsh, getFileUrl, parseLabel, parseTrackingPage } =
+      buildDeps({
+        fileUrl,
+        parsedLabel: {
+          carrier: "DHL",
+          recipientName: "Natascha Elter",
+          recipientHouseNumber: "88",
+          confidence: "high",
+          reason: "label legible",
+        },
+      });
 
     const update = {
       update_id: 1,
@@ -296,7 +323,7 @@ describe("processInboundTelegramUpdate", () => {
         message_id: 1,
         date: 1,
         caption: "Paket für Natascha",
-        chat: { id: 42, type: "private" },
+        chat: { id: 42, type: "supergroup" },
         from: { id: 99, is_bot: false, first_name: "T", language_code: "de" },
         photo: [
           { file_id: "small", file_size: 100, width: 90, height: 90 },
@@ -320,6 +347,9 @@ describe("processInboundTelegramUpdate", () => {
     expect(parseArgs.imageBase64).toBeUndefined();
     expect(parseArgs.mediaType).toBeUndefined();
 
+    // parseTrackingPage must NOT be called on the group path.
+    expect(parseTrackingPage).not.toHaveBeenCalled();
+
     const [message, options] = sendToAsh.mock.calls[0]!;
     expect(typeof message).toBe("string");
     expect(message).toContain("[label parsed]");
@@ -333,13 +363,13 @@ describe("processInboundTelegramUpdate", () => {
 
     expect(options.state).toEqual<TelegramChannelState>({
       chatId: 42,
-      isGroup: false,
+      isGroup: true,
       fromUserId: 99,
       fromLanguageCode: "de",
     });
   });
 
-  it("substitutes a placeholder caption when a photo arrives without text", async () => {
+  it("substitutes a placeholder caption when a group label photo arrives without text", async () => {
     const { deps, sendToAsh, getFileUrl, parseLabel } = buildDeps();
 
     const update = {
@@ -347,7 +377,7 @@ describe("processInboundTelegramUpdate", () => {
       message: {
         message_id: 2,
         date: 1,
-        chat: { id: 42, type: "private" },
+        chat: { id: 42, type: "supergroup" },
         from: { id: 99, is_bot: false, first_name: "T" },
         photo: [{ file_id: "only", file_size: 100, width: 90, height: 90 }],
       },
@@ -365,7 +395,7 @@ describe("processInboundTelegramUpdate", () => {
     expect(message).toContain("caption='(no caption)'");
   });
 
-  it("appends a please-confirm suffix when the vision tool returns low confidence", async () => {
+  it("appends a please-confirm suffix when the label vision tool returns low confidence", async () => {
     const { deps, sendToAsh } = buildDeps({
       parsedLabel: {
         carrier: "unknown",
@@ -380,7 +410,7 @@ describe("processInboundTelegramUpdate", () => {
       message: {
         message_id: 3,
         date: 1,
-        chat: { id: 42, type: "private" },
+        chat: { id: 42, type: "supergroup" },
         from: { id: 99, is_bot: false, first_name: "T" },
         photo: [{ file_id: "only", file_size: 100, width: 90, height: 90 }],
       },
@@ -393,7 +423,7 @@ describe("processInboundTelegramUpdate", () => {
     expect(message).toMatch(/please confirm/i);
   });
 
-  it("falls back to a generic 'photo received, label could not be parsed' message when parseLabel returns null", async () => {
+  it("falls back to a generic 'photo received, label could not be parsed' message when parseLabel returns null (group photo)", async () => {
     const { deps, sendToAsh, parseLabel } = buildDeps({ parsedLabel: null });
 
     const update = {
@@ -402,7 +432,7 @@ describe("processInboundTelegramUpdate", () => {
         message_id: 4,
         date: 1,
         caption: "kann das jemand lesen?",
-        chat: { id: 42, type: "private" },
+        chat: { id: 42, type: "supergroup" },
         from: { id: 99, is_bot: false, first_name: "T" },
         photo: [{ file_id: "f", file_size: 100, width: 90, height: 90 }],
       },
@@ -417,7 +447,7 @@ describe("processInboundTelegramUpdate", () => {
     expect(message).toMatch(/retype|type the recipient/i);
   });
 
-  it("falls back to the parse-failure message when parseLabel throws", async () => {
+  it("falls back to the label parse-failure message when parseLabel throws (group photo)", async () => {
     const { deps, sendToAsh, parseLabel } = buildDeps();
     parseLabel.mockRejectedValueOnce(new Error("vision provider down"));
 
@@ -426,7 +456,7 @@ describe("processInboundTelegramUpdate", () => {
       message: {
         message_id: 5,
         date: 1,
-        chat: { id: 42, type: "private" },
+        chat: { id: 42, type: "supergroup" },
         from: { id: 99, is_bot: false, first_name: "T" },
         photo: [{ file_id: "f", file_size: 100, width: 90, height: 90 }],
       },
@@ -438,7 +468,7 @@ describe("processInboundTelegramUpdate", () => {
     expect(message).toContain("[photo received, label could not be parsed]");
   });
 
-  it("falls back to the parse-failure message when getFileUrl throws", async () => {
+  it("falls back to the label parse-failure message when getFileUrl throws (group photo)", async () => {
     const { deps, sendToAsh, parseLabel, getFileUrl } = buildDeps();
     getFileUrl.mockRejectedValueOnce(new Error("Bot API 404"));
 
@@ -447,7 +477,7 @@ describe("processInboundTelegramUpdate", () => {
       message: {
         message_id: 6,
         date: 1,
-        chat: { id: 42, type: "private" },
+        chat: { id: 42, type: "supergroup" },
         from: { id: 99, is_bot: false, first_name: "T" },
         photo: [{ file_id: "f", file_size: 100, width: 90, height: 90 }],
       },
@@ -460,7 +490,7 @@ describe("processInboundTelegramUpdate", () => {
     expect(message).toContain("[photo received, label could not be parsed]");
   });
 
-  it("omits absent label fields from the synthetic message", async () => {
+  it("omits absent label fields from the synthetic message (group photo)", async () => {
     const { deps, sendToAsh } = buildDeps({
       parsedLabel: {
         carrier: "DHL",
@@ -475,7 +505,7 @@ describe("processInboundTelegramUpdate", () => {
       message: {
         message_id: 7,
         date: 1,
-        chat: { id: 42, type: "private" },
+        chat: { id: 42, type: "supergroup" },
         from: { id: 99, is_bot: false, first_name: "T" },
         photo: [{ file_id: "f", file_size: 100, width: 90, height: 90 }],
       },
@@ -488,6 +518,217 @@ describe("processInboundTelegramUpdate", () => {
     expect(message).not.toContain("recipient=");
     expect(message).not.toContain("house=");
     expect(message).not.toContain("tracking=");
+  });
+
+  describe("DM photo → parseTrackingPage (Flow 2 v2 / #69)", () => {
+    it("parses a DM tracking-page photo via parseTrackingPage and forwards a synthetic text message naming the extracted fields", async () => {
+      const fileUrl =
+        "https://api.telegram.org/file/bot111:AAA/photos/file_77.jpg";
+      const { deps, sendToAsh, getFileUrl, parseLabel, parseTrackingPage } =
+        buildDeps({
+          fileUrl,
+          parsedTrackingPage: {
+            carrier: "DHL",
+            trackingNumber: "00340434161094021899",
+            expectedWindowStartAt: "2026-05-19T13:00:00Z",
+            expectedWindowEndAt: "2026-05-19T16:00:00Z",
+            absenceSignal: true,
+            confidence: "high",
+            reason: "all fields legible",
+          },
+        });
+
+      const update = {
+        update_id: 100,
+        message: {
+          message_id: 1,
+          date: 1,
+          caption: "kann jemand annehmen? bin nicht da",
+          chat: { id: 42, type: "private" },
+          from: { id: 99, is_bot: false, first_name: "T", language_code: "de" },
+          photo: [
+            { file_id: "small", file_size: 100, width: 90, height: 90 },
+            { file_id: "large", file_size: 5000, width: 1280, height: 1280 },
+          ],
+        },
+      };
+
+      const res = await processInboundTelegramUpdate(makeRequest(update), deps);
+      expect(res.status).toBe(204);
+
+      expect(getFileUrl).toHaveBeenCalledWith("large");
+
+      // parseTrackingPage receives the URL + caption verbatim.
+      expect(parseTrackingPage).toHaveBeenCalledTimes(1);
+      const parseArgs = parseTrackingPage.mock.calls[0]![0];
+      expect(parseArgs.imageUrl).toBe(fileUrl);
+      expect(parseArgs.caption).toBe("kann jemand annehmen? bin nicht da");
+
+      // parseLabel must NOT fire on the DM path.
+      expect(parseLabel).not.toHaveBeenCalled();
+
+      const [message, options] = sendToAsh.mock.calls[0]!;
+      expect(typeof message).toBe("string");
+      expect(message).toContain("[tracking page parsed]");
+      expect(message).toContain("carrier=DHL");
+      expect(message).toContain("trackingNumber=00340434161094021899");
+      expect(message).toContain("windowStart=2026-05-19T13:00:00Z");
+      expect(message).toContain("windowEnd=2026-05-19T16:00:00Z");
+      expect(message).toContain("absenceSignal=true");
+      expect(message).toContain("confidence=high");
+      expect(message).toContain(
+        "caption='kann jemand annehmen? bin nicht da'",
+      );
+      expect(message).not.toMatch(/please confirm/);
+
+      expect(options.state).toEqual<TelegramChannelState>({
+        chatId: 42,
+        isGroup: false,
+        fromUserId: 99,
+        fromLanguageCode: "de",
+      });
+    });
+
+    it("appends a please-confirm suffix when the tracking-page vision tool returns low confidence", async () => {
+      const { deps, sendToAsh, parseTrackingPage } = buildDeps({
+        parsedTrackingPage: {
+          carrier: "unknown",
+          confidence: "low",
+          reason: "carrier logo cropped",
+        },
+      });
+
+      const update = {
+        update_id: 101,
+        message: {
+          message_id: 2,
+          date: 1,
+          chat: { id: 42, type: "private" },
+          from: { id: 99, is_bot: false, first_name: "T" },
+          photo: [{ file_id: "only", file_size: 100, width: 90, height: 90 }],
+        },
+      };
+
+      await processInboundTelegramUpdate(makeRequest(update), deps);
+
+      expect(parseTrackingPage).toHaveBeenCalledTimes(1);
+      const [message] = sendToAsh.mock.calls[0]!;
+      expect(message).toContain("[tracking page parsed]");
+      expect(message).toContain("confidence=low");
+      expect(message).toMatch(/please confirm with the requester/i);
+    });
+
+    it("falls back to a tracking-page-flavoured parse-failure message when parseTrackingPage returns null", async () => {
+      const { deps, sendToAsh, parseLabel, parseTrackingPage } = buildDeps({
+        parsedTrackingPage: null,
+      });
+
+      const update = {
+        update_id: 102,
+        message: {
+          message_id: 3,
+          date: 1,
+          caption: "kannst du das lesen?",
+          chat: { id: 42, type: "private" },
+          from: { id: 99, is_bot: false, first_name: "T" },
+          photo: [{ file_id: "f", file_size: 100, width: 90, height: 90 }],
+        },
+      };
+
+      await processInboundTelegramUpdate(makeRequest(update), deps);
+
+      expect(parseTrackingPage).toHaveBeenCalledTimes(1);
+      expect(parseLabel).not.toHaveBeenCalled();
+      const [message] = sendToAsh.mock.calls[0]!;
+      expect(message).toContain(
+        "[photo received, tracking page could not be parsed]",
+      );
+      expect(message).toContain("caption: kannst du das lesen?");
+      expect(message).toMatch(/carrier and expected delivery window/i);
+    });
+
+    it("falls back to the tracking-page parse-failure message when parseTrackingPage throws", async () => {
+      const { deps, sendToAsh, parseTrackingPage } = buildDeps();
+      parseTrackingPage.mockRejectedValueOnce(
+        new Error("vision provider down"),
+      );
+
+      const update = {
+        update_id: 103,
+        message: {
+          message_id: 4,
+          date: 1,
+          chat: { id: 42, type: "private" },
+          from: { id: 99, is_bot: false, first_name: "T" },
+          photo: [{ file_id: "f", file_size: 100, width: 90, height: 90 }],
+        },
+      };
+
+      await processInboundTelegramUpdate(makeRequest(update), deps);
+
+      const [message] = sendToAsh.mock.calls[0]!;
+      expect(message).toContain(
+        "[photo received, tracking page could not be parsed]",
+      );
+    });
+
+    it("falls back to the tracking-page parse-failure message when getFileUrl throws (DM photo)", async () => {
+      const { deps, sendToAsh, parseLabel, parseTrackingPage, getFileUrl } =
+        buildDeps();
+      getFileUrl.mockRejectedValueOnce(new Error("Bot API 404"));
+
+      const update = {
+        update_id: 104,
+        message: {
+          message_id: 5,
+          date: 1,
+          chat: { id: 42, type: "private" },
+          from: { id: 99, is_bot: false, first_name: "T" },
+          photo: [{ file_id: "f", file_size: 100, width: 90, height: 90 }],
+        },
+      };
+
+      await processInboundTelegramUpdate(makeRequest(update), deps);
+
+      expect(parseTrackingPage).not.toHaveBeenCalled();
+      expect(parseLabel).not.toHaveBeenCalled();
+      const [message] = sendToAsh.mock.calls[0]!;
+      expect(message).toContain(
+        "[photo received, tracking page could not be parsed]",
+      );
+    });
+
+    it("omits absent tracking-page fields from the synthetic message", async () => {
+      const { deps, sendToAsh } = buildDeps({
+        parsedTrackingPage: {
+          carrier: "DHL",
+          // No trackingNumber, no window, no absenceSignal.
+          confidence: "medium",
+          reason: "only carrier legible",
+        },
+      });
+
+      const update = {
+        update_id: 105,
+        message: {
+          message_id: 6,
+          date: 1,
+          chat: { id: 42, type: "private" },
+          from: { id: 99, is_bot: false, first_name: "T" },
+          photo: [{ file_id: "f", file_size: 100, width: 90, height: 90 }],
+        },
+      };
+
+      await processInboundTelegramUpdate(makeRequest(update), deps);
+
+      const [message] = sendToAsh.mock.calls[0]!;
+      expect(message).toContain("[tracking page parsed]");
+      expect(message).toContain("carrier=DHL");
+      expect(message).not.toContain("trackingNumber=");
+      expect(message).not.toContain("windowStart=");
+      expect(message).not.toContain("windowEnd=");
+      expect(message).not.toContain("absenceSignal=");
+    });
   });
 
   it("does not call getFileUrl or parseLabel on text-only updates", async () => {
