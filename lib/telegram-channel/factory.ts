@@ -60,10 +60,7 @@ import {
   processInboundTelegramUpdate,
   type TelegramChannelState,
 } from "./process-update.js";
-import {
-  handleFirstLightPageRequest,
-  handleTraceSseRequest,
-} from "./trace-routes.js";
+import { handleTraceSseRequest } from "./trace-routes.js";
 
 /**
  * Factory inputs. Both fields are required strings — the spike's
@@ -107,11 +104,6 @@ export function telegramChannel(config: TelegramChannelConfig) {
     state: undefined as unknown as TelegramChannelState,
     context: (state) => ({ chatId: state.chatId, fromUserId: state.fromUserId }),
     routes: [
-      // Live-diagram first-light page (#58). Static HTML inline so we
-      // don't need Nitro public-asset wiring for the smoke-test slice.
-      // Replaced by `public/index.html` in #59 once the diagram grows.
-      GET<TelegramChannelState>("/", async () => handleFirstLightPageRequest()),
-
       // Live-diagram SSE feed (#58). Subscribes to the trace bus and
       // forwards every event to the connected browser. The webhook
       // handler downstream emits `webhook.start` on each inbound
