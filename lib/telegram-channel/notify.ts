@@ -18,6 +18,10 @@
  */
 
 import {
+  editMessageReplyMarkup,
+  editMessageText,
+} from "./keyboards.js";
+import {
   sendTelegramMessage,
   type InlineKeyboardMarkup,
   type SendMessageResult,
@@ -47,4 +51,35 @@ export async function postToGroup(
   entities?: ReadonlyArray<TelegramMessageEntity>,
 ): Promise<SendMessageResult> {
   return sendTelegramMessage(token, groupChatId, text, replyMarkup, entities);
+}
+
+/**
+ * Rewrite the neutral group card posted by `create_reception_request`
+ * in place, and strip its inline keyboard so the `[Ich kann helfen]`
+ * button can't be tapped twice.
+ *
+ * Two Bot API calls because Telegram exposes text + reply-markup edits
+ * on separate endpoints — `editMessageText` rewrites the visible body
+ * (and any `text_mention` entities) and `editMessageReplyMarkup`
+ * removes the keyboard. The keyboard strip lands second so a partial
+ * failure leaves the visible state correct (the card already reads
+ * "✅ angenommen von …") even if the button stays attached.
+ *
+ * Used by:
+ *   - the Flow 2 v2 volunteer-accept callback path (#68) — flips the
+ *     card to "✅ angenommen von <volunteer>" and removes the button;
+ *   - the 4h / 48h reception-request timeout schedules (#53, follow-on)
+ *     — flips the card to "⏰ Zeit abgelaufen" or "❌ Paket nie
+ *     angekommen" when no volunteer claimed it in time, or when a
+ *     matched request expired without a Package showing up.
+ */
+export async function editGroupCard(
+  token: string,
+  chatId: number,
+  messageId: number,
+  text: string,
+  entities?: ReadonlyArray<TelegramMessageEntity>,
+): Promise<void> {
+  await editMessageText(token, chatId, messageId, text, entities);
+  await editMessageReplyMarkup(token, chatId, messageId);
 }

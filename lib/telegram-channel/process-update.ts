@@ -207,6 +207,19 @@ export interface ProcessUpdateDeps {
     readonly languageCode?: string;
     readonly chatId: number;
   }) => Promise<void>;
+  /**
+   * Resolves whether a Telegram `user_id` already has a `Resident`
+   * record. Consulted exclusively for the Flow 2 v2 group-card tap
+   * (`accept_reception_group:<id>`) — unregistered tappers get a
+   * toast asking them to `/register` and the button stays live so
+   * they can retry after registration. Implemented in the factory
+   * via `getResident(String(userId)) !== null`.
+   *
+   * Throwing is treated by the orchestrator as "unregistered" so a
+   * Redis hiccup doesn't accidentally admit a tapper who'd otherwise
+   * be rejected.
+   */
+  readonly isRegisteredResident: (userId: number) => Promise<boolean>;
 }
 
 /**
@@ -248,6 +261,18 @@ function synthesizeCallbackMessage(parsed: ParsedCallbackData): string {
       return parsed.id
         ? `[button-tap] I'm accepting the reception request ${parsed.id}. Treat this as 'yes, I can receive'; if I haven't said when, ask for the availability window.`
         : "[button-tap] I'm accepting a reception request but no id was attached — ignore.";
+    case "accept_reception_group":
+      // Flow 2 v2 (#68): the volunteer tapped `[Ich kann helfen]` on
+      // the neutral group card. The orchestrator has already verified
+      // the tapper is a registered resident (see scope check below);
+      // this message tells the agent the full five-step procedure so
+      // it doesn't have to consult instructions.md to remember the
+      // shape. Stays in English regardless of the volunteer's
+      // language — the *reply* localisation comes from
+      // `language_detection` + `Resident.language`.
+      return parsed.id
+        ? `[button-tap] I tapped "Ich kann helfen" on the group card for reception request ${parsed.id}. Procedure: (1) DM me back in my language asking when I'm available (a short window like "bis 16 Uhr"); (2) once I answer, call accept_reception_request with requestId=${parsed.id} and my availability; (3) use the response's groupCardChatId + groupCardMessageId to call edit_group_card so the public card now reads "✅ angenommen von <volunteer.name>" (paste the volunteer.name string verbatim — never the literal token); (4) DM me (the volunteer) the requester's house number, buzzer name, floor, plus the package context (carrier, tracking, window) so I know what to expect; (5) DM the requester a confirmation naming me as the volunteer with my house number and availability. Do not post anything new to the group — the card edit is the only public surface.`
+        : "[button-tap] I tapped accept-reception-group but no request id was attached — ignore.";
     case "decline_reception_request":
       return parsed.id
         ? `[button-tap] I'm declining the reception request ${parsed.id}. Acknowledge briefly in my language and don't ask follow-up questions.`
@@ -324,6 +349,31 @@ async function handleCallbackQuery(
         .answerCallback(cb.callbackId, "Only the recipient can confirm pickup.")
         .catch(() => undefined);
       // Leave the keyboard intact — the actual recipient may still tap.
+      return new Response(null, { status: 204 });
+    }
+  }
+
+  // Flow 2 v2 (#68) group-card accept: only registered residents can
+  // claim. Unregistered tappers get a German toast and the button
+  // stays live so they can `/register` and retry. Defensively treats a
+  // thrown lookup as "unregistered" — a Redis hiccup must not admit a
+  // tapper who'd otherwise be rejected.
+  if (
+    parsed.action === "accept_reception_group" &&
+    parsed.id &&
+    cb.fromUserId !== null
+  ) {
+    const registered = await deps
+      .isRegisteredResident(cb.fromUserId)
+      .catch(() => false);
+    if (!registered) {
+      await deps
+        .answerCallback(
+          cb.callbackId,
+          "Bitte zuerst /register, um Paketen zu helfen.",
+        )
+        .catch(() => undefined);
+      // Keyboard intact — the user can re-tap after /register.
       return new Response(null, { status: 204 });
     }
   }

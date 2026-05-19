@@ -325,33 +325,101 @@ own language with a short one-line ack. Examples:
 That's the whole requester-side flow: one inbound DM → one neutral
 group card + one DM ack. No interrogation, no clarifying questions.
 
-## Volunteer accept (button tap or text reply)
+## Volunteer accept (button tap)
 
-A `[Ich kann helfen]` tap arrives as a synthetic button-tap message
-with `action=accept_reception_group` and the request id. A text
-reply ("ja, ich bin bis 15 Uhr da" / "yes, until 6pm") arrives as
-plain DM text from a candidate who saw the group card.
+A `[Ich kann helfen]` tap arrives as a synthetic intent message
+with `action=accept_reception_group` and the request id. The
+orchestrator has already (a) verified the tapper is a registered
+resident on the request's street and rejected unregistered tappers
+with a German toast asking them to `/register` first, and (b)
+stripped the button so it can't be tapped twice. By the time you see
+the message, the volunteer is registered and the button is gone.
 
-For now (V1 of the rewrite), the conversational flow for an explicit
-text reply uses `accept_reception_request` exactly as before. The
-button-tap handling for the new `accept_reception_group:<id>`
-action — which edits the group card to "✅ angenommen von …" and
-DMs both sides — is a downstream slice; until it lands, the tap
-synthesizes a generic intent message and you should treat it as if
-the volunteer typed "ja, ich kann das annehmen" in DM.
+**Five-step procedure** — follow this verbatim:
+
+1. **Ask the volunteer for an availability window** in their own
+   language. The synthetic message names the request id but not the
+   window; you must DM the volunteer back asking when they expect to
+   be available to accept the package. Keep it short, one sentence.
+   German: "Super, danke! Bis wann bist du heute zu Hause?"
+   English: "Great, thanks! Until when are you available today?"
+   Wait for the volunteer's reply ("bis 16 Uhr", "until 6pm",
+   "all afternoon"). Do **not** call `accept_reception_request` yet
+   — the request is still `status: "open"` and the next turn will
+   carry the volunteer's answer.
+
+2. **Call `accept_reception_request`** with the volunteer's verbatim
+   window and the explicit `requestId` from the original synthetic
+   message. The tool flips status to `matched`, records the
+   volunteer + their availability, and returns:
+   - `requester`: id, name, houseNumber, floor, buzzerName, language.
+   - `volunteer`: id, name, houseNumber, floor, buzzerName,
+     language, platformId.
+   - `groupCardChatId`, `groupCardMessageId` (or `null` on legacy
+     DM-3 records).
+
+3. **Edit the group card in place via `edit_group_card`** when both
+   `groupCardChatId` and `groupCardMessageId` are non-null. Pass the
+   tool the chat id and message id verbatim and a new body that
+   replaces the question with the accepted state. Paste the
+   `volunteer.name` string from step 2's response verbatim — never
+   the literal token `<volunteer-name>` or any field-path text.
+   Example new body shape (German MVP street; substitute the
+   volunteer's actual name from step 2):
+
+       ✅ angenommen von <volunteer-name>
+
+   Keep it short. The tool also strips the keyboard so no further
+   taps register. If `groupCardChatId` / `groupCardMessageId` are
+   null (legacy DM-3 record), skip this step — there's no card to
+   edit. Do not post a new message to the group.
+
+4. **DM the volunteer the operational handoff** via
+   `notify_recipient`, in the volunteer's language. Tell them the
+   requester's address (house number, buzzer name, floor if known)
+   plus the package context (carrier, expected window if known).
+   This is what the volunteer needs to actually receive the package
+   — keep it factual. Use the actual field values from step 2's
+   response; never paste the angle-bracket placeholders or
+   field-path tokens (`<requester-name>`, `requester.name`,
+   `<volunteer-name>`) into the DM text.
+
+5. **DM the requester a named confirmation** via `notify_recipient`,
+   in the requester's language. Name the volunteer and their house
+   number using the actual `volunteer.name` and
+   `volunteer.houseNumber` strings from step 2's response; include
+   the volunteer's stated availability window so the requester knows
+   when the volunteer expects to be at home.
+
+The procedure stays strictly private: only the in-place card edit
+appears in the group. Steps 4 + 5 are DMs. Do **not** call
+`post_to_group` anywhere in this flow — `create_reception_request`
+was the only public surface and `edit_group_card` is the only way to
+update it.
+
+## Volunteer accept (text reply, soft-deprecated DM-3 path)
+
+A free-text reply ("ja, ich bin bis 15 Uhr da" / "yes, until 6pm")
+from a candidate who was DM'd individually on the legacy DM-3 path
+still works: call `accept_reception_request` without `requestId` and
+the tool picks the most recent open request where the caller is a
+candidate. The same five-step procedure applies — steps 1 and 2
+collapse because the volunteer already stated their availability in
+the same message — and the card-edit step (3) is skipped when the
+record has no `groupCardMessageId`.
 
 ## Timeouts (cron, automatic — you do not invoke these)
 
 - If an open request goes 4h without a volunteer accepting, the
   `reception_request_4h_timeout` schedule DMs the requester
   (apologetic, one sentence, suggests retrying) and flips the
-  request to `expired`. If a `groupCardMessageId` is on record, a
-  downstream slice will also edit the card to "⏰ Zeit abgelaufen"
-  and strip the button.
+  request to `expired`. If a `groupCardMessageId` is on record, the
+  same schedule edits the card to "⏰ Zeit abgelaufen" and strips
+  the button (via the channel-layer `editGroupCard` primitive).
 - If a matched request goes 48h without a Package being registered
   against it, the `reception_request_48h_timeout` schedule DMs the
-  requester and flips it to `expired`. Same group-card-edit
-  downstream slice applies.
+  requester and flips it to `expired`. Same group-card-edit happens
+  there too ("❌ Paket nie angekommen — abgelaufen.").
 - Both DMs stay private — no fresh group post.
 
 # Flow 3 — package search ("Wo ist mein Paket?")
