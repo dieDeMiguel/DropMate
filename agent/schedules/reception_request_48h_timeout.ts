@@ -45,7 +45,7 @@ Procedure — follow exactly, no creative liberties:
       one sentence. Suggest they DM again if it still hasn't come.
       Example (de):
 
-          "Bei Marlene ist kein Paket für dich angekommen — sag
+          "Bei <volunteer-first-name> ist kein Paket für dich angekommen — sag
           Bescheid, wenn es trotzdem noch auftaucht, dann frage ich
           nochmal nach."
 

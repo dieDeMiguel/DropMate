@@ -55,6 +55,7 @@
 
 import type { Session } from "experimental-ash/channels";
 
+import { emitTrace } from "../trace.js";
 import {
   extractInboundCallback,
   extractInboundMessage,
@@ -467,6 +468,12 @@ export async function processInboundTelegramUpdate(
   req: Request,
   deps: ProcessUpdateDeps,
 ): Promise<Response> {
+  // Single emit point for the smoke-test slice (#58). The webhook
+  // factory wraps this call in `runWithTrace`, so the event picks up
+  // the trace id + kind for free. Later slices (#59/#60/#61) add the
+  // per-stage instrumentation; for now this proves the pipeline.
+  emitTrace("webhook", "start");
+
   const verified = verifyTelegramSecretHeader(req, deps.expectedSecret);
   if (!verified.ok) {
     return new Response(verified.reason, { status: verified.status });

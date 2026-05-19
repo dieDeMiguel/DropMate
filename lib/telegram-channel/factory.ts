@@ -42,6 +42,7 @@ import {
   setSessionIdForChat,
   upsertKnownTelegramUser,
 } from "../redis.js";
+import { runWithTrace } from "../trace.js";
 import {
   buildFileProxyUrl,
   handleFileProxyRequest,
@@ -55,6 +56,10 @@ import {
   processInboundTelegramUpdate,
   type TelegramChannelState,
 } from "./process-update.js";
+import {
+  handleFirstLightPageRequest,
+  handleTraceSseRequest,
+} from "./trace-routes.js";
 
 /**
  * Factory inputs. Both fields are required strings — the spike's
@@ -98,6 +103,19 @@ export function telegramChannel(config: TelegramChannelConfig) {
     state: undefined as unknown as TelegramChannelState,
     context: (state) => ({ chatId: state.chatId, fromUserId: state.fromUserId }),
     routes: [
+      // Live-diagram first-light page (#58). Static HTML inline so we
+      // don't need Nitro public-asset wiring for the smoke-test slice.
+      // Replaced by `public/index.html` in #59 once the diagram grows.
+      GET<TelegramChannelState>("/", async () => handleFirstLightPageRequest()),
+
+      // Live-diagram SSE feed (#58). Subscribes to the trace bus and
+      // forwards every event to the connected browser. The webhook
+      // handler downstream emits `webhook.start` on each inbound
+      // delivery; the page lights up its single box in response.
+      GET<TelegramChannelState>("/api/trace", async (req) =>
+        handleTraceSseRequest(req),
+      ),
+
       // GET proxy for shipping-label photos. The Gateway server fetches
       // this URL (instead of Telegram's CDN directly) so we can override
       // the content-type that the CDN sometimes mis-reports as
@@ -121,51 +139,58 @@ export function telegramChannel(config: TelegramChannelConfig) {
           // production (`drop-mate-delta.vercel.app`) and preview
           // deploys without an explicit env var.
           const origin = new URL(req.url).origin;
-          return processInboundTelegramUpdate(req, {
-            expectedSecret: webhookSecret,
-            sendToAsh: send,
-            waitUntil,
-            getSessionIdForChat,
-            setSessionIdForChat,
-            drainSession: (session, chatId) =>
-              drainSessionToTelegram(session, chatId, { token }),
-            getFileUrl: async (fileId) =>
-              buildFileProxyUrl(origin, fileId, webhookSecret),
-            parseLabel: async (input) => {
-              // No silent catch: errors propagate to process-update.ts's
-              // catch which logs with stack + chatId. A silent `return
-              // null` here hid an entire failure chain in production
-              // (mediaType=application/octet-stream → provider reject →
-              // primary throw → fallback throw → primary rethrow →
-              // silenced by this catch → null → "couldn't read" reply).
-              const execute = parseLabelTool.execute as (
-                input: unknown,
-                options: unknown,
-              ) => Promise<{
-                carrier: string;
-                trackingNumber?: string;
-                recipientName?: string;
-                recipientHouseNumber?: string;
-                confidence: "high" | "medium" | "low";
-                reason: string;
-              }>;
-              return execute(input, {
-                toolCallId: `parse_label:${Date.now()}`,
-                messages: [],
-              });
-            },
-            answerCallback: (callbackId, text) =>
-              answerCallbackQuery(token, callbackId, text),
-            stripKeyboard: (chatId, messageId) =>
-              editMessageReplyMarkup(token, chatId, messageId),
-            getPackageRecipientId: async (packageId) => {
-              const pkg = await getPackage(packageId);
-              return pkg?.recipientResidentId ?? null;
-            },
-            recordTelegramObservation: async (input) => {
-              await upsertKnownTelegramUser(input);
-            },
-          });
+          // Live-diagram tracer (#58): every inbound webhook gets a
+          // fresh trace scope. `kind` is hard-coded to "text" here;
+          // #59/#60/#61 refine the detection (photo / callback) once
+          // the payload has been narrowed.
+          const traceId = crypto.randomUUID().slice(0, 8);
+          return runWithTrace({ traceId, kind: "text" }, () =>
+            processInboundTelegramUpdate(req, {
+              expectedSecret: webhookSecret,
+              sendToAsh: send,
+              waitUntil,
+              getSessionIdForChat,
+              setSessionIdForChat,
+              drainSession: (session, chatId) =>
+                drainSessionToTelegram(session, chatId, { token }),
+              getFileUrl: async (fileId) =>
+                buildFileProxyUrl(origin, fileId, webhookSecret),
+              parseLabel: async (input) => {
+                // No silent catch: errors propagate to process-update.ts's
+                // catch which logs with stack + chatId. A silent `return
+                // null` here hid an entire failure chain in production
+                // (mediaType=application/octet-stream → provider reject →
+                // primary throw → fallback throw → primary rethrow →
+                // silenced by this catch → null → "couldn't read" reply).
+                const execute = parseLabelTool.execute as (
+                  input: unknown,
+                  options: unknown,
+                ) => Promise<{
+                  carrier: string;
+                  trackingNumber?: string;
+                  recipientName?: string;
+                  recipientHouseNumber?: string;
+                  confidence: "high" | "medium" | "low";
+                  reason: string;
+                }>;
+                return execute(input, {
+                  toolCallId: `parse_label:${Date.now()}`,
+                  messages: [],
+                });
+              },
+              answerCallback: (callbackId, text) =>
+                answerCallbackQuery(token, callbackId, text),
+              stripKeyboard: (chatId, messageId) =>
+                editMessageReplyMarkup(token, chatId, messageId),
+              getPackageRecipientId: async (packageId) => {
+                const pkg = await getPackage(packageId);
+                return pkg?.recipientResidentId ?? null;
+              },
+              recordTelegramObservation: async (input) => {
+                await upsertKnownTelegramUser(input);
+              },
+            }),
+          );
         },
       ),
     ],
