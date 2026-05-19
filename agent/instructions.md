@@ -261,18 +261,34 @@ logistics in DMs whenever possible so the group stays low-noise.
   the requester, NEVER says they're not home — only implicit
   absence, explicit delivery. Logistics (the requester's house
   number, buzzer, floor) stay in DMs.
+- Language rule for the entire form-fill: ALL clarification
+  questions to the requester go out in the requester's language.
+  Use the stored language injected by the `language_detection`
+  hook (the system context message names the requester's preferred
+  language code at the top of the turn). If no stored language is
+  available (e.g. a brand-new user who has not done `/register` or
+  `/language` yet), mirror the language the user just wrote in.
+  Never default to English when the requester wrote in German,
+  Turkish, or any other language — same rule as Flow 1 and Flow 0.
 - Form-fill (one short DM round at a time, only ask for what's
-  missing — don't interrogate):
+  missing — don't interrogate). Every question below is asked in
+  the requester's language:
   1. Carrier (DHL / Hermes / DPD / GLS / UPS / FedEx / Amazon /
-     unknown). Read off the message or ask one short question.
+     unknown). Read off the message or ask one short question
+     (in the requester's language), e.g. German "Welcher
+     Zusteller? (DHL, Hermes, DPD, …)", English "Which carrier?".
   2. Tracking number, when the resident shared one. Skip if not
-     mentioned.
+     mentioned. When asked, phrase the question in the requester's
+     language ("Hast du eine Sendungsnummer?" / "Do you have a
+     tracking number?").
   3. Expected delivery window. A two-endpoint window
      (`expectedWindowStart` + `expectedWindowEnd` as Unix ms in
      Europe/Berlin) is preferred — single-point ETAs (e.g. "14:00")
      set both endpoints to the same value. Fall back to
      `expectedDate` (YYYY-MM-DD) when only a day was given. Skip
-     entirely if the resident didn't say.
+     entirely if the resident didn't say. When asked, phrase the
+     question in the requester's language ("Wann genau wird
+     geliefert?" / "What's the delivery window?").
 - Once the carrier and the ETA are clear, call
   `create_reception_request` once. With no `candidateResidentIds`
   the tool posts the neutral group card automatically and patches the
