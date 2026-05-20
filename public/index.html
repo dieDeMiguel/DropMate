@@ -250,8 +250,11 @@
       <path class="cable" id="cable-tools-gateway" d="M730 580 L760 580 L760 605" />
       <!-- TOOLS → REDIS -->
       <path class="cable" id="cable-tools-redis" d="M190 580 L160 580 L160 605" />
-      <!-- ASH_SESSION → WEBHOOK (outbound return path) -->
-      <path class="cable" id="cable-ash-outbound" d="M680 410 L840 410 L840 200 L520 200" />
+      <!-- ASH_SESSION → WEBHOOK (outbound return path).
+           Endpoints sit on the right edges of both boxes (x=760 for
+           Ash Session, x=540 for Webhook) so the cable meets the box
+           boundary instead of visually penetrating it. -->
+      <path class="cable" id="cable-ash-outbound" d="M760 410 L840 410 L840 200 L540 200" />
 
       <!-- Boxes -->
       <!-- Telegram (edge, top) -->
@@ -342,6 +345,12 @@
       const INTER_HOP_MS = 200;
       const POST_HOLD_MS = 2000;
       const POST_FADE_MS = 2000;
+      // TELEGRAM is the trace origin but never an explicit stage — the
+      // delivery from Telegram → Vercel is essentially instant, so a
+      // default-length ignite wouldn't register visually. Hold ignite
+      // longer so visitors can see the trace started from Telegram
+      // before it cascades to Webhook.
+      const ORIGIN_IGNITE_MS = 1500;
 
       // Map each emitted stage to (a) the box it ignites and (b) the
       // cable that runs into that box. Stages emitted twice (start +
@@ -536,13 +545,45 @@
         if (label) label.classList.add("ignite");
       }
 
+      function igniteOriginBox(accent) {
+        // Light the TELEGRAM origin box at the start of every trace.
+        // TELEGRAM is not in STAGE_PLAN — Telegram delivery doesn't
+        // emit its own event — so without this helper the box would
+        // only appear to flash via the adjacent cable's drop-shadow.
+        // Holds in ignite for ORIGIN_IGNITE_MS (longer than MIN_HOP_MS)
+        // then transitions to hold so beginPostTrace picks it up for
+        // the standard fade-out.
+        const box = $("box-telegram");
+        const label = $("label-telegram");
+        if (!box) return;
+        box.style.setProperty("--accent", accent);
+        box.classList.remove("heartbeat", "hold");
+        // Force reflow so the ignite animation restarts cleanly.
+        void box.getBoundingClientRect();
+        box.classList.add("ignite");
+        if (label) label.classList.add("ignite");
+        setTimeout(() => {
+          if (box.classList.contains("ignite")) {
+            box.classList.replace("ignite", "hold");
+            if (label) label.classList.replace("ignite", "hold");
+          }
+        }, ORIGIN_IGNITE_MS);
+      }
+
       function step(event) {
         if (!activeTrace) return;
         // Update header trace badge so visitors see the current id.
         traceIdEl.textContent = "trace=" + event.traceId.slice(0, 8) + " · kind=" + event.kind;
+        const accent = ACCENT_VAR[event.kind] || ACCENT_VAR.text;
+        // Ignite TELEGRAM on the first event of each trace so visitors
+        // notice the trace originated from Telegram. Idempotent per
+        // trace via the originIgnited flag on the activeTrace object.
+        if (!activeTrace.originIgnited) {
+          activeTrace.originIgnited = true;
+          igniteOriginBox(accent);
+        }
         const plan = STAGE_PLAN[event.stage];
         if (!plan) return;
-        const accent = ACCENT_VAR[event.kind] || ACCENT_VAR.text;
         // Tool sub-cell routing (#61): when a `tool` event carries
         // a recognised name, light the named sub-cell directly so
         // visitors see WHICH tool fired. The outer `box-tool`
