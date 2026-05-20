@@ -51,8 +51,11 @@ Exactly one required. Defines identity and persistent behavior. Skills layer on 
 Channels are how the agent receives input. Each file in `channels/` is a separate entrypoint:
 
 - `slackChannel({ botName })` from `experimental-ash/channels/slack`
-- HTTP/REST default channel at `/ash/v1/session`
-- Twilio, web chat, CLI, cron — see docs
+- `twilioChannel({ allowFrom, messaging })` from `experimental-ash/channels/twilio`
+- `ashChannel({ auth })` — built-in HTTP session protocol at `/ash/v1/session`
+- Web chat, CLI, cron — see docs
+
+**Prefer framework channels.** Custom HTTP channels work but lose Trigger column attribution in Agent Runs and require you to replicate OTEL conventions by hand. If a `@chat-adapter/*` package exists for the platform, wrap it in a thin channel factory instead of hand-rolling verify/inbound/outbound/send primitives.
 
 ## Sessions and streaming
 
@@ -81,6 +84,25 @@ Specialist child agents in `subagents/<name>/`. Each is its own package with its
 ## Evals
 
 Test suites with scoring rubrics for agent quality. Wire into `pnpm eval` (see root `turbo.json` / `package.json`).
+
+## Schedules
+
+Two shapes — choose deliberately:
+
+- `defineSchedule({ cron, markdown })` — fire-and-forget. The model runs the prompt on cron and the output is discarded. If the prompt can early-exit (e.g. "if list is empty, stop") the runtime can complete the workflow without ever invoking the model, producing zero-turn rows in Agent Runs.
+- `defineSchedule({ cron, async run({ receive, waitUntil, appAuth }) { ... } })` — handler-based. The handler decides what to do and hands off to a channel via `receive(channel, { message, args, auth })`. Always produces a real turn with proper Trigger attribution.
+
+Use markdown when the schedule unconditionally fires one tool ("poll watches every minute"). Use handlers when there's branching, especially conditional early-exit, or when the output needs to land in a specific channel/thread.
+
+## Observability
+
+Vercel Observability → **Agent Runs** reads OTEL spans (`ash.turn` parent + `ai.streamText` / `ai.toolCall` children). Populated columns require:
+
+1. **`agent/instrumentation.ts`** with `recordInputs: true` and `recordOutputs: true` (and optional `setup()` for additional exporters). Without this file, runs show only Duration — Tokens/Cost/Turns stay zero.
+2. **Framework channels** (Slack, Twilio, Ash HTTP) — they emit the Trigger attribute the column displays. Custom channels need to do this themselves.
+3. **All model calls inside the agent loop.** Calling AI Gateway directly from a channel handler before delegating to the agent creates spans outside `ash.turn` — visible in AI Gateway logs, invisible in Agent Runs. Promote that work to a tool the agent invokes.
+
+See SKILL.md → *Observability* for example snippets and the rationale behind each rule.
 
 ## Deployment
 
