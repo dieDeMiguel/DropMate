@@ -55,6 +55,8 @@
 
 import type { Session } from "experimental-ash/channels";
 
+import { PRIMARY_MODEL as PARSE_LABEL_PRIMARY_MODEL } from "../../agent/tools/parse_label.js";
+import { emitTrace, runWithTrace } from "../trace.js";
 import {
   extractInboundCallback,
   extractInboundMessage,
@@ -397,10 +399,20 @@ async function buildSyntheticPhotoMessage(
   let parsed: Awaited<ReturnType<ProcessUpdateDeps["parseLabel"]>> = null;
   try {
     const imageUrl = await deps.getFileUrl(fileId);
+    // Vision call boundary — the diagram lights up the parse_label box
+    // for the duration of the call and updates the box's sub-label to
+    // the active model name. The tool itself fires
+    // `parse_label.primary_failed` + `parse_label.fallback_start` if the
+    // primary model errors, so the diagram renders the retry visual
+    // (#60). `model` extras feed the sub-label updater on the page.
+    emitTrace("parse_label", "start", {
+      model: PARSE_LABEL_PRIMARY_MODEL,
+    });
     parsed = await deps.parseLabel({
       imageUrl,
       caption: captionText,
     });
+    emitTrace("parse_label", "end");
     // Log every successful parse so we can tell apart "model never got
     // called" from "model returned confidence=low with no recipientName".
     // URL excluded from the log (contains the bot token); only the
@@ -422,6 +434,10 @@ async function buildSyntheticPhotoMessage(
       "mediaType-via-fetch (sanitised) — error:",
       err instanceof Error ? { name: err.name, message: err.message, stack: err.stack } : err,
     );
+    // Surface the failure on the diagram too. #60 renders this as the
+    // red-flash terminal-failure visual; the V1 engine just stops
+    // animating the parse_label box and lets the trace move on.
+    emitTrace("parse_label", "error");
     parsed = null;
   }
 
@@ -467,6 +483,14 @@ export async function processInboundTelegramUpdate(
   req: Request,
   deps: ProcessUpdateDeps,
 ): Promise<Response> {
+  // Per-stage instrumentation for the live diagram (#59). The webhook
+  // factory wraps this call in `runWithTrace`, so every emit below
+  // inherits the same `traceId` + `kind`. `webhook.start` fires before
+  // any short-circuit (bad secret, malformed JSON) so the diagram still
+  // ignites for rejected webhooks; `orchestrator.start`/`.end` bookend
+  // the work that survives the early-exit branches.
+  emitTrace("webhook", "start");
+
   const verified = verifyTelegramSecretHeader(req, deps.expectedSecret);
   if (!verified.ok) {
     return new Response(verified.reason, { status: verified.status });
@@ -479,18 +503,23 @@ export async function processInboundTelegramUpdate(
     return new Response("bad json", { status: 400 });
   }
 
+  emitTrace("orchestrator", "start");
+
   // Callback queries are handled before regular messages — both branches
   // are exclusive at the Bot API level (a single update is either one or
   // the other, never both).
   const callback = extractInboundCallback(update);
   if (callback) {
-    return handleCallbackQuery(callback, deps);
+    const res = await handleCallbackQuery(callback, deps);
+    emitTrace("orchestrator", "end");
+    return res;
   }
 
   const inbound = extractInboundMessage(update);
   if (!inbound) {
     // Updates we don't handle yet (photos, edits, reactions, …) are
     // acked so Telegram doesn't retry indefinitely.
+    emitTrace("orchestrator", "end");
     return new Response(null, { status: 204 });
   }
 
@@ -529,6 +558,7 @@ export async function processInboundTelegramUpdate(
     message = inbound.text;
   }
 
+  emitTrace("ash_send", "start");
   const session = await deps.sendToAsh(message, {
     auth,
     continuationToken,
@@ -539,6 +569,7 @@ export async function processInboundTelegramUpdate(
       fromLanguageCode: inbound.fromLanguageCode,
     },
   });
+  emitTrace("ash_send", "end");
 
   if (session.id !== existingSessionId) {
     // Persist immediately so a concurrent retry doesn't open a
@@ -556,5 +587,6 @@ export async function processInboundTelegramUpdate(
   // retries if the webhook hangs.
   deps.waitUntil(deps.drainSession(session, inbound.chatId));
 
+  emitTrace("orchestrator", "end");
   return new Response(null, { status: 204 });
 }

@@ -916,3 +916,204 @@ describe("processInboundTelegramUpdate — callback_query", () => {
     expect(text).toMatch(/weird_action/);
   });
 });
+
+describe("processInboundTelegramUpdate — trace integration (#58)", () => {
+  it("emits a `webhook.start` event inside the surrounding runWithTrace scope", async () => {
+    // Import dynamically to avoid leaking subscribers into the
+    // top-level test scope (the trace bus is process-wide).
+    const { runWithTrace, subscribe } = await import("../trace.js");
+    const events: Array<{ stage: string; phase: string; traceId: string }> = [];
+    const unsubscribe = subscribe((e) =>
+      events.push({ stage: e.stage, phase: e.phase, traceId: e.traceId }),
+    );
+
+    try {
+      const { deps } = buildDeps();
+      await runWithTrace(
+        { traceId: "trace_smoke", kind: "text" },
+        () =>
+          processInboundTelegramUpdate(
+            makeRequest(dmUpdate({ chatId: 17, text: "hi", fromUserId: 99 })),
+            deps,
+          ),
+      );
+
+      // The orchestrator's first action is `emitTrace("webhook", "start")`.
+      // Any future per-stage emits (#59/#60/#61) just add entries; this
+      // assertion only cares the smoke-test signal fires.
+      const smokeEvents = events.filter((e) => e.traceId === "trace_smoke");
+      expect(smokeEvents.length).toBeGreaterThanOrEqual(1);
+      expect(smokeEvents[0]).toMatchObject({
+        stage: "webhook",
+        phase: "start",
+        traceId: "trace_smoke",
+      });
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("is a silent no-op when called without a surrounding trace scope", async () => {
+    const { subscribe } = await import("../trace.js");
+    const events: unknown[] = [];
+    const unsubscribe = subscribe((e) => events.push(e));
+
+    try {
+      const { deps } = buildDeps();
+      // No `runWithTrace` wrapper — the orchestrator's emitTrace call
+      // must be a no-op so this code path is safe in cron schedules,
+      // the built-in Ash API channel, and unit tests that don't care.
+      await processInboundTelegramUpdate(
+        makeRequest(dmUpdate({ chatId: 18, text: "hi", fromUserId: 100 })),
+        deps,
+      );
+      expect(events).toEqual([]);
+    } finally {
+      unsubscribe();
+    }
+  });
+});
+
+describe("processInboundTelegramUpdate — V1 per-stage trace (#59)", () => {
+  async function recordStages(
+    setup: (deps: BuiltDeps["deps"]) => Promise<unknown>,
+    buildOverrides?: Parameters<typeof buildDeps>[0],
+  ): Promise<string[]> {
+    const { runWithTrace, subscribe } = await import("../trace.js");
+    const stages: string[] = [];
+    const unsubscribe = subscribe((e) => {
+      if (e.traceId !== "trace_stages") return;
+      stages.push(`${e.stage}.${e.phase}`);
+    });
+    try {
+      const { deps } = buildDeps(buildOverrides);
+      await runWithTrace({ traceId: "trace_stages", kind: "text" }, () =>
+        setup(deps),
+      );
+      return stages;
+    } finally {
+      unsubscribe();
+    }
+  }
+
+  it("emits webhook.start → orchestrator.start → ash_send.start/end → orchestrator.end for a text DM", async () => {
+    const stages = await recordStages((deps) =>
+      processInboundTelegramUpdate(
+        makeRequest(dmUpdate({ chatId: 17, text: "hi", fromUserId: 99 })),
+        deps,
+      ),
+    );
+
+    expect(stages).toEqual([
+      "webhook.start",
+      "orchestrator.start",
+      "ash_send.start",
+      "ash_send.end",
+      "orchestrator.end",
+    ]);
+  });
+
+  it("emits orchestrator.end even when an update is unhandled (no inbound, no callback)", async () => {
+    // Empty update — neither `message` nor `callback_query`. The
+    // orchestrator should still pair start/end so the diagram engine
+    // doesn't stall waiting for an end event.
+    const stages = await recordStages((deps) =>
+      processInboundTelegramUpdate(
+        makeRequest({ update_id: 99 } as unknown),
+        deps,
+      ),
+    );
+
+    expect(stages).toContain("webhook.start");
+    expect(stages).toContain("orchestrator.start");
+    expect(stages).toContain("orchestrator.end");
+    // No ash_send on this branch.
+    expect(stages.some((s) => s.startsWith("ash_send"))).toBe(false);
+  });
+
+  it("does NOT emit ash_send or orchestrator.end on a bad-secret short-circuit", async () => {
+    const { runWithTrace, subscribe } = await import("../trace.js");
+    const stages: string[] = [];
+    const unsubscribe = subscribe((e) => {
+      if (e.traceId !== "trace_bad_secret") return;
+      stages.push(`${e.stage}.${e.phase}`);
+    });
+    try {
+      const { deps } = buildDeps();
+      await runWithTrace(
+        { traceId: "trace_bad_secret", kind: "text" },
+        () =>
+          processInboundTelegramUpdate(
+            makeRequest(dmUpdate({ chatId: 1, text: "hi" }), "wrong"),
+            deps,
+          ),
+      );
+      // The webhook.start fires before the secret check (so the diagram
+      // ignites for rejected webhooks too); orchestrator.start fires
+      // only after verify + JSON parse succeed.
+      expect(stages).toEqual(["webhook.start"]);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("emits parse_label.start/end around the vision call on a photo turn", async () => {
+    const photoUpdate = {
+      update_id: 2,
+      message: {
+        message_id: 2,
+        date: 1,
+        chat: { id: 42, type: "private" },
+        from: { id: 99, is_bot: false, first_name: "Test" },
+        photo: [
+          { file_id: "AgAC1", file_unique_id: "u1", width: 320, height: 240, file_size: 100 },
+        ],
+      },
+    };
+    const stages = await recordStages((deps) =>
+      processInboundTelegramUpdate(makeRequest(photoUpdate), deps),
+    );
+
+    expect(stages).toContain("parse_label.start");
+    expect(stages).toContain("parse_label.end");
+  });
+
+  it("emits parse_label.error when the vision tool throws (no parse_label.end)", async () => {
+    const photoUpdate = {
+      update_id: 3,
+      message: {
+        message_id: 3,
+        date: 1,
+        chat: { id: 42, type: "private" },
+        from: { id: 99, is_bot: false, first_name: "Test" },
+        photo: [
+          { file_id: "AgAC2", file_unique_id: "u2", width: 320, height: 240, file_size: 100 },
+        ],
+      },
+    };
+    const { runWithTrace, subscribe } = await import("../trace.js");
+    const stages: string[] = [];
+    const unsubscribe = subscribe((e) => {
+      if (e.traceId !== "trace_parse_err") return;
+      stages.push(`${e.stage}.${e.phase}`);
+    });
+    try {
+      const built = buildDeps();
+      built.parseLabel.mockRejectedValueOnce(new Error("vision down"));
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        await runWithTrace(
+          { traceId: "trace_parse_err", kind: "text" },
+          () => processInboundTelegramUpdate(makeRequest(photoUpdate), built.deps),
+        );
+      } finally {
+        errorSpy.mockRestore();
+      }
+      expect(stages).toContain("parse_label.start");
+      expect(stages).toContain("parse_label.error");
+      expect(stages).not.toContain("parse_label.end");
+    } finally {
+      unsubscribe();
+    }
+  });
+});

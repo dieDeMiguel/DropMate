@@ -46,6 +46,8 @@ import { defineTool } from "experimental-ash/tools";
 import { generateObject } from "ai";
 import { z } from "zod";
 
+import { emitTrace } from "../../lib/trace.js";
+
 export const PRIMARY_MODEL = "google/gemini-3.1-flash-lite";
 export const FALLBACK_MODEL = "anthropic/claude-sonnet-4.6";
 
@@ -206,8 +208,21 @@ export default defineTool({
       return await runVisionModel(PRIMARY_MODEL, args);
     } catch (primaryError) {
       // Primary failed (auth, timeout, model-not-found, content-too-large,
-      // …). Try the fallback. If the fallback ALSO fails, surface the
-      // primary's error — that's the more diagnostic signal for ops.
+      // …). Surface the failure on the live diagram (#60) so visitors see
+      // the primary→fallback retry visual, then try the fallback.
+      const primaryMessage =
+        primaryError instanceof Error
+          ? primaryError.message
+          : String(primaryError);
+      emitTrace("parse_label", "primary_failed", {
+        model: PRIMARY_MODEL,
+        error: primaryMessage,
+      });
+      emitTrace("parse_label", "fallback_start", {
+        model: FALLBACK_MODEL,
+      });
+      // If the fallback ALSO fails, surface the primary's error — that's
+      // the more diagnostic signal for ops.
       try {
         return await runVisionModel(FALLBACK_MODEL, args);
       } catch {

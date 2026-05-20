@@ -373,6 +373,62 @@ describe("register_package", () => {
     expect(result.recipientResolution.kind).toBe("unknown");
   });
 
+  // Regression for #46 — unknown-recipient packages get a 3d
+  // self-cleanup deadline; resolved recipients (resident or
+  // known_telegram) do not.
+  it("sets recipientResolutionDeadline to now+3d when resolution is unknown (#46)", async () => {
+    seedResident({ platformId: "holder-1", name: "Diego de Miguel", houseNumber: "69" });
+    withTelegramSession("holder-1");
+    const now = new Date("2026-05-17T10:00:00Z").getTime();
+    const expectedDeadline = now + 3 * 24 * 60 * 60 * 1000;
+
+    const result = (await runExecute({
+      recipientName: "Natascha Elter",
+      recipientHouseNumber: "71",
+    })) as { package: Package };
+
+    expect(result.package.recipientResolutionDeadline).toBe(expectedDeadline);
+  });
+
+  it("leaves recipientResolutionDeadline undefined when the recipient is a registered Resident (#46)", async () => {
+    seedResident({ platformId: "holder-1", name: "Diego de Miguel", houseNumber: "69" });
+    seedResident({
+      platformId: "rec-1",
+      id: "rec-1",
+      name: "Anna Schmidt",
+      houseNumber: "92",
+      language: "de",
+    });
+    withTelegramSession("holder-1");
+
+    const result = (await runExecute({
+      recipientName: "Anna Schmidt",
+      recipientHouseNumber: "92",
+    })) as { package: Package; recipientResolution: { kind: string } };
+
+    expect(result.recipientResolution.kind).toBe("resident");
+    expect(result.package.recipientResolutionDeadline).toBeUndefined();
+  });
+
+  it("leaves recipientResolutionDeadline undefined when the recipient is a known Telegram user (#46)", async () => {
+    seedResident({ platformId: "holder-1", name: "Diego de Miguel", houseNumber: "69" });
+    seedKnownTgUser({
+      userId: 4242,
+      firstName: "Natascha",
+      lastName: "Elter",
+      lastSeenAt: Date.now() - 1000,
+    });
+    withTelegramSession("holder-1");
+
+    const result = (await runExecute({
+      recipientName: "Natascha Elter",
+      recipientHouseNumber: "71",
+    })) as { package: Package; recipientResolution: { kind: string } };
+
+    expect(result.recipientResolution.kind).toBe("known_telegram");
+    expect(result.package.recipientResolutionDeadline).toBeUndefined();
+  });
+
   it("prefers resident match over known_telegram match when both exist", async () => {
     seedResident({ platformId: "holder-1", name: "Diego", houseNumber: "69" });
     seedResident({

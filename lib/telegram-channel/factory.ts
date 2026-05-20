@@ -43,6 +43,11 @@ import {
   upsertKnownTelegramUser,
 } from "../redis.js";
 import {
+  getCurrentTraceContext,
+  runWithTrace,
+  type TraceKind,
+} from "../trace.js";
+import {
   buildFileProxyUrl,
   handleFileProxyRequest,
 } from "./file-proxy.js";
@@ -55,6 +60,7 @@ import {
   processInboundTelegramUpdate,
   type TelegramChannelState,
 } from "./process-update.js";
+import { handleTraceSseRequest } from "./trace-routes.js";
 
 /**
  * Factory inputs. Both fields are required strings — the spike's
@@ -98,6 +104,14 @@ export function telegramChannel(config: TelegramChannelConfig) {
     state: undefined as unknown as TelegramChannelState,
     context: (state) => ({ chatId: state.chatId, fromUserId: state.fromUserId }),
     routes: [
+      // Live-diagram SSE feed (#58). Subscribes to the trace bus and
+      // forwards every event to the connected browser. The webhook
+      // handler downstream emits `webhook.start` on each inbound
+      // delivery; the page lights up its single box in response.
+      GET<TelegramChannelState>("/api/trace", async (req) =>
+        handleTraceSseRequest(req),
+      ),
+
       // GET proxy for shipping-label photos. The Gateway server fetches
       // this URL (instead of Telegram's CDN directly) so we can override
       // the content-type that the CDN sometimes mis-reports as
@@ -121,53 +135,113 @@ export function telegramChannel(config: TelegramChannelConfig) {
           // production (`drop-mate-delta.vercel.app`) and preview
           // deploys without an explicit env var.
           const origin = new URL(req.url).origin;
-          return processInboundTelegramUpdate(req, {
-            expectedSecret: webhookSecret,
-            sendToAsh: send,
-            waitUntil,
-            getSessionIdForChat,
-            setSessionIdForChat,
-            drainSession: (session, chatId) =>
-              drainSessionToTelegram(session, chatId, { token }),
-            getFileUrl: async (fileId) =>
-              buildFileProxyUrl(origin, fileId, webhookSecret),
-            parseLabel: async (input) => {
-              // No silent catch: errors propagate to process-update.ts's
-              // catch which logs with stack + chatId. A silent `return
-              // null` here hid an entire failure chain in production
-              // (mediaType=application/octet-stream → provider reject →
-              // primary throw → fallback throw → primary rethrow →
-              // silenced by this catch → null → "couldn't read" reply).
-              const execute = parseLabelTool.execute as (
-                input: unknown,
-                options: unknown,
-              ) => Promise<{
-                carrier: string;
-                trackingNumber?: string;
-                recipientName?: string;
-                recipientHouseNumber?: string;
-                confidence: "high" | "medium" | "low";
-                reason: string;
-              }>;
-              return execute(input, {
-                toolCallId: `parse_label:${Date.now()}`,
-                messages: [],
-              });
-            },
-            answerCallback: (callbackId, text) =>
-              answerCallbackQuery(token, callbackId, text),
-            stripKeyboard: (chatId, messageId) =>
-              editMessageReplyMarkup(token, chatId, messageId),
-            getPackageRecipientId: async (packageId) => {
-              const pkg = await getPackage(packageId);
-              return pkg?.recipientResidentId ?? null;
-            },
-            recordTelegramObservation: async (input) => {
-              await upsertKnownTelegramUser(input);
-            },
-          });
+          // Live-diagram tracer: every inbound webhook gets a fresh trace
+          // scope. Peek at the payload via `req.clone()` so we can set the
+          // right `kind` (#60: photo → amber; #61: callback → magenta)
+          // BEFORE processInboundTelegramUpdate runs. A clone is cheap
+          // (Vercel's `Request` body is a stream we read once via
+          // `.json()` — clone teeable-shares the underlying source) and
+          // it avoids re-entering `runWithTrace` mid-pipeline, which
+          // would mean `webhook.start` emitted with the wrong kind.
+          const traceId = crypto.randomUUID().slice(0, 8);
+          const kind = await detectTraceKind(req);
+          return runWithTrace({ traceId, kind }, () =>
+            processInboundTelegramUpdate(req, {
+              expectedSecret: webhookSecret,
+              sendToAsh: send,
+              waitUntil,
+              getSessionIdForChat,
+              setSessionIdForChat,
+              drainSession: (session, chatId) => {
+                // ALS propagation across `waitUntil` is fragile on
+                // Vercel — depending on Promise wrapping the AsyncLocal
+                // store can be lost across the function boundary. We
+                // capture the current trace context here (still inside
+                // the inbound `runWithTrace` scope) and re-enter it
+                // synchronously inside the drain task so every
+                // downstream `emitTrace` inherits the right traceId +
+                // kind regardless of how Vercel's queue runs the task.
+                const ctx = getCurrentTraceContext();
+                if (!ctx) {
+                  return drainSessionToTelegram(session, chatId, { token });
+                }
+                return runWithTrace(ctx, () =>
+                  drainSessionToTelegram(session, chatId, { token }),
+                );
+              },
+              getFileUrl: async (fileId) =>
+                buildFileProxyUrl(origin, fileId, webhookSecret),
+              parseLabel: async (input) => {
+                // No silent catch: errors propagate to process-update.ts's
+                // catch which logs with stack + chatId. A silent `return
+                // null` here hid an entire failure chain in production
+                // (mediaType=application/octet-stream → provider reject →
+                // primary throw → fallback throw → primary rethrow →
+                // silenced by this catch → null → "couldn't read" reply).
+                const execute = parseLabelTool.execute as (
+                  input: unknown,
+                  options: unknown,
+                ) => Promise<{
+                  carrier: string;
+                  trackingNumber?: string;
+                  recipientName?: string;
+                  recipientHouseNumber?: string;
+                  confidence: "high" | "medium" | "low";
+                  reason: string;
+                }>;
+                return execute(input, {
+                  toolCallId: `parse_label:${Date.now()}`,
+                  messages: [],
+                });
+              },
+              answerCallback: (callbackId, text) =>
+                answerCallbackQuery(token, callbackId, text),
+              stripKeyboard: (chatId, messageId) =>
+                editMessageReplyMarkup(token, chatId, messageId),
+              getPackageRecipientId: async (packageId) => {
+                const pkg = await getPackage(packageId);
+                return pkg?.recipientResidentId ?? null;
+              },
+              recordTelegramObservation: async (input) => {
+                await upsertKnownTelegramUser(input);
+              },
+            }),
+          );
         },
       ),
     ],
   });
+}
+
+/**
+ * Best-effort trace-kind detection from a Telegram webhook payload.
+ *
+ *   - `callback_query` present → "callback" (#61 magenta)
+ *   - `message.photo[]` non-empty → "photo" (#60 amber)
+ *   - anything else → "text" (default cyan)
+ *
+ * Reads the body via `req.clone().json()` so the downstream
+ * `processInboundTelegramUpdate` call still gets a fresh, unconsumed
+ * body to parse. Any error (malformed JSON, missing fields, network
+ * read failure on the clone) falls through to "text" — the diagram
+ * just renders the trace in the default colour and the orchestrator's
+ * own validation handles the bad-input case.
+ *
+ * Exported only for tests; production callers go through the POST
+ * route which uses it internally.
+ */
+export async function detectTraceKind(req: Request): Promise<TraceKind> {
+  try {
+    const peek = (await req.clone().json()) as {
+      callback_query?: unknown;
+      message?: { photo?: ReadonlyArray<unknown> };
+    };
+    if (peek && peek.callback_query) return "callback";
+    if (peek && peek.message?.photo && peek.message.photo.length > 0) {
+      return "photo";
+    }
+    return "text";
+  } catch {
+    return "text";
+  }
 }

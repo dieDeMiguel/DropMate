@@ -337,3 +337,168 @@ describe("drainSessionToTelegram", () => {
     expect(() => stream.getReader()).not.toThrow();
   });
 });
+
+describe("drainSessionToTelegram — trace integration (#59)", () => {
+  // Dynamic import for the tracer so the test file doesn't leak
+  // top-level bus listeners into the global scope.
+  async function recordEventsInside<T>(
+    fn: () => Promise<T>,
+  ): Promise<{ events: Array<{ stage: string; phase: string; extras?: Record<string, unknown> }>; result: T }> {
+    const { runWithTrace, subscribe } = await import("../trace.js");
+    const events: Array<{ stage: string; phase: string; extras?: Record<string, unknown> }> = [];
+    const unsubscribe = subscribe((e) => {
+      if (e.traceId !== "trace_drain") return;
+      events.push({ stage: e.stage, phase: e.phase, extras: e.extras as Record<string, unknown> | undefined });
+    });
+    try {
+      const result = await runWithTrace(
+        { traceId: "trace_drain", kind: "text" },
+        fn,
+      );
+      return { events, result };
+    } finally {
+      unsubscribe();
+    }
+  }
+
+  it("emits drain.start + drain.end + outbound.start/end around sendMessage", async () => {
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    const session = makeSession([
+      {
+        type: "message.completed",
+        data: {
+          message: "Hallo",
+          finishReason: "stop",
+          sequence: 0,
+          stepIndex: 0,
+          turnId: "t1",
+        },
+      },
+    ]);
+
+    const { events } = await recordEventsInside(() =>
+      drainSessionToTelegram(session, 42, { sendMessage }),
+    );
+
+    expect(events.map((e) => `${e.stage}.${e.phase}`)).toEqual([
+      "drain.start",
+      "outbound.start",
+      "outbound.end",
+      "drain.end",
+    ]);
+    expect(sendMessage).toHaveBeenCalledWith(42, "Hallo");
+  });
+
+  it("emits tool.start for each action in an actions.requested batch", async () => {
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    const session = makeSession([
+      {
+        type: "actions.requested",
+        data: {
+          actions: [
+            { id: "call_1", toolName: "register_package" },
+            { id: "call_2", toolName: "notify_recipient" },
+          ],
+          sequence: 0,
+          stepIndex: 0,
+          turnId: "t1",
+        },
+      },
+    ]);
+
+    const { events } = await recordEventsInside(() =>
+      drainSessionToTelegram(session, 1, { sendMessage }),
+    );
+
+    const tools = events.filter((e) => e.stage === "tool");
+    expect(tools).toHaveLength(2);
+    expect(tools[0]).toMatchObject({
+      stage: "tool",
+      phase: "start",
+      extras: { name: "register_package", id: "call_1" },
+    });
+    expect(tools[1]).toMatchObject({
+      stage: "tool",
+      phase: "start",
+      extras: { name: "notify_recipient", id: "call_2" },
+    });
+  });
+
+  it("emits tool.end on action.result with the matching toolName + status", async () => {
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    const session = makeSession([
+      {
+        type: "action.result",
+        data: {
+          result: { toolCallId: "call_1", toolName: "register_package" },
+          status: "completed",
+          sequence: 0,
+          stepIndex: 0,
+          turnId: "t1",
+        },
+      },
+    ]);
+
+    const { events } = await recordEventsInside(() =>
+      drainSessionToTelegram(session, 1, { sendMessage }),
+    );
+
+    const toolEnd = events.find((e) => e.stage === "tool" && e.phase === "end");
+    expect(toolEnd).toBeDefined();
+    expect(toolEnd!.extras).toMatchObject({
+      name: "register_package",
+      id: "call_1",
+      status: "completed",
+    });
+  });
+
+  it("emits drain.error when getEventStream throws", async () => {
+    const sendMessage = vi.fn();
+    const logError = vi.fn();
+    const session: Session = {
+      id: "sess_err",
+      continuationToken: "tg:1",
+      async getEventStream() {
+        throw new Error("stream unavailable");
+      },
+    } as unknown as Session;
+
+    const { events } = await recordEventsInside(() =>
+      drainSessionToTelegram(session, 1, { sendMessage, logError }),
+    );
+
+    expect(events.map((e) => `${e.stage}.${e.phase}`)).toEqual([
+      "drain.start",
+      "drain.error",
+    ]);
+  });
+
+  it("is silent when called outside any runWithTrace scope", async () => {
+    const { subscribe } = await import("../trace.js");
+    const events: unknown[] = [];
+    const unsubscribe = subscribe((e) => events.push(e));
+
+    try {
+      const sendMessage = vi.fn().mockResolvedValue(undefined);
+      const session = makeSession([
+        {
+          type: "message.completed",
+          data: {
+            message: "hi",
+            finishReason: "stop",
+            sequence: 0,
+            stepIndex: 0,
+            turnId: "t1",
+          },
+        },
+      ]);
+
+      // No `runWithTrace` — drain must run cleanly + emit nothing.
+      await drainSessionToTelegram(session, 42, { sendMessage });
+      expect(events).toEqual([]);
+      expect(sendMessage).toHaveBeenCalledWith(42, "hi");
+    } finally {
+      unsubscribe();
+    }
+  });
+});

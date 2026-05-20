@@ -1,0 +1,727 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>DropMate — live diagram</title>
+  <style>
+    :root {
+      --bg: #07070d;
+      --idle: #2a2a3a;
+      --idle-fill: rgba(42, 42, 58, 0.18);
+      --text-accent: #00e5ff;
+      --photo-accent: #ffb547;
+      --callback-accent: #ff5cf2;
+      --error-accent: #ff3860;
+      --label: #6a6a8a;
+      --label-bright: #d8d8ff;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: #e6e6f0; font-family: ui-monospace, "SF Mono", Menlo, monospace; height: 100%; overflow: hidden; }
+    body { display: flex; flex-direction: column; align-items: center; gap: 1rem; padding: 1.25rem; }
+    h1 { font-size: 0.85rem; letter-spacing: 0.32em; text-transform: uppercase; color: var(--label); font-weight: 500; margin: 0; }
+    /* Stage splits into diagram (left, ~80%) + trace log (right, ~20%) — #61. */
+    .stage { width: 100%; max-width: 1200px; flex: 1; min-height: 0; display: flex; align-items: stretch; justify-content: center; gap: 1rem; }
+    .diagram { flex: 1 1 80%; display: flex; align-items: center; justify-content: center; min-width: 0; }
+    svg { width: 100%; height: 100%; max-height: 80vh; }
+
+    /* Right-side trace log panel (#61). Scrolling text feed of the
+       last ~20 events; visitors who can't tell the cables apart at a
+       glance can read the raw stream and follow along. */
+    #trace-log {
+      flex: 0 0 20%;
+      min-width: 220px;
+      max-width: 280px;
+      display: flex;
+      flex-direction: column;
+      background: rgba(20, 20, 32, 0.55);
+      border: 1px solid var(--idle);
+      border-radius: 6px;
+      padding: 0.6rem 0.65rem;
+      font-size: 10px;
+      letter-spacing: 0.02em;
+      color: var(--label);
+      overflow: hidden;
+    }
+    #trace-log header {
+      font-size: 9px;
+      letter-spacing: 0.32em;
+      text-transform: uppercase;
+      color: var(--label);
+      opacity: 0.7;
+      padding-bottom: 0.45rem;
+      margin-bottom: 0.45rem;
+      border-bottom: 1px solid var(--idle);
+    }
+    #trace-log-body {
+      flex: 1;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      scrollbar-width: thin;
+      scrollbar-color: var(--idle) transparent;
+    }
+    #trace-log-body::-webkit-scrollbar { width: 6px; }
+    #trace-log-body::-webkit-scrollbar-thumb { background: var(--idle); border-radius: 3px; }
+    .log-entry { color: var(--label-bright); opacity: 0.85; line-height: 1.35; word-break: break-word; }
+    .log-entry .ts { color: var(--label); opacity: 0.6; margin-right: 0.4rem; }
+    .log-entry .stage-phase { color: var(--accent, var(--text-accent)); margin-right: 0.4rem; }
+    .log-entry.kind-text { --accent: var(--text-accent); }
+    .log-entry.kind-photo { --accent: var(--photo-accent); }
+    .log-entry.kind-callback { --accent: var(--callback-accent); }
+    .log-entry.flash-error-line { color: var(--error-accent); }
+
+    /* Boxes: idle by default; ignite + post-hold drive their own classes. */
+    rect.box {
+      fill: var(--idle-fill);
+      stroke: var(--idle);
+      stroke-width: 2;
+      transition: stroke 200ms ease, fill 200ms ease, filter 200ms ease;
+    }
+    rect.box.ignite {
+      stroke: var(--accent, var(--text-accent));
+      fill: rgba(0, 229, 255, 0.06);
+      filter: drop-shadow(0 0 10px var(--accent, var(--text-accent)));
+    }
+    rect.box.hold {
+      stroke: var(--accent, var(--text-accent));
+      filter: drop-shadow(0 0 6px var(--accent, var(--text-accent)));
+    }
+    /* Heartbeat — subtle breathing pulse when no trace is animating. */
+    rect.box.heartbeat {
+      animation: heartbeat 3s ease-in-out infinite;
+    }
+    @keyframes heartbeat {
+      0%, 100% { stroke: var(--idle); filter: none; }
+      50% { stroke: #3d3d55; filter: drop-shadow(0 0 4px #3d3d55); }
+    }
+    /* Edge boxes (TELEGRAM / REDIS / AI GATEWAY) are passive destinations.
+       Render dimmer so they read as "context" boxes rather than
+       active stages. */
+    rect.edge { stroke: #1f1f30; }
+    rect.edge.heartbeat { animation-duration: 4s; }
+    rect.edge.ignite { stroke: var(--accent, var(--text-accent)); fill: rgba(0, 229, 255, 0.04); }
+
+    /* Tools-row container (#61): never ignites. Pure visual frame that
+       wraps the 5 named sub-cells. Stroke is even dimmer than .edge so
+       it reads as scaffolding, not a stage. */
+    rect.tools-row {
+      fill: rgba(20, 20, 32, 0.35);
+      stroke: #1a1a28;
+      stroke-width: 1;
+      stroke-dasharray: 4 4;
+    }
+    /* Tool sub-cells (#61): same ignite/hold/heartbeat shape as
+       regular boxes but with a slightly tighter glow so 5-in-a-row
+       doesn't bleed into each other. */
+    rect.sub-cell.ignite {
+      stroke: var(--accent, var(--text-accent));
+      filter: drop-shadow(0 0 7px var(--accent, var(--text-accent)));
+    }
+    rect.sub-cell.hold {
+      stroke: var(--accent, var(--text-accent));
+      filter: drop-shadow(0 0 4px var(--accent, var(--text-accent)));
+    }
+    /* Tool sub-cell labels: smaller than top-level box labels and split
+       across two lines so longer tool names ("notify recipient") fit. */
+    text.tool-label {
+      fill: var(--label);
+      font-size: 9px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      text-anchor: middle;
+      font-weight: 500;
+      transition: fill 200ms ease;
+      pointer-events: none;
+    }
+    text.tool-label.ignite { fill: var(--label-bright); }
+    text.tool-label.hold { fill: var(--label-bright); }
+
+    /* Red-flash terminal-failure visual (#60). Fires on
+       parse_label.primary_failed and on terminal-failure events
+       (drain.error, *.error without a matching .end, trace timeout).
+       Brief ~400ms flash so the visitor registers the failure
+       without losing the in-progress trace. */
+    rect.box.flash-error {
+      stroke: var(--error-accent);
+      fill: rgba(255, 56, 96, 0.08);
+      filter: drop-shadow(0 0 12px var(--error-accent));
+      animation: flash-error 400ms ease-out;
+    }
+    @keyframes flash-error {
+      0% { filter: drop-shadow(0 0 4px var(--error-accent)); }
+      40% { filter: drop-shadow(0 0 16px var(--error-accent)); }
+      100% { filter: drop-shadow(0 0 8px var(--error-accent)); }
+    }
+
+    text.label {
+      fill: var(--label);
+      font-size: 12px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      text-anchor: middle;
+      font-weight: 500;
+      transition: fill 200ms ease;
+      pointer-events: none;
+    }
+    text.label.ignite { fill: var(--label-bright); }
+    text.label.hold { fill: var(--label-bright); }
+    text.sub {
+      fill: var(--label);
+      font-size: 9px;
+      letter-spacing: 0.12em;
+      text-anchor: middle;
+      opacity: 0.55;
+      pointer-events: none;
+    }
+
+    /* PCB cables: dim outline by default; animated stroke-dashoffset
+       creates the running-current visual when a cable lights up. */
+    path.cable {
+      fill: none;
+      stroke: var(--idle);
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      transition: stroke 200ms ease, filter 200ms ease;
+    }
+    path.cable.run {
+      stroke: var(--accent, var(--text-accent));
+      filter: drop-shadow(0 0 6px var(--accent, var(--text-accent)));
+      stroke-dasharray: 8 6;
+      animation: flow 600ms linear forwards;
+    }
+    path.cable.hold {
+      stroke: var(--accent, var(--text-accent));
+      filter: drop-shadow(0 0 4px var(--accent, var(--text-accent)));
+    }
+    @keyframes flow {
+      from { stroke-dashoffset: 28; }
+      to { stroke-dashoffset: 0; }
+    }
+
+    /* Zone labels — Telegram zone (top), Vercel zone (middle), External
+       services zone (bottom). */
+    text.zone {
+      fill: #3d3d55;
+      font-size: 10px;
+      letter-spacing: 0.42em;
+      text-transform: uppercase;
+      text-anchor: start;
+      pointer-events: none;
+      opacity: 0.7;
+    }
+
+    footer { display: flex; justify-content: space-between; align-items: center; width: 100%; max-width: 920px; font-size: 0.7rem; letter-spacing: 0.18em; text-transform: uppercase; color: var(--label); }
+    .status { color: var(--label); }
+    .status.connected { color: var(--text-accent); }
+    .status.connected::before { content: "● "; }
+    .legend { display: flex; gap: 1.5rem; }
+    .legend-item { display: flex; align-items: center; gap: 0.4rem; }
+    .swatch { width: 10px; height: 10px; border-radius: 2px; }
+    .swatch-text { background: var(--text-accent); box-shadow: 0 0 6px var(--text-accent); }
+    .swatch-photo { background: var(--photo-accent); box-shadow: 0 0 6px var(--photo-accent); }
+    .swatch-callback { background: var(--callback-accent); box-shadow: 0 0 6px var(--callback-accent); }
+  </style>
+</head>
+<body>
+  <h1>DropMate · live diagram</h1>
+  <div class="stage">
+    <div class="diagram">
+    <svg viewBox="0 0 920 660" role="img" aria-label="trace pipeline" preserveAspectRatio="xMidYMid meet">
+      <!-- Zone labels -->
+      <text class="zone" x="20" y="40">Telegram</text>
+      <text class="zone" x="20" y="200">Vercel</text>
+      <text class="zone" x="20" y="510">External</text>
+
+      <!-- Cables: drawn BEFORE boxes so boxes overlay cable endpoints cleanly. -->
+      <!-- TELEGRAM → WEBHOOK -->
+      <path class="cable" id="cable-telegram-webhook" d="M460 80 L460 170" />
+      <!-- WEBHOOK → ORCHESTRATOR -->
+      <path class="cable" id="cable-webhook-orchestrator" d="M460 230 L460 290" />
+      <!-- ORCHESTRATOR → PARSE_LABEL (left branch) -->
+      <path class="cable" id="cable-orchestrator-parse" d="M380 320 L240 320 L240 380" />
+      <!-- ORCHESTRATOR → ASH_SESSION (right branch) -->
+      <path class="cable" id="cable-orchestrator-ash" d="M540 320 L680 320 L680 380" />
+      <!-- ASH_SESSION → TOOLS row (cable ends at the row's top edge — sub-cells under it). -->
+      <path class="cable" id="cable-ash-tools" d="M680 440 L680 470 L460 470 L460 500" />
+      <!-- TOOLS → AI GATEWAY -->
+      <path class="cable" id="cable-tools-gateway" d="M730 580 L760 580 L760 605" />
+      <!-- TOOLS → REDIS -->
+      <path class="cable" id="cable-tools-redis" d="M190 580 L160 580 L160 605" />
+      <!-- ASH_SESSION → WEBHOOK (outbound return path) -->
+      <path class="cable" id="cable-ash-outbound" d="M680 410 L840 410 L840 200 L520 200" />
+
+      <!-- Boxes -->
+      <!-- Telegram (edge, top) -->
+      <rect class="box edge heartbeat" id="box-telegram" x="380" y="30" width="160" height="50" rx="6" />
+      <text class="label" id="label-telegram" x="460" y="60">Telegram</text>
+
+      <!-- Webhook -->
+      <rect class="box heartbeat" id="box-webhook" x="380" y="170" width="160" height="60" rx="6" />
+      <text class="label" id="label-webhook" x="460" y="205">Webhook</text>
+      <text class="sub" id="sub-webhook" x="460" y="222">/api/telegram</text>
+
+      <!-- Orchestrator -->
+      <rect class="box heartbeat" id="box-orchestrator" x="380" y="290" width="160" height="60" rx="6" />
+      <text class="label" id="label-orchestrator" x="460" y="325">Orchestrator</text>
+      <text class="sub" id="sub-orchestrator" x="460" y="342">process-update</text>
+
+      <!-- Parse Label (left branch) -->
+      <rect class="box heartbeat" id="box-parse_label" x="160" y="380" width="160" height="60" rx="6" />
+      <text class="label" id="label-parse_label" x="240" y="415">parse_label</text>
+      <text class="sub" id="sub-parse_label" x="240" y="432">vision · ai gateway</text>
+
+      <!-- Ash Session (right branch) -->
+      <rect class="box heartbeat" id="box-ash_send" x="600" y="380" width="160" height="60" rx="6" />
+      <text class="label" id="label-ash_send" x="680" y="415">Ash Session</text>
+      <text class="sub" id="sub-ash_send" x="680" y="432">turn loop</text>
+
+      <!-- Tools row (#61): outer container (never ignites) + 5 named
+           sub-cells. A tool.* event with extras.name lights the matching
+           sub-cell. tool.* without a name (defensive default) falls
+           through to the container so visitors still see something. -->
+      <rect class="tools-row" id="box-tool" x="140" y="490" width="640" height="90" rx="6" />
+      <text class="zone" id="label-tool" x="148" y="484">Tools</text>
+      <!-- Sub-cells: 5 boxes, 110px wide, 16px gap, starting at x=150.
+           Total span = 5*110 + 4*16 = 614 (centred inside the 640-wide row). -->
+      <rect class="box sub-cell heartbeat" id="box-tool-register_resident" x="150" y="510" width="110" height="60" rx="5" />
+      <text class="tool-label" id="label-tool-register_resident" x="205" y="538">register</text>
+      <text class="tool-label" id="label-tool-register_resident-2" x="205" y="552">resident</text>
+
+      <rect class="box sub-cell heartbeat" id="box-tool-register_package" x="276" y="510" width="110" height="60" rx="5" />
+      <text class="tool-label" id="label-tool-register_package" x="331" y="538">register</text>
+      <text class="tool-label" id="label-tool-register_package-2" x="331" y="552">package</text>
+
+      <rect class="box sub-cell heartbeat" id="box-tool-notify_recipient" x="402" y="510" width="110" height="60" rx="5" />
+      <text class="tool-label" id="label-tool-notify_recipient" x="457" y="538">notify</text>
+      <text class="tool-label" id="label-tool-notify_recipient-2" x="457" y="552">recipient</text>
+
+      <rect class="box sub-cell heartbeat" id="box-tool-post_to_group" x="528" y="510" width="110" height="60" rx="5" />
+      <text class="tool-label" id="label-tool-post_to_group" x="583" y="538">post to</text>
+      <text class="tool-label" id="label-tool-post_to_group-2" x="583" y="552">group</text>
+
+      <rect class="box sub-cell heartbeat" id="box-tool-confirm_pickup" x="654" y="510" width="110" height="60" rx="5" />
+      <text class="tool-label" id="label-tool-confirm_pickup" x="709" y="538">confirm</text>
+      <text class="tool-label" id="label-tool-confirm_pickup-2" x="709" y="552">pickup</text>
+
+      <!-- AI Gateway (edge, bottom-right) -->
+      <rect class="box edge heartbeat" id="box-gateway" x="680" y="605" width="160" height="50" rx="6" />
+      <text class="label" id="label-gateway" x="760" y="635">AI Gateway</text>
+
+      <!-- Redis (edge, bottom-left) -->
+      <rect class="box edge heartbeat" id="box-redis" x="80" y="605" width="160" height="50" rx="6" />
+      <text class="label" id="label-redis" x="160" y="635">Upstash · Redis</text>
+    </svg>
+    </div>
+    <!-- Trace log panel (#61). Scrolling text feed of the last ~20
+         events; visitors who can't tell the cables apart at a glance
+         can follow along by reading the raw stream. Autoscrolls to
+         latest entry. -->
+    <aside id="trace-log" aria-label="trace log">
+      <header>Trace log</header>
+      <div id="trace-log-body"></div>
+    </aside>
+  </div>
+  <footer>
+    <div class="status" id="status">connecting…</div>
+    <div class="legend">
+      <div class="legend-item"><span class="swatch swatch-text"></span> text</div>
+      <div class="legend-item"><span class="swatch swatch-photo"></span> photo</div>
+      <div class="legend-item"><span class="swatch swatch-callback"></span> callback</div>
+    </div>
+    <div id="trace-id" class="status">—</div>
+  </footer>
+  <script>
+    (() => {
+      "use strict";
+
+      const MIN_HOP_MS = 600;
+      const MAX_HOP_MS = 4000;
+      const INTER_HOP_MS = 200;
+      const POST_HOLD_MS = 2000;
+      const POST_FADE_MS = 2000;
+
+      // Map each emitted stage to (a) the box it ignites and (b) the
+      // cable that runs into that box. Stages emitted twice (start +
+      // end + occasionally error) only re-ignite on `start` — the box
+      // stays in hold state between start and end, then transitions
+      // to fade when the trace completes.
+      const STAGE_PLAN = {
+        webhook:      { box: "webhook",      cable: "cable-telegram-webhook" },
+        orchestrator: { box: "orchestrator", cable: "cable-webhook-orchestrator" },
+        parse_label:  { box: "parse_label",  cable: "cable-orchestrator-parse" },
+        ash_send:     { box: "ash_send",     cable: "cable-orchestrator-ash" },
+        tool:         { box: "tool",         cable: "cable-ash-tools" },
+        drain:        { box: "ash_send",     cable: null },
+        outbound:     { box: "webhook",      cable: "cable-ash-outbound" },
+      };
+
+      // Tool sub-cells (#61). When a `tool` event carries an
+      // `extras.name` matching one of these, the engine routes the
+      // ignite to the matching sub-cell (`box-tool-<name>`) rather
+      // than the outer Tools container — so visitors see WHICH tool
+      // the agent picked, not just THAT a tool fired. Tool events
+      // without a recognised name fall through to the legacy
+      // container behaviour (defensive).
+      const TOOL_SUB_CELLS = new Set([
+        "register_resident",
+        "register_package",
+        "notify_recipient",
+        "post_to_group",
+        "confirm_pickup",
+      ]);
+
+      // Accent CSS variable per trace kind. Read on each event so a
+      // trace's color survives mid-stream stage changes. Callback
+      // traces (button taps) light up in magenta — added in #61 once
+      // the factory's detectTraceKind started emitting kind="callback".
+      const ACCENT_VAR = {
+        text:     "var(--text-accent)",
+        photo:    "var(--photo-accent)",
+        callback: "var(--callback-accent)",
+      };
+
+      const $ = (id) => document.getElementById(id);
+      const statusEl = $("status");
+      const traceIdEl = $("trace-id");
+      const allBoxes = Array.from(document.querySelectorAll("rect.box"));
+      const allCables = Array.from(document.querySelectorAll("path.cable"));
+
+      // Persisted at boot so we can restore the parse_label sub-label
+      // back to its idle value ("vision · ai gateway") between traces
+      // — without this, the last-seen model name sticks around forever.
+      const idleSubText = new Map();
+      for (const sub of document.querySelectorAll("text.sub")) {
+        idleSubText.set(sub.id, sub.textContent || "");
+      }
+
+      function setIdle() {
+        for (const b of allBoxes) {
+          b.classList.remove("ignite", "hold", "flash-error");
+          b.classList.add("heartbeat");
+          b.style.removeProperty("--accent");
+        }
+        for (const c of allCables) {
+          c.classList.remove("run", "hold");
+          c.style.removeProperty("--accent");
+        }
+        // Include tool sub-cell labels (#61) so they drop back to idle
+        // colour alongside their parent boxes after a trace fades.
+        const labels = document.querySelectorAll("text.label, text.tool-label");
+        for (const l of labels) l.classList.remove("ignite", "hold");
+        for (const [id, text] of idleSubText.entries()) {
+          const sub = document.getElementById(id);
+          if (sub) sub.textContent = text;
+        }
+      }
+
+      // Per-trace runtime state. The engine queues events for one trace
+      // until the trace terminates (POST_HOLD_MS + POST_FADE_MS later)
+      // and only then drains the next trace's events.
+      const traceQueue = [];
+      let activeTrace = null;
+
+      function enqueue(event) {
+        // Group events by traceId so a noisy second trace doesn't
+        // interleave with the first.
+        if (activeTrace && activeTrace.traceId === event.traceId) {
+          activeTrace.events.push(event);
+          maybeStep();
+          return;
+        }
+        let tail = traceQueue[traceQueue.length - 1];
+        if (!tail || tail.traceId !== event.traceId) {
+          tail = { traceId: event.traceId, kind: event.kind, events: [] };
+          traceQueue.push(tail);
+        }
+        tail.events.push(event);
+        if (!activeTrace) {
+          activeTrace = traceQueue.shift();
+          maybeStep();
+        }
+      }
+
+      let lastHopAt = 0;
+      let scheduled = false;
+
+      function maybeStep() {
+        if (scheduled) return;
+        if (!activeTrace || activeTrace.events.length === 0) return;
+        const wait = Math.max(0, lastHopAt + INTER_HOP_MS - Date.now());
+        scheduled = true;
+        setTimeout(() => {
+          scheduled = false;
+          if (!activeTrace) return;
+          const next = activeTrace.events.shift();
+          if (!next) return;
+          step(next);
+          lastHopAt = Date.now();
+          if (activeTrace.events.length > 0) maybeStep();
+          else scheduleTraceEnd();
+        }, wait);
+      }
+
+      let traceEndTimer = null;
+      function scheduleTraceEnd() {
+        if (traceEndTimer) clearTimeout(traceEndTimer);
+        traceEndTimer = setTimeout(() => {
+          // If new events landed in the meantime, keep going.
+          if (activeTrace && activeTrace.events.length > 0) {
+            traceEndTimer = null;
+            maybeStep();
+            return;
+          }
+          beginPostTrace();
+        }, MAX_HOP_MS);
+      }
+
+      function beginPostTrace() {
+        traceEndTimer = null;
+        // Hold the completed path bright, then fade.
+        const holdBoxes = allBoxes.filter((b) => b.classList.contains("ignite") || b.classList.contains("hold"));
+        const holdCables = allCables.filter((c) => c.classList.contains("run") || c.classList.contains("hold"));
+        for (const b of holdBoxes) {
+          b.classList.remove("ignite");
+          b.classList.add("hold");
+        }
+        for (const c of holdCables) {
+          c.classList.remove("run");
+          c.classList.add("hold");
+        }
+        setTimeout(() => {
+          // Fade — drop the hold class and let CSS transition back to idle.
+          for (const b of holdBoxes) b.classList.remove("hold");
+          for (const c of holdCables) c.classList.remove("hold");
+          setTimeout(() => {
+            // Restore idle heartbeats once the fade has finished.
+            for (const b of holdBoxes) b.classList.add("heartbeat");
+            // Restore sub-labels so the parse_label box doesn't show
+            // a stale model name between traces.
+            for (const [id, text] of idleSubText.entries()) {
+              const sub = document.getElementById(id);
+              if (sub) sub.textContent = text;
+            }
+            activeTrace = null;
+            traceIdEl.textContent = "—";
+            if (traceQueue.length > 0) {
+              activeTrace = traceQueue.shift();
+              maybeStep();
+            }
+          }, POST_FADE_MS);
+        }, POST_HOLD_MS);
+      }
+
+      // Short, visitor-readable display name for a model slug. The
+       // sub-label space is narrow (~150px @ 9px font) so we trim the
+       // provider prefix and the size suffix to keep it on one line.
+       // Examples:
+       //   "google/gemini-3.1-flash-lite"  → "gemini-3.1-flash-lite"
+       //   "anthropic/claude-sonnet-4.6"   → "claude-sonnet-4.6"
+      function shortModelName(slug) {
+        if (typeof slug !== "string") return "";
+        const slash = slug.indexOf("/");
+        return slash >= 0 ? slug.slice(slash + 1) : slug;
+      }
+
+      function flashError(box, label) {
+        // Brief red-flash visual (#60). The keyframe is 400ms; we remove
+        // the class shortly after so the box can resume its trace-coloured
+        // ignite/hold appearance on the next event (e.g. fallback_start).
+        box.classList.add("flash-error");
+        setTimeout(() => {
+          box.classList.remove("flash-error");
+        }, 400);
+        if (label) label.classList.add("ignite");
+      }
+
+      function step(event) {
+        if (!activeTrace) return;
+        // Update header trace badge so visitors see the current id.
+        traceIdEl.textContent = "trace=" + event.traceId.slice(0, 8) + " · kind=" + event.kind;
+        const plan = STAGE_PLAN[event.stage];
+        if (!plan) return;
+        const accent = ACCENT_VAR[event.kind] || ACCENT_VAR.text;
+        // Tool sub-cell routing (#61): when a `tool` event carries
+        // a recognised name, light the named sub-cell directly so
+        // visitors see WHICH tool fired. The outer `box-tool`
+        // container is a dashed frame (`.tools-row`) and is NOT in
+        // the ignite path. Unknown tool names fall through to the
+        // legacy container target as a defensive default.
+        let boxId = plan.box;
+        if (event.stage === "tool" && event.extras && typeof event.extras.name === "string") {
+          if (TOOL_SUB_CELLS.has(event.extras.name)) {
+            boxId = "tool-" + event.extras.name;
+          }
+        }
+        const box = $("box-" + boxId);
+        const label = $("label-" + boxId);
+        const sub = $("sub-" + boxId);
+        const cable = plan.cable ? $(plan.cable) : null;
+        if (!box) return;
+        // Set the accent on the box + cable so CSS reads it.
+        box.style.setProperty("--accent", accent);
+        if (cable) cable.style.setProperty("--accent", accent);
+
+        // Sub-label: show the active model name when extras.model is
+        // supplied. Used by parse_label.start (primary) and
+        // parse_label.fallback_start (fallback) so visitors see the
+        // primary→fallback retry visual at sub-cell granularity.
+        if (sub && event.extras && typeof event.extras.model === "string") {
+          sub.textContent = shortModelName(event.extras.model);
+        }
+
+        if (event.phase === "primary_failed") {
+          // #60: red flash on the parse_label box so the visitor sees
+          // the primary model failed. The .fallback_start event that
+          // follows re-ignites the box with the (still-accent-coloured)
+          // hold + sub-label update.
+          flashError(box, label);
+          return;
+        }
+        if (event.phase === "fallback_start") {
+          // Re-ignite the box in the trace's accent colour. The
+          // sub-label was already updated above to the fallback model
+          // name; from here the engine treats this like a fresh start
+          // event so the keyframes restart.
+          box.classList.remove("flash-error");
+          box.classList.remove("heartbeat");
+          box.classList.remove("hold");
+          // Force reflow so the ignite animation restarts visually.
+          void box.getBoundingClientRect();
+          box.classList.add("ignite");
+          if (label) label.classList.add("ignite");
+          setTimeout(() => {
+            if (box.classList.contains("ignite")) {
+              box.classList.replace("ignite", "hold");
+              if (label) label.classList.replace("ignite", "hold");
+            }
+          }, MIN_HOP_MS);
+          return;
+        }
+
+        if (event.phase === "start") {
+          if (cable) {
+            // Reset animation by removing + reapplying the class.
+            cable.classList.remove("run", "hold");
+            // Force reflow so the keyframe restarts.
+            void cable.getBoundingClientRect();
+            cable.classList.add("run");
+            setTimeout(() => cable.classList.replace("run", "hold"), MIN_HOP_MS);
+          }
+          box.classList.remove("heartbeat");
+          box.classList.remove("hold");
+          box.classList.add("ignite");
+          if (label) label.classList.add("ignite");
+          // Auto-downgrade to "hold" after MIN_HOP_MS so subsequent boxes
+          // can stand out against this one. The .end event keeps it in
+          // hold state; absent an .end (e.g. drain.start without
+          // drain.end yet) the box still settles into hold.
+          setTimeout(() => {
+            if (box.classList.contains("ignite")) {
+              box.classList.replace("ignite", "hold");
+              if (label) label.classList.replace("ignite", "hold");
+            }
+          }, MIN_HOP_MS);
+        } else if (event.phase === "end") {
+          // The box is already in ignite or hold; just make sure the
+          // hold class is set so it stays bright through the post-trace
+          // fade window.
+          if (!box.classList.contains("ignite") && !box.classList.contains("hold")) {
+            box.classList.add("hold");
+            if (label) label.classList.add("hold");
+          }
+          if (cable && !cable.classList.contains("run")) {
+            cable.classList.add("hold");
+          }
+        } else if (event.phase === "error") {
+          // Terminal-failure visual (#60). Flash the box red, then
+          // schedule the post-trace hold+fade so the diagram doesn't
+          // get stuck waiting for an .end that never arrives.
+          flashError(box, label);
+          // The MAX_HOP_MS timer in scheduleTraceEnd() already covers
+          // the case where no further events arrive; the flash is the
+          // visitor-readable signal.
+        }
+      }
+
+      // Trace log panel (#61). Appends each event as a line to the
+      // right-side scrolling feed. Caps at LOG_MAX entries so a long
+      // booth session doesn't grow the DOM unbounded; autoscrolls to
+      // the latest entry. Reuses the same SSE events the diagram
+      // engine consumes — no separate transport.
+      const LOG_MAX = 20;
+      const logBody = $("trace-log-body");
+
+      function pad2(n) { return (n < 10 ? "0" : "") + n; }
+      function pad3(n) { return (n < 10 ? "00" : n < 100 ? "0" : "") + n; }
+      function formatTimestamp() {
+        const d = new Date();
+        return pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + ":" +
+          pad2(d.getSeconds()) + "." + pad3(d.getMilliseconds());
+      }
+      function formatExtras(extras) {
+        if (!extras || typeof extras !== "object") return "";
+        const parts = [];
+        for (const key of Object.keys(extras)) {
+          const value = extras[key];
+          if (value === null || value === undefined) continue;
+          if (typeof value === "object") continue;
+          parts.push(key + "=" + String(value));
+        }
+        return parts.length > 0 ? " " + parts.join(" ") : "";
+      }
+      function appendLog(event) {
+        if (!logBody) return;
+        const entry = document.createElement("div");
+        entry.className = "log-entry kind-" + (event.kind || "text");
+        if (event.phase === "error" || event.phase === "primary_failed") {
+          entry.classList.add("flash-error-line");
+        }
+        const ts = document.createElement("span");
+        ts.className = "ts";
+        ts.textContent = formatTimestamp();
+        const stagePhase = document.createElement("span");
+        stagePhase.className = "stage-phase";
+        stagePhase.textContent = event.stage + "." + event.phase;
+        const meta = document.createElement("span");
+        meta.className = "meta";
+        const traceShort = typeof event.traceId === "string" ? event.traceId.slice(0, 8) : "";
+        meta.textContent = "trace=" + traceShort + " " + (event.kind || "text") + formatExtras(event.extras);
+        entry.appendChild(ts);
+        entry.appendChild(stagePhase);
+        entry.appendChild(meta);
+        logBody.appendChild(entry);
+        // Cap the DOM size — drop oldest entries off the front.
+        while (logBody.childElementCount > LOG_MAX) {
+          const first = logBody.firstElementChild;
+          if (!first) break;
+          logBody.removeChild(first);
+        }
+        // Autoscroll to the freshest entry.
+        logBody.scrollTop = logBody.scrollHeight;
+      }
+
+      const source = new EventSource("/api/trace");
+      source.addEventListener("open", () => {
+        statusEl.textContent = "live";
+        statusEl.classList.add("connected");
+      });
+      source.addEventListener("error", () => {
+        statusEl.textContent = "reconnecting…";
+        statusEl.classList.remove("connected");
+      });
+      source.addEventListener("message", (e) => {
+        let event;
+        try { event = JSON.parse(e.data); } catch { return; }
+        if (!event || typeof event.stage !== "string") return;
+        appendLog(event);
+        enqueue(event);
+      });
+
+      setIdle();
+    })();
+  </script>
+</body>
+</html>
