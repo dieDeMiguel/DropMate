@@ -60,6 +60,7 @@ import {
   processInboundTelegramUpdate,
   type TelegramChannelState,
 } from "./process-update.js";
+import { setTelegramTriggerAttribute } from "./trigger-attribute.js";
 import { handleTraceSseRequest } from "./trace-routes.js";
 
 /**
@@ -101,6 +102,14 @@ export function telegramChannel(config: TelegramChannelConfig) {
     TelegramChannelState,
     { chatId: number; fromUserId: number | null }
   >({
+    // Framework-canonical channel attribution. Vercel's Agent Runs view
+    // and the dashboard's project-overview card both read this; without
+    // it every row shows `—` in the Trigger column (`unknown` adapter
+    // bucket). The finer-grained `telegram-message` / `telegram-callback`
+    // / `telegram-photo` distinctions are layered on top in
+    // process-update.ts via `setTriggerAttribute` so downstream filters
+    // can tell text DMs apart from button taps and photo uploads.
+    kindHint: "telegram",
     state: undefined as unknown as TelegramChannelState,
     context: (state) => ({ chatId: state.chatId, fromUserId: state.fromUserId }),
     routes: [
@@ -205,6 +214,7 @@ export function telegramChannel(config: TelegramChannelConfig) {
               recordTelegramObservation: async (input) => {
                 await upsertKnownTelegramUser(input);
               },
+              setTriggerAttribute: setTelegramTriggerAttribute,
             }),
           );
         },

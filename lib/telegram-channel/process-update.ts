@@ -215,7 +215,44 @@ export interface ProcessUpdateDeps {
     readonly languageCode?: string;
     readonly chatId: number;
   }) => Promise<void>;
+  /**
+   * Attaches the trigger sub-kind onto the active OpenTelemetry span so
+   * the Vercel Observability Agent Runs view can populate the Trigger
+   * column with a finer-grained value than the channel's `kindHint`
+   * alone provides. The framework-canonical `kindHint: "telegram"` on
+   * `defineChannel` covers the coarse case (every row reads `telegram`
+   * in the dashboard's agent overview); this attribute lets a downstream
+   * filter pick out message vs. callback vs. photo without re-parsing
+   * the synthetic agent message.
+   *
+   * Fires once per inbound delivery, BEFORE `sendToAsh`, with the value
+   * matching the inbound shape the orchestrator is about to route:
+   *
+   *   - `telegram-message`  — plain text DM or group message
+   *   - `telegram-callback` — inline-keyboard button tap
+   *   - `telegram-photo`    — inbound photo (the synthetic `[label parsed] …`
+   *     text that follows the vision pre-call, see #43 item 1)
+   *
+   * Optional — when omitted, the orchestrator skips attribution silently
+   * so tests can opt in by passing a spy and the spike webhook can run
+   * without pulling in OpenTelemetry. The factory wires a real impl
+   * that uses `trace.getActiveSpan()?.setAttribute("trigger", …)` when
+   * `@opentelemetry/api` is loadable; if not, a no-op shim.
+   */
+  readonly setTriggerAttribute?: (trigger: TelegramTriggerKind) => void;
 }
+
+/**
+ * The three inbound shapes the channel distinguishes for the Trigger
+ * column. Layered on top of the framework-canonical `kindHint: "telegram"`
+ * (which produces a single `telegram` value for the dashboard's channel
+ * chip) so downstream observability can tell text DMs apart from button
+ * taps and photo uploads without inspecting the synthetic agent message.
+ */
+export type TelegramTriggerKind =
+  | "telegram-message"
+  | "telegram-callback"
+  | "telegram-photo";
 
 /**
  * Parsed `callback_data` shape. The convention is `"<action>:<id>"`;
@@ -355,6 +392,14 @@ async function handleCallbackQuery(
       ? { languageCode: cb.fromLanguageCode }
       : {},
   };
+
+  // Attribute the inbound shape onto the active OTel span BEFORE the
+  // turn starts. Vercel's Agent Runs view reads this attribute to
+  // populate the Trigger column; framework-canonical channels (Slack,
+  // Twilio) get this for free via `kindHint`, and the custom Telegram
+  // channel layers a finer-grained value on top so message / callback /
+  // photo are distinguishable in the dashboard's run filters.
+  deps.setTriggerAttribute?.("telegram-callback");
 
   const session = await deps.sendToAsh(syntheticMessage, {
     auth,
@@ -554,8 +599,10 @@ export async function processInboundTelegramUpdate(
   let message: string;
   if (inbound.photoFileId !== null) {
     message = await buildSyntheticPhotoMessage(inbound, deps);
+    deps.setTriggerAttribute?.("telegram-photo");
   } else {
     message = inbound.text;
+    deps.setTriggerAttribute?.("telegram-message");
   }
 
   emitTrace("ash_send", "start");

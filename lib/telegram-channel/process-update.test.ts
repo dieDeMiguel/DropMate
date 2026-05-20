@@ -69,6 +69,7 @@ interface BuiltDeps {
   stripKeyboard: ReturnType<typeof vi.fn>;
   getPackageRecipientId: ReturnType<typeof vi.fn>;
   recordTelegramObservation: ReturnType<typeof vi.fn>;
+  setTriggerAttribute: ReturnType<typeof vi.fn>;
 }
 
 type ParsedLabel = NonNullable<
@@ -118,6 +119,7 @@ function buildDeps(overrides: {
       "packageRecipientId" in overrides ? overrides.packageRecipientId : null,
     );
   const recordTelegramObservation = vi.fn().mockResolvedValue(undefined);
+  const setTriggerAttribute = vi.fn();
   return {
     sendToAsh,
     waitUntil,
@@ -130,6 +132,7 @@ function buildDeps(overrides: {
     stripKeyboard,
     getPackageRecipientId,
     recordTelegramObservation,
+    setTriggerAttribute,
     deps: {
       expectedSecret:
         "expectedSecret" in overrides ? overrides.expectedSecret : SECRET,
@@ -144,6 +147,7 @@ function buildDeps(overrides: {
       stripKeyboard,
       getPackageRecipientId,
       recordTelegramObservation,
+      setTriggerAttribute,
     },
   };
 }
@@ -1115,5 +1119,136 @@ describe("processInboundTelegramUpdate — V1 per-stage trace (#59)", () => {
     } finally {
       unsubscribe();
     }
+  });
+});
+
+describe("processInboundTelegramUpdate — trigger attribute (#74)", () => {
+  /**
+   * The three inbound shapes the channel routes each get a distinct
+   * `trigger` value so Vercel's Agent Runs view can populate the
+   * Trigger column with finer granularity than the channel's
+   * `kindHint: "telegram"` alone provides. The attribute is set BEFORE
+   * `sendToAsh` so the value lands on the active OTel span ahead of
+   * the turn span being opened by the harness.
+   */
+
+  it("sets trigger=telegram-message for a plain text DM", async () => {
+    const { deps, setTriggerAttribute, sendToAsh } = buildDeps();
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({ chatId: 42, text: "hi", fromUserId: 99, languageCode: "de" }),
+      ),
+      deps,
+    );
+
+    expect(setTriggerAttribute).toHaveBeenCalledTimes(1);
+    expect(setTriggerAttribute).toHaveBeenCalledWith("telegram-message");
+    // Fires before sendToAsh so the value lands on the active span
+    // ahead of the turn span being opened.
+    const setOrder = setTriggerAttribute.mock.invocationCallOrder[0]!;
+    const sendOrder = sendToAsh.mock.invocationCallOrder[0]!;
+    expect(setOrder).toBeLessThan(sendOrder);
+  });
+
+  it("sets trigger=telegram-callback for an inline-keyboard button tap", async () => {
+    const { deps, setTriggerAttribute, sendToAsh } = buildDeps({
+      existingSessionId: "sess_cb",
+    });
+
+    const cbUpdate = {
+      update_id: 200,
+      callback_query: {
+        id: "cb_t",
+        data: "confirm_pickup:pkg_1",
+        from: {
+          id: 99,
+          is_bot: false,
+          first_name: "T",
+        },
+        message: {
+          message_id: 555,
+          chat: { id: 42, type: "private" },
+        },
+      },
+    };
+
+    await processInboundTelegramUpdate(makeRequest(cbUpdate), deps);
+
+    expect(setTriggerAttribute).toHaveBeenCalledTimes(1);
+    expect(setTriggerAttribute).toHaveBeenCalledWith("telegram-callback");
+    const setOrder = setTriggerAttribute.mock.invocationCallOrder[0]!;
+    const sendOrder = sendToAsh.mock.invocationCallOrder[0]!;
+    expect(setOrder).toBeLessThan(sendOrder);
+  });
+
+  it("sets trigger=telegram-photo for a photo update (with or without caption)", async () => {
+    const { deps, setTriggerAttribute, sendToAsh } = buildDeps();
+
+    const photoUpdate = {
+      update_id: 300,
+      message: {
+        message_id: 1,
+        date: 1,
+        caption: "Paket für Natascha",
+        chat: { id: 42, type: "private" },
+        from: { id: 99, is_bot: false, first_name: "T", language_code: "de" },
+        photo: [
+          { file_id: "small", file_size: 100, width: 90, height: 90 },
+          { file_id: "large", file_size: 5000, width: 1280, height: 1280 },
+        ],
+      },
+    };
+
+    await processInboundTelegramUpdate(makeRequest(photoUpdate), deps);
+
+    expect(setTriggerAttribute).toHaveBeenCalledTimes(1);
+    expect(setTriggerAttribute).toHaveBeenCalledWith("telegram-photo");
+    const setOrder = setTriggerAttribute.mock.invocationCallOrder[0]!;
+    const sendOrder = sendToAsh.mock.invocationCallOrder[0]!;
+    expect(setOrder).toBeLessThan(sendOrder);
+  });
+
+  it("does not call setTriggerAttribute on a malformed / no-message update (no turn started)", async () => {
+    const { deps, setTriggerAttribute } = buildDeps();
+
+    await processInboundTelegramUpdate(
+      makeRequest({ update_id: 7, edited_message: { message_id: 1 } }),
+      deps,
+    );
+
+    expect(setTriggerAttribute).not.toHaveBeenCalled();
+  });
+
+  it("does not call setTriggerAttribute when the secret-token header is wrong", async () => {
+    const { deps, setTriggerAttribute } = buildDeps();
+
+    const res = await processInboundTelegramUpdate(
+      makeRequest(dmUpdate({ chatId: 1, text: "hi" }), "wrong"),
+      deps,
+    );
+
+    expect(res.status).toBe(401);
+    expect(setTriggerAttribute).not.toHaveBeenCalled();
+  });
+
+  it("tolerates a missing setTriggerAttribute dep without throwing (optional)", async () => {
+    const built = buildDeps();
+    // Strip the attribute setter — the orchestrator must continue
+    // working unchanged when callers opt out of OTel attribution.
+    const depsWithoutAttr: ProcessUpdateDeps = {
+      ...built.deps,
+      setTriggerAttribute: undefined,
+    };
+
+    const res = await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({ chatId: 42, text: "hi", fromUserId: 99 }),
+      ),
+      depsWithoutAttr,
+    );
+
+    expect(res.status).toBe(204);
+    expect(built.sendToAsh).toHaveBeenCalledTimes(1);
   });
 });
