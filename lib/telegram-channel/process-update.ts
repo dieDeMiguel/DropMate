@@ -34,17 +34,27 @@
  * confirm_pickup taps — gate on the tapper actually being the
  * package's recipient.
  *
- * Photo path (#43 item 1): when an inbound update contains a photo,
- * the orchestrator calls `parseLabel` BEFORE handing the turn to the
- * conversational agent. Vision happens once, in a dedicated tool
- * (`agent/tools/parse_label.ts`) routed through Vercel AI Gateway with
- * Gemma 4 31B as primary and Claude Opus 4.5 as fallback. The result
- * is folded into a synthetic text message ("[label parsed] carrier=DHL
- * recipient=… …") that the conversational model (Gemini Flash) sees
- * as text — eliminating the previous failure mode where Flash received
- * a `FilePart` and hallucinated "I cannot read images." Low-confidence
- * parses get a "— please confirm before registering" suffix so the
- * agent asks rather than auto-registers.
+ * Photo path (#79): when an inbound update contains a photo, the
+ * orchestrator resolves the file URL and hands the agent a synthetic
+ * text message naming the URL + caption. The conversational agent then
+ * calls `parse_label({ imageUrl, caption })` itself as a tool inside
+ * the turn — vision attribution lands on the `ash.turn` span instead
+ * of a sidecar pre-call.
+ *
+ * Earlier iterations of this orchestrator (#43 item 1, commit f1f81ee)
+ * called `parseLabel` directly here BEFORE the agent ran, then folded
+ * the parsed fields into a synthetic `[label parsed] …` message. That
+ * worked but hid the vision call from Vercel Agent Runs (the parse
+ * cost + tokens never showed up on the turn row). Promoting the call
+ * to an agent-invoked tool keeps the conversational model (Gemini
+ * Flash) off the FilePart — the agent sees only the structured text
+ * shim plus the `parse_label` tool's schema — while attributing the
+ * vision cost where it actually lives.
+ *
+ * Low-confidence parses still trigger a confirmation step: the agent
+ * inspects the tool's `confidence` field and asks the holder to confirm
+ * before calling `register_package`. That responsibility is documented
+ * in `agent/instructions.md` Flow 1 (photo path).
  *
  * @see lib/telegram-channel/verify.ts   — header check (same primitive)
  * @see lib/telegram-channel/inbound.ts  — payload → canonical message
@@ -55,8 +65,7 @@
 
 import type { Session } from "experimental-ash/channels";
 
-import { PRIMARY_MODEL as PARSE_LABEL_PRIMARY_MODEL } from "../../agent/tools/parse_label.js";
-import { emitTrace, runWithTrace } from "../trace.js";
+import { emitTrace } from "../trace.js";
 import {
   extractInboundCallback,
   extractInboundMessage,
@@ -105,9 +114,10 @@ export interface ProcessUpdateDeps {
    * without importing the runtime — the spike's `RouteHandlerArgs`
    * passes the real function through verbatim.
    *
-   * Always a plain `string`: photo updates are parsed via `parseLabel`
-   * before this is called and the result is folded into a synthetic
-   * text message (#43 item 1).
+   * Always a plain `string`: photo updates produce a synthetic message
+   * naming the resolved file URL + caption. The conversational agent
+   * reads the URL and calls `parse_label` as a tool inside its turn
+   * (#79) — the vision call no longer happens in the orchestrator.
    */
   readonly sendToAsh: (
     message: string,
@@ -130,47 +140,19 @@ export interface ProcessUpdateDeps {
   readonly drainSession: (session: Session, chatId: number) => Promise<void>;
   /**
    * Resolves a Telegram `file_id` (from `photo[]`) into a publicly-
-   * fetchable HTTPS URL on the Telegram file CDN. Wired by the factory
-   * to `getTelegramFileUrl(token, id)` with the closure-captured token;
+   * fetchable HTTPS URL the conversational agent can hand to the
+   * `parse_label` tool. Wired by the factory to `buildFileProxyUrl(...)`;
    * tests pass a spy.
    *
-   * The URL embeds the bot token — that was the original concern in
-   * #41, which we tried to address by switching to inline bytes. But
-   * the Vercel AI Gateway client converts inline `Uint8Array` →
-   * `data:image/jpeg;base64,...` URI, and the Gateway *server* rejects
-   * `data:` URIs with "Unsupported file URI type". The supported
-   * shape on the Gateway is an actual HTTP(S) URL it can fetch
-   * server-side. We accept the token-in-URL exposure because the URL
-   * never reaches end users — it's only handed to the Gateway for a
-   * one-shot server-to-server fetch, and Telegram's file URLs expire
-   * in ~1h. If defense-in-depth becomes important, swap to a Vercel
-   * Blob proxy here (upload bytes once, hand the Blob URL to the
-   * Gateway).
+   * The production wiring routes through the channel's own
+   * `/api/telegram-file/:id` proxy rather than the raw Telegram CDN —
+   * the proxy rewrites `application/octet-stream` to `image/*` so the
+   * AI Gateway server's content-type validation accepts the fetched
+   * bytes (see `lib/telegram-channel/file-proxy.ts` for the history).
+   * The orchestrator only cares that it gets back an HTTPS URL it can
+   * fold into the synthetic agent message.
    */
   readonly getFileUrl: (fileId: string) => Promise<string>;
-  /**
-   * Vision parser for shipping-label photos. Wired by the factory to
-   * `agent/tools/parse_label.ts`'s `execute({ imageUrl, caption })`.
-   * The orchestrator calls this exactly once per inbound photo
-   * update; the result is folded into a synthetic text message the
-   * conversational agent reads as if the user had typed it.
-   *
-   * Throws when the underlying model + fallback both fail — the
-   * orchestrator's catch logs the error and falls back to a generic
-   * "I received a photo but couldn't read it" prompt so the agent
-   * can ask the holder to retype the recipient.
-   */
-  readonly parseLabel: (input: {
-    imageUrl: string;
-    caption?: string;
-  }) => Promise<{
-    carrier: string;
-    trackingNumber?: string;
-    recipientName?: string;
-    recipientHouseNumber?: string;
-    confidence: "high" | "medium" | "low";
-    reason: string;
-  } | null>;
   /**
    * Acks a `callback_query` so the Telegram client clears the tap
    * spinner. Optional `text` shows a brief toast to the tapper —
@@ -422,11 +404,18 @@ async function handleCallbackQuery(
 }
 
 /**
- * Photo path: resolve the file URL, parse the label via the vision tool,
- * and produce a synthetic text message the conversational agent reads
- * as if the user typed it. Tolerates failure at every step — the
- * agent's final-resort message tells it a photo arrived but couldn't
- * be parsed, so it can ask the holder to retype the recipient.
+ * Photo path: resolve the file URL and hand the agent a synthetic
+ * message naming the URL + caption. The conversational agent reads
+ * this as the user's intent and calls `parse_label({ imageUrl, caption })`
+ * itself as a tool, keeping the vision cost attributed to the
+ * `ash.turn` span (#79).
+ *
+ * Tolerates a `getFileUrl` failure: if the URL can't be resolved (Bot
+ * API 404, network blip), the synthetic message tells the agent the
+ * photo arrived but the URL is gone, and the agent asks the holder
+ * to type the recipient details. The vision tool itself runs inside
+ * the turn — its own try/catch handles primary→fallback retry and
+ * surfaces errors via the diagram.
  */
 async function buildSyntheticPhotoMessage(
   inbound: TelegramInboundMessage,
@@ -441,79 +430,41 @@ async function buildSyntheticPhotoMessage(
   const captionText = inbound.text.length > 0 ? inbound.text : undefined;
   const captionForAgent = captionText ?? "(no caption)";
 
-  let parsed: Awaited<ReturnType<ProcessUpdateDeps["parseLabel"]>> = null;
+  let imageUrl: string | null;
   try {
-    const imageUrl = await deps.getFileUrl(fileId);
-    // Vision call boundary — the diagram lights up the parse_label box
-    // for the duration of the call and updates the box's sub-label to
-    // the active model name. The tool itself fires
-    // `parse_label.primary_failed` + `parse_label.fallback_start` if the
-    // primary model errors, so the diagram renders the retry visual
-    // (#60). `model` extras feed the sub-label updater on the page.
-    emitTrace("parse_label", "start", {
-      model: PARSE_LABEL_PRIMARY_MODEL,
-    });
-    parsed = await deps.parseLabel({
-      imageUrl,
-      caption: captionText,
-    });
-    emitTrace("parse_label", "end");
-    // Log every successful parse so we can tell apart "model never got
-    // called" from "model returned confidence=low with no recipientName".
-    // URL excluded from the log (contains the bot token); only the
-    // structured output and chatId.
-    console.info(
-      "[parse_label] ok for chatId",
-      inbound.chatId,
-      "result:",
-      parsed,
-    );
+    imageUrl = await deps.getFileUrl(fileId);
   } catch (err) {
-    // Don't crash the turn — the agent has a "couldn't parse" branch that
-    // asks the holder to retype. But DO log: silent failure here is what
-    // hid Gateway model/auth errors during #43 item 1 rollout, so every
-    // photo turn that ends in "couldn't read the label" now leaves a trail.
+    // Don't crash the turn — the agent can still ask the holder to
+    // retype the recipient. But DO log: silent failure here would
+    // mask Bot API auth issues / quota problems that need ops attention.
     console.error(
-      "[parse_label] failed for chatId",
+      "[process-update] getFileUrl failed for chatId",
       inbound.chatId,
-      "mediaType-via-fetch (sanitised) — error:",
-      err instanceof Error ? { name: err.name, message: err.message, stack: err.stack } : err,
+      "fileId",
+      fileId,
+      "error:",
+      err instanceof Error
+        ? { name: err.name, message: err.message, stack: err.stack }
+        : err,
     );
-    // Surface the failure on the diagram too. #60 renders this as the
-    // red-flash terminal-failure visual; the V1 engine just stops
-    // animating the parse_label box and lets the trace move on.
-    emitTrace("parse_label", "error");
-    parsed = null;
+    imageUrl = null;
   }
 
-  if (parsed === null) {
+  if (imageUrl === null) {
     return [
-      "[photo received, label could not be parsed]",
+      "[photo received, file url could not be resolved]",
       `caption: ${captionForAgent}`,
       "Please ask the holder (in their language) to type the recipient's name and house number so the package can be registered.",
     ].join(" ");
   }
 
-  const parts: string[] = ["[label parsed]"];
-  parts.push(`carrier=${parsed.carrier}`);
-  if (parsed.recipientName) {
-    parts.push(`recipient=${parsed.recipientName}`);
-  }
-  if (parsed.recipientHouseNumber) {
-    parts.push(`house=${parsed.recipientHouseNumber}`);
-  }
-  if (parsed.trackingNumber) {
-    parts.push(`tracking=${parsed.trackingNumber}`);
-  }
-  parts.push(`confidence=${parsed.confidence}`);
-  parts.push(`caption='${captionForAgent}'`);
-
-  let synthetic = parts.join(" ");
-  if (parsed.confidence === "low") {
-    synthetic +=
-      " — please confirm with the holder before registering (the recipient name may be wrong).";
-  }
-  return synthetic;
+  // The agent reads this as the user's intent: a photo arrived, here's
+  // the URL, here's any caption — call `parse_label` to extract the
+  // structured fields before continuing with the rest of Flow 1.
+  // Caption is wrapped in single quotes (escaped via doubling) so
+  // captions containing spaces still parse cleanly as one field.
+  const escapedCaption = captionForAgent.replace(/'/g, "''");
+  return `[photo received] file_url=${imageUrl} caption='${escapedCaption}'`;
 }
 
 /**

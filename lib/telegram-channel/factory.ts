@@ -35,7 +35,6 @@
 
 import { defineChannel, GET, POST } from "experimental-ash/channels";
 
-import parseLabelTool from "../../agent/tools/parse_label.js";
 import {
   getPackage,
   getSessionIdForChat,
@@ -180,29 +179,6 @@ export function telegramChannel(config: TelegramChannelConfig) {
               },
               getFileUrl: async (fileId) =>
                 buildFileProxyUrl(origin, fileId, webhookSecret),
-              parseLabel: async (input) => {
-                // No silent catch: errors propagate to process-update.ts's
-                // catch which logs with stack + chatId. A silent `return
-                // null` here hid an entire failure chain in production
-                // (mediaType=application/octet-stream → provider reject →
-                // primary throw → fallback throw → primary rethrow →
-                // silenced by this catch → null → "couldn't read" reply).
-                const execute = parseLabelTool.execute as (
-                  input: unknown,
-                  options: unknown,
-                ) => Promise<{
-                  carrier: string;
-                  trackingNumber?: string;
-                  recipientName?: string;
-                  recipientHouseNumber?: string;
-                  confidence: "high" | "medium" | "low";
-                  reason: string;
-                }>;
-                return execute(input, {
-                  toolCallId: `parse_label:${Date.now()}`,
-                  messages: [],
-                });
-              },
               answerCallback: (callbackId, text) =>
                 answerCallbackQuery(token, callbackId, text),
               stripKeyboard: (chatId, messageId) =>
