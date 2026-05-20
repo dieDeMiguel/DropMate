@@ -64,23 +64,18 @@ interface BuiltDeps {
   setSessionIdForChat: ReturnType<typeof vi.fn>;
   drainSession: ReturnType<typeof vi.fn>;
   getFileUrl: ReturnType<typeof vi.fn>;
-  parseLabel: ReturnType<typeof vi.fn>;
   answerCallback: ReturnType<typeof vi.fn>;
   stripKeyboard: ReturnType<typeof vi.fn>;
   getPackageRecipientId: ReturnType<typeof vi.fn>;
   recordTelegramObservation: ReturnType<typeof vi.fn>;
+  setTriggerAttribute: ReturnType<typeof vi.fn>;
 }
-
-type ParsedLabel = NonNullable<
-  Awaited<ReturnType<ProcessUpdateDeps["parseLabel"]>>
->;
 
 function buildDeps(overrides: {
   existingSessionId?: string | null;
   session?: Session;
   expectedSecret?: string | undefined;
   fileUrl?: string;
-  parsedLabel?: ParsedLabel | null;
   packageRecipientId?: string | null;
 } = {}): BuiltDeps {
   const session = overrides.session ?? makeSession("sess_new");
@@ -97,19 +92,6 @@ function buildDeps(overrides: {
       overrides.fileUrl ??
         "https://api.telegram.org/file/bot111:AAA/photos/file_42.jpg",
     );
-  const defaultParsedLabel: ParsedLabel = {
-    carrier: "DHL",
-    recipientName: "Anna-Sophie Meyer",
-    recipientHouseNumber: "92",
-    trackingNumber: "00340434161094021899",
-    confidence: "high",
-    reason: "all fields legible",
-  };
-  const parseLabel = vi
-    .fn()
-    .mockResolvedValue(
-      "parsedLabel" in overrides ? overrides.parsedLabel : defaultParsedLabel,
-    );
   const answerCallback = vi.fn().mockResolvedValue(undefined);
   const stripKeyboard = vi.fn().mockResolvedValue(undefined);
   const getPackageRecipientId = vi
@@ -118,6 +100,7 @@ function buildDeps(overrides: {
       "packageRecipientId" in overrides ? overrides.packageRecipientId : null,
     );
   const recordTelegramObservation = vi.fn().mockResolvedValue(undefined);
+  const setTriggerAttribute = vi.fn();
   return {
     sendToAsh,
     waitUntil,
@@ -125,11 +108,11 @@ function buildDeps(overrides: {
     setSessionIdForChat,
     drainSession,
     getFileUrl,
-    parseLabel,
     answerCallback,
     stripKeyboard,
     getPackageRecipientId,
     recordTelegramObservation,
+    setTriggerAttribute,
     deps: {
       expectedSecret:
         "expectedSecret" in overrides ? overrides.expectedSecret : SECRET,
@@ -139,11 +122,11 @@ function buildDeps(overrides: {
       setSessionIdForChat,
       drainSession,
       getFileUrl,
-      parseLabel,
       answerCallback,
       stripKeyboard,
       getPackageRecipientId,
       recordTelegramObservation,
+      setTriggerAttribute,
     },
   };
 }
@@ -300,19 +283,10 @@ describe("processInboundTelegramUpdate", () => {
     });
   });
 
-  it("parses the label via parseLabel and forwards a synthetic text message naming the extracted fields", async () => {
+  it("hands the agent a synthetic [photo received] message naming the resolved file URL + caption (#79)", async () => {
     const fileUrl =
       "https://api.telegram.org/file/bot111:AAA/photos/file_99.jpg";
-    const { deps, sendToAsh, getFileUrl, parseLabel } = buildDeps({
-      fileUrl,
-      parsedLabel: {
-        carrier: "DHL",
-        recipientName: "Natascha Elter",
-        recipientHouseNumber: "88",
-        confidence: "high",
-        reason: "label legible",
-      },
-    });
+    const { deps, sendToAsh, getFileUrl } = buildDeps({ fileUrl });
 
     const update = {
       update_id: 1,
@@ -332,28 +306,21 @@ describe("processInboundTelegramUpdate", () => {
     const res = await processInboundTelegramUpdate(makeRequest(update), deps);
     expect(res.status).toBe(204);
 
+    // The largest photo is the one the agent should pass to `parse_label`.
     expect(getFileUrl).toHaveBeenCalledWith("large");
-
-    // parseLabel receives the URL + caption — no bytes, no mediaType. The
-    // Gateway server fetches the URL itself; passing inline bytes would
-    // make the Gateway client emit a `data:` URI the server rejects.
-    expect(parseLabel).toHaveBeenCalledTimes(1);
-    const parseArgs = parseLabel.mock.calls[0]![0];
-    expect(parseArgs.imageUrl).toBe(fileUrl);
-    expect(parseArgs.caption).toBe("Paket für Natascha");
-    expect(parseArgs.imageBase64).toBeUndefined();
-    expect(parseArgs.mediaType).toBeUndefined();
 
     const [message, options] = sendToAsh.mock.calls[0]!;
     expect(typeof message).toBe("string");
-    expect(message).toContain("[label parsed]");
-    expect(message).toContain("carrier=DHL");
-    expect(message).toContain("recipient=Natascha Elter");
-    expect(message).toContain("house=88");
-    expect(message).toContain("confidence=high");
+    // New shape: just the URL + caption. The agent is responsible for
+    // calling `parse_label` itself inside its turn (#79).
+    expect(message).toContain("[photo received]");
+    expect(message).toContain(`file_url=${fileUrl}`);
     expect(message).toContain("caption='Paket für Natascha'");
-    // High confidence → no "please confirm" suffix.
-    expect(message).not.toMatch(/please confirm/);
+    // Critically: no [label parsed] / no carrier= / no confidence= —
+    // the orchestrator no longer pre-parses the label.
+    expect(message).not.toContain("[label parsed]");
+    expect(message).not.toMatch(/\bcarrier=/);
+    expect(message).not.toMatch(/\bconfidence=/);
 
     expect(options.state).toEqual<TelegramChannelState>({
       chatId: 42,
@@ -363,8 +330,8 @@ describe("processInboundTelegramUpdate", () => {
     });
   });
 
-  it("substitutes a placeholder caption when a photo arrives without text", async () => {
-    const { deps, sendToAsh, getFileUrl, parseLabel } = buildDeps();
+  it("substitutes a placeholder caption when a photo arrives without text (#79)", async () => {
+    const { deps, sendToAsh, getFileUrl } = buildDeps();
 
     const update = {
       update_id: 2,
@@ -380,45 +347,39 @@ describe("processInboundTelegramUpdate", () => {
     await processInboundTelegramUpdate(makeRequest(update), deps);
 
     expect(getFileUrl).toHaveBeenCalledWith("only");
-    // No caption passed to parseLabel when the user didn't send one.
-    const parseArgs = parseLabel.mock.calls[0]![0];
-    expect(parseArgs.caption).toBeUndefined();
 
     const [message] = sendToAsh.mock.calls[0]!;
     expect(typeof message).toBe("string");
     expect(message).toContain("caption='(no caption)'");
   });
 
-  it("appends a please-confirm suffix when the vision tool returns low confidence", async () => {
-    const { deps, sendToAsh } = buildDeps({
-      parsedLabel: {
-        carrier: "unknown",
-        recipientName: "M?yer",
-        confidence: "low",
-        reason: "recipient name partially obscured",
-      },
-    });
+  it("escapes single quotes inside captions so the agent can parse one consistent field shape", async () => {
+    const { deps, sendToAsh } = buildDeps();
 
     const update = {
       update_id: 3,
       message: {
         message_id: 3,
         date: 1,
+        caption: "it's a fragile box",
         chat: { id: 42, type: "private" },
         from: { id: 99, is_bot: false, first_name: "T" },
-        photo: [{ file_id: "only", file_size: 100, width: 90, height: 90 }],
+        photo: [{ file_id: "f", file_size: 100, width: 90, height: 90 }],
       },
     };
 
     await processInboundTelegramUpdate(makeRequest(update), deps);
 
     const [message] = sendToAsh.mock.calls[0]!;
-    expect(message).toContain("confidence=low");
-    expect(message).toMatch(/please confirm/i);
+    // Embedded single quote is doubled so the wrapper quotes still delimit.
+    expect(message).toContain("caption='it''s a fragile box'");
   });
 
-  it("falls back to a generic 'photo received, label could not be parsed' message when parseLabel returns null", async () => {
-    const { deps, sendToAsh, parseLabel } = buildDeps({ parsedLabel: null });
+  it("falls back to a 'file url could not be resolved' message when getFileUrl throws (#79)", async () => {
+    const { deps, sendToAsh, getFileUrl } = buildDeps();
+    getFileUrl.mockRejectedValueOnce(new Error("Bot API 404"));
+    // Silence the expected error log so test output stays clean.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const update = {
       update_id: 4,
@@ -432,90 +393,22 @@ describe("processInboundTelegramUpdate", () => {
       },
     };
 
-    await processInboundTelegramUpdate(makeRequest(update), deps);
+    try {
+      await processInboundTelegramUpdate(makeRequest(update), deps);
+    } finally {
+      errSpy.mockRestore();
+    }
 
-    expect(parseLabel).toHaveBeenCalledTimes(1);
     const [message] = sendToAsh.mock.calls[0]!;
-    expect(message).toContain("[photo received, label could not be parsed]");
+    expect(message).toContain(
+      "[photo received, file url could not be resolved]",
+    );
     expect(message).toContain("caption: kann das jemand lesen?");
-    expect(message).toMatch(/retype|type the recipient/i);
+    expect(message).toMatch(/type the recipient/i);
   });
 
-  it("falls back to the parse-failure message when parseLabel throws", async () => {
-    const { deps, sendToAsh, parseLabel } = buildDeps();
-    parseLabel.mockRejectedValueOnce(new Error("vision provider down"));
-
-    const update = {
-      update_id: 5,
-      message: {
-        message_id: 5,
-        date: 1,
-        chat: { id: 42, type: "private" },
-        from: { id: 99, is_bot: false, first_name: "T" },
-        photo: [{ file_id: "f", file_size: 100, width: 90, height: 90 }],
-      },
-    };
-
-    await processInboundTelegramUpdate(makeRequest(update), deps);
-
-    const [message] = sendToAsh.mock.calls[0]!;
-    expect(message).toContain("[photo received, label could not be parsed]");
-  });
-
-  it("falls back to the parse-failure message when getFileUrl throws", async () => {
-    const { deps, sendToAsh, parseLabel, getFileUrl } = buildDeps();
-    getFileUrl.mockRejectedValueOnce(new Error("Bot API 404"));
-
-    const update = {
-      update_id: 6,
-      message: {
-        message_id: 6,
-        date: 1,
-        chat: { id: 42, type: "private" },
-        from: { id: 99, is_bot: false, first_name: "T" },
-        photo: [{ file_id: "f", file_size: 100, width: 90, height: 90 }],
-      },
-    };
-
-    await processInboundTelegramUpdate(makeRequest(update), deps);
-
-    expect(parseLabel).not.toHaveBeenCalled();
-    const [message] = sendToAsh.mock.calls[0]!;
-    expect(message).toContain("[photo received, label could not be parsed]");
-  });
-
-  it("omits absent label fields from the synthetic message", async () => {
-    const { deps, sendToAsh } = buildDeps({
-      parsedLabel: {
-        carrier: "DHL",
-        // No recipientName, no recipientHouseNumber, no trackingNumber.
-        confidence: "medium",
-        reason: "only carrier visible",
-      },
-    });
-
-    const update = {
-      update_id: 7,
-      message: {
-        message_id: 7,
-        date: 1,
-        chat: { id: 42, type: "private" },
-        from: { id: 99, is_bot: false, first_name: "T" },
-        photo: [{ file_id: "f", file_size: 100, width: 90, height: 90 }],
-      },
-    };
-
-    await processInboundTelegramUpdate(makeRequest(update), deps);
-
-    const [message] = sendToAsh.mock.calls[0]!;
-    expect(message).toContain("carrier=DHL");
-    expect(message).not.toContain("recipient=");
-    expect(message).not.toContain("house=");
-    expect(message).not.toContain("tracking=");
-  });
-
-  it("does not call getFileUrl or parseLabel on text-only updates", async () => {
-    const { deps, getFileUrl, parseLabel } = buildDeps();
+  it("does not call getFileUrl on text-only updates (#79 regression: no spurious vision plumbing)", async () => {
+    const { deps, getFileUrl } = buildDeps();
 
     await processInboundTelegramUpdate(
       makeRequest(dmUpdate({ chatId: 5, text: "hi", fromUserId: 99 })),
@@ -523,7 +416,6 @@ describe("processInboundTelegramUpdate", () => {
     );
 
     expect(getFileUrl).not.toHaveBeenCalled();
-    expect(parseLabel).not.toHaveBeenCalled();
   });
 
   it("records a KnownTelegramUser observation for every actionable inbound message (#45 passive directory)", async () => {
@@ -1057,7 +949,7 @@ describe("processInboundTelegramUpdate — V1 per-stage trace (#59)", () => {
     }
   });
 
-  it("emits parse_label.start/end around the vision call on a photo turn", async () => {
+  it("does NOT emit parse_label.start/end on a photo turn — vision moved to the tool inside the agent's turn (#79)", async () => {
     const photoUpdate = {
       update_id: 2,
       message: {
@@ -1074,46 +966,150 @@ describe("processInboundTelegramUpdate — V1 per-stage trace (#59)", () => {
       processInboundTelegramUpdate(makeRequest(photoUpdate), deps),
     );
 
-    expect(stages).toContain("parse_label.start");
-    expect(stages).toContain("parse_label.end");
+    // Before #79 the orchestrator called `parseLabel` directly and
+    // bracketed it with parse_label.start/end. With the vision call
+    // moved to the agent-invoked `parse_label` tool, the live-diagram
+    // sees the call via the outbound drain's generic `tool.start/end`
+    // events instead; the orchestrator just resolves the URL and
+    // hands the agent a synthetic message.
+    expect(stages).not.toContain("parse_label.start");
+    expect(stages).not.toContain("parse_label.end");
+    // But the orchestrator-level bookends still fire so the diagram
+    // knows when the turn started + ended.
+    expect(stages).toContain("orchestrator.start");
+    expect(stages).toContain("orchestrator.end");
+    expect(stages).toContain("ash_send.start");
+    expect(stages).toContain("ash_send.end");
+  });
+});
+
+describe("processInboundTelegramUpdate — trigger attribute (#74)", () => {
+  /**
+   * The three inbound shapes the channel routes each get a distinct
+   * `trigger` value so Vercel's Agent Runs view can populate the
+   * Trigger column with finer granularity than the channel's
+   * `kindHint: "telegram"` alone provides. The attribute is set BEFORE
+   * `sendToAsh` so the value lands on the active OTel span ahead of
+   * the turn span being opened by the harness.
+   */
+
+  it("sets trigger=telegram-message for a plain text DM", async () => {
+    const { deps, setTriggerAttribute, sendToAsh } = buildDeps();
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({ chatId: 42, text: "hi", fromUserId: 99, languageCode: "de" }),
+      ),
+      deps,
+    );
+
+    expect(setTriggerAttribute).toHaveBeenCalledTimes(1);
+    expect(setTriggerAttribute).toHaveBeenCalledWith("telegram-message");
+    // Fires before sendToAsh so the value lands on the active span
+    // ahead of the turn span being opened.
+    const setOrder = setTriggerAttribute.mock.invocationCallOrder[0]!;
+    const sendOrder = sendToAsh.mock.invocationCallOrder[0]!;
+    expect(setOrder).toBeLessThan(sendOrder);
   });
 
-  it("emits parse_label.error when the vision tool throws (no parse_label.end)", async () => {
+  it("sets trigger=telegram-callback for an inline-keyboard button tap", async () => {
+    const { deps, setTriggerAttribute, sendToAsh } = buildDeps({
+      existingSessionId: "sess_cb",
+    });
+
+    const cbUpdate = {
+      update_id: 200,
+      callback_query: {
+        id: "cb_t",
+        data: "confirm_pickup:pkg_1",
+        from: {
+          id: 99,
+          is_bot: false,
+          first_name: "T",
+        },
+        message: {
+          message_id: 555,
+          chat: { id: 42, type: "private" },
+        },
+      },
+    };
+
+    await processInboundTelegramUpdate(makeRequest(cbUpdate), deps);
+
+    expect(setTriggerAttribute).toHaveBeenCalledTimes(1);
+    expect(setTriggerAttribute).toHaveBeenCalledWith("telegram-callback");
+    const setOrder = setTriggerAttribute.mock.invocationCallOrder[0]!;
+    const sendOrder = sendToAsh.mock.invocationCallOrder[0]!;
+    expect(setOrder).toBeLessThan(sendOrder);
+  });
+
+  it("sets trigger=telegram-photo for a photo update (with or without caption)", async () => {
+    const { deps, setTriggerAttribute, sendToAsh } = buildDeps();
+
     const photoUpdate = {
-      update_id: 3,
+      update_id: 300,
       message: {
-        message_id: 3,
+        message_id: 1,
         date: 1,
+        caption: "Paket für Natascha",
         chat: { id: 42, type: "private" },
-        from: { id: 99, is_bot: false, first_name: "Test" },
+        from: { id: 99, is_bot: false, first_name: "T", language_code: "de" },
         photo: [
-          { file_id: "AgAC2", file_unique_id: "u2", width: 320, height: 240, file_size: 100 },
+          { file_id: "small", file_size: 100, width: 90, height: 90 },
+          { file_id: "large", file_size: 5000, width: 1280, height: 1280 },
         ],
       },
     };
-    const { runWithTrace, subscribe } = await import("../trace.js");
-    const stages: string[] = [];
-    const unsubscribe = subscribe((e) => {
-      if (e.traceId !== "trace_parse_err") return;
-      stages.push(`${e.stage}.${e.phase}`);
-    });
-    try {
-      const built = buildDeps();
-      built.parseLabel.mockRejectedValueOnce(new Error("vision down"));
-      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-      try {
-        await runWithTrace(
-          { traceId: "trace_parse_err", kind: "text" },
-          () => processInboundTelegramUpdate(makeRequest(photoUpdate), built.deps),
-        );
-      } finally {
-        errorSpy.mockRestore();
-      }
-      expect(stages).toContain("parse_label.start");
-      expect(stages).toContain("parse_label.error");
-      expect(stages).not.toContain("parse_label.end");
-    } finally {
-      unsubscribe();
-    }
+
+    await processInboundTelegramUpdate(makeRequest(photoUpdate), deps);
+
+    expect(setTriggerAttribute).toHaveBeenCalledTimes(1);
+    expect(setTriggerAttribute).toHaveBeenCalledWith("telegram-photo");
+    const setOrder = setTriggerAttribute.mock.invocationCallOrder[0]!;
+    const sendOrder = sendToAsh.mock.invocationCallOrder[0]!;
+    expect(setOrder).toBeLessThan(sendOrder);
+  });
+
+  it("does not call setTriggerAttribute on a malformed / no-message update (no turn started)", async () => {
+    const { deps, setTriggerAttribute } = buildDeps();
+
+    await processInboundTelegramUpdate(
+      makeRequest({ update_id: 7, edited_message: { message_id: 1 } }),
+      deps,
+    );
+
+    expect(setTriggerAttribute).not.toHaveBeenCalled();
+  });
+
+  it("does not call setTriggerAttribute when the secret-token header is wrong", async () => {
+    const { deps, setTriggerAttribute } = buildDeps();
+
+    const res = await processInboundTelegramUpdate(
+      makeRequest(dmUpdate({ chatId: 1, text: "hi" }), "wrong"),
+      deps,
+    );
+
+    expect(res.status).toBe(401);
+    expect(setTriggerAttribute).not.toHaveBeenCalled();
+  });
+
+  it("tolerates a missing setTriggerAttribute dep without throwing (optional)", async () => {
+    const built = buildDeps();
+    // Strip the attribute setter — the orchestrator must continue
+    // working unchanged when callers opt out of OTel attribution.
+    const depsWithoutAttr: ProcessUpdateDeps = {
+      ...built.deps,
+      setTriggerAttribute: undefined,
+    };
+
+    const res = await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({ chatId: 42, text: "hi", fromUserId: 99 }),
+      ),
+      depsWithoutAttr,
+    );
+
+    expect(res.status).toBe(204);
+    expect(built.sendToAsh).toHaveBeenCalledTimes(1);
   });
 });

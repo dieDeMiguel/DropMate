@@ -35,7 +35,6 @@
 
 import { defineChannel, GET, POST } from "experimental-ash/channels";
 
-import parseLabelTool from "../../agent/tools/parse_label.js";
 import {
   getPackage,
   getSessionIdForChat,
@@ -60,6 +59,7 @@ import {
   processInboundTelegramUpdate,
   type TelegramChannelState,
 } from "./process-update.js";
+import { setTelegramTriggerAttribute } from "./trigger-attribute.js";
 import { handleTraceSseRequest } from "./trace-routes.js";
 
 /**
@@ -101,6 +101,14 @@ export function telegramChannel(config: TelegramChannelConfig) {
     TelegramChannelState,
     { chatId: number; fromUserId: number | null }
   >({
+    // Framework-canonical channel attribution. Vercel's Agent Runs view
+    // and the dashboard's project-overview card both read this; without
+    // it every row shows `—` in the Trigger column (`unknown` adapter
+    // bucket). The finer-grained `telegram-message` / `telegram-callback`
+    // / `telegram-photo` distinctions are layered on top in
+    // process-update.ts via `setTriggerAttribute` so downstream filters
+    // can tell text DMs apart from button taps and photo uploads.
+    kindHint: "telegram",
     state: undefined as unknown as TelegramChannelState,
     context: (state) => ({ chatId: state.chatId, fromUserId: state.fromUserId }),
     routes: [
@@ -171,29 +179,6 @@ export function telegramChannel(config: TelegramChannelConfig) {
               },
               getFileUrl: async (fileId) =>
                 buildFileProxyUrl(origin, fileId, webhookSecret),
-              parseLabel: async (input) => {
-                // No silent catch: errors propagate to process-update.ts's
-                // catch which logs with stack + chatId. A silent `return
-                // null` here hid an entire failure chain in production
-                // (mediaType=application/octet-stream → provider reject →
-                // primary throw → fallback throw → primary rethrow →
-                // silenced by this catch → null → "couldn't read" reply).
-                const execute = parseLabelTool.execute as (
-                  input: unknown,
-                  options: unknown,
-                ) => Promise<{
-                  carrier: string;
-                  trackingNumber?: string;
-                  recipientName?: string;
-                  recipientHouseNumber?: string;
-                  confidence: "high" | "medium" | "low";
-                  reason: string;
-                }>;
-                return execute(input, {
-                  toolCallId: `parse_label:${Date.now()}`,
-                  messages: [],
-                });
-              },
               answerCallback: (callbackId, text) =>
                 answerCallbackQuery(token, callbackId, text),
               stripKeyboard: (chatId, messageId) =>
@@ -205,6 +190,7 @@ export function telegramChannel(config: TelegramChannelConfig) {
               recordTelegramObservation: async (input) => {
                 await upsertKnownTelegramUser(input);
               },
+              setTriggerAttribute: setTelegramTriggerAttribute,
             }),
           );
         },
