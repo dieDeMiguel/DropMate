@@ -7,6 +7,12 @@
       "skillPath": "skills/use-ai-sdk/SKILL.md",
       "computedHash": "2249889eb47ef0f61c4dba4cf2afe01c1c8dd793bb4c24230347c1ab909bb7dd"
     },
+    "ash-agent": {
+      "source": "vercel/ash",
+      "sourceType": "github",
+      "skillPath": "skills/agent/SKILL.md",
+      "computedHash": "5c232e12d5552573adaba69b6ec1d3acc1d1004d493c2396405ff86108f681fa"
+    },
     "chat-sdk": {
       "source": "vercel/chat",
       "sourceType": "github",
