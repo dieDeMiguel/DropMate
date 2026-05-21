@@ -258,14 +258,37 @@ export interface AcceptReceptionRequestResult {
  * channel-side scope check already gates the tapper, but a lib-level
  * guard prevents a cross-street accept if the caller is ever pointed
  * at a stale request id from a different street).
+ *
+ * v2.1 Bug 3 (#95): each step logs `[acceptReceptionRequest] <step>`
+ * before its await so a thrown error (or downstream rejection) gives
+ * an unambiguous trail in Vercel logs about which subroutine failed.
+ * The live trace at #92 surfaced this function throwing under conditions
+ * the truncated log made impossible to root-cause; per-step labels
+ * close that gap so the next failure shows exactly which call hiccupped
+ * (e.g. `getReceptionRequest` vs `setReceptionRequest` vs
+ * `getResident`) without needing to bisect the function.
  */
 export async function acceptReceptionRequest(
   caller: Resident,
   input: AcceptReceptionRequestInput,
 ): Promise<AcceptReceptionRequestResult> {
+  const logCtx = {
+    callerPlatformId: caller.platformId,
+    callerStreet: caller.street,
+    requestId: input.requestId ?? "(none — picking most-recent open)",
+  };
+
   let target: ReceptionRequest | null;
   if (input.requestId) {
-    target = await getReceptionRequest(input.requestId);
+    try {
+      console.info(
+        "[acceptReceptionRequest] step=getReceptionRequest",
+        logCtx,
+      );
+      target = await getReceptionRequest(input.requestId);
+    } catch (err) {
+      throw wrapStepError("getReceptionRequest", logCtx, err);
+    }
     if (!target) {
       throw new Error(
         `acceptReceptionRequest: no reception request found for id=${input.requestId}.`,
@@ -282,7 +305,16 @@ export async function acceptReceptionRequest(
       );
     }
   } else {
-    const all = await listReceptionRequestsForStreet(caller.street);
+    let all: readonly ReceptionRequest[];
+    try {
+      console.info(
+        "[acceptReceptionRequest] step=listReceptionRequestsForStreet",
+        logCtx,
+      );
+      all = await listReceptionRequestsForStreet(caller.street);
+    } catch (err) {
+      throw wrapStepError("listReceptionRequestsForStreet", logCtx, err);
+    }
     const eligible = all
       .filter((r) => r.status === "open")
       .sort((a, b) => b.createdAt - a.createdAt);
@@ -301,9 +333,33 @@ export async function acceptReceptionRequest(
     volunteerAvailability: input.availability ?? null,
     respondedAt: Date.now(),
   };
-  await setReceptionRequest(updated);
+  try {
+    console.info(
+      "[acceptReceptionRequest] step=setReceptionRequest",
+      { ...logCtx, targetId: updated.id },
+    );
+    await setReceptionRequest(updated);
+  } catch (err) {
+    throw wrapStepError("setReceptionRequest", { ...logCtx, targetId: updated.id }, err);
+  }
 
-  const requester = await getResident(updated.requesterResidentId);
+  let requester: Resident | null;
+  try {
+    console.info(
+      "[acceptReceptionRequest] step=getResident(requester)",
+      { ...logCtx, requesterResidentId: updated.requesterResidentId },
+    );
+    requester = await getResident(updated.requesterResidentId);
+  } catch (err) {
+    // Non-fatal: we already have a fallback synthesised from the
+    // request's frozen requesterName/requesterHouseNumber. Log + treat
+    // as "requester record missing".
+    console.error(
+      "[acceptReceptionRequest] getResident(requester) failed, falling back to frozen request fields",
+      { ...logCtx, requesterResidentId: updated.requesterResidentId, err: serialiseError(err) },
+    );
+    requester = null;
+  }
   const requesterSummary: RequesterSummary = requester
     ? summariseResident(requester)
     : {
@@ -320,6 +376,21 @@ export async function acceptReceptionRequest(
     platformId: caller.platformId,
   };
 
+  console.info(
+    "[acceptReceptionRequest] done",
+    {
+      ...logCtx,
+      targetId: updated.id,
+      carrier: updated.carrier,
+      hasWindow:
+        updated.expectedWindowStartAt !== undefined &&
+        updated.expectedWindowEndAt !== undefined,
+      hasGroupCard:
+        updated.groupCardChatId !== undefined &&
+        updated.groupCardMessageId !== undefined,
+    },
+  );
+
   return {
     request: updated,
     requester: requesterSummary,
@@ -327,6 +398,30 @@ export async function acceptReceptionRequest(
     groupCardChatId: updated.groupCardChatId ?? null,
     groupCardMessageId: updated.groupCardMessageId ?? null,
   };
+}
+
+function wrapStepError(
+  step: string,
+  logCtx: Readonly<Record<string, unknown>>,
+  err: unknown,
+): Error {
+  console.error(
+    `[acceptReceptionRequest] step=${step} threw`,
+    { ...logCtx, err: serialiseError(err) },
+  );
+  const cause = err instanceof Error ? err : new Error(String(err));
+  const wrapped = new Error(
+    `acceptReceptionRequest: ${step} failed: ${cause.message}`,
+    { cause },
+  );
+  return wrapped;
+}
+
+function serialiseError(err: unknown): unknown {
+  if (err instanceof Error) {
+    return { name: err.name, message: err.message, stack: err.stack };
+  }
+  return err;
 }
 
 function summariseResident(resident: Resident): {

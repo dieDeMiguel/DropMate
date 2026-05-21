@@ -1561,8 +1561,14 @@ describe("processInboundTelegramUpdate — callback_query", () => {
         "✅ angenommen von Marlene Hartmann",
       );
 
-      // Card edit + state flip both happen BEFORE the agent runs.
+      // v2.1 Bug 3 (#95): stripKeyboard now runs AFTER acceptReceptionRequest
+      // (vs before it in the v2 shape) so a thrown accept leaves the
+      // keyboard intact for a re-tap. The order is now:
+      //   accept → stripKeyboard → editGroupCard → sendToAsh.
       expect(acceptReceptionRequest.mock.invocationCallOrder[0]).toBeLessThan(
+        stripKeyboard.mock.invocationCallOrder[0]!,
+      );
+      expect(stripKeyboard.mock.invocationCallOrder[0]).toBeLessThan(
         editGroupCard.mock.invocationCallOrder[0]!,
       );
       expect(editGroupCard.mock.invocationCallOrder[0]).toBeLessThan(
@@ -1660,15 +1666,131 @@ describe("processInboundTelegramUpdate — callback_query", () => {
       expect(text).not.toContain("buzzerName=");
     });
 
-    it("falls back to an apology synthetic when getRegisteredResident returns null (gate/lookup race)", async () => {
+    it("FAILS LOUD when getRegisteredResident returns null (gate/lookup race): toast, no agent call, keyboard intact (v2.1 Bug 3 / #95)", async () => {
       const {
         deps,
         sendToAsh,
         acceptReceptionRequest,
         editGroupCard,
+        answerCallback,
+        stripKeyboard,
       } = buildDeps({
         isRegisteredResident: true, // gate admits
         registeredResident: null, // race: lookup returns null
+      });
+
+      const res = await processInboundTelegramUpdate(
+        makeRequest(
+          cbUpdate({
+            chatId: -100123,
+            messageId: 555,
+            fromUserId: 300,
+            data: "accept_reception_group:req_42",
+            chatType: "supergroup",
+            languageCode: "de",
+          }),
+        ),
+        deps,
+      );
+
+      expect(res.status).toBe(204);
+      expect(acceptReceptionRequest).not.toHaveBeenCalled();
+      expect(editGroupCard).not.toHaveBeenCalled();
+      // No agent invocation on the failure branch — the entire v2.1
+      // Bug 3 fix is that the fallback to the agent's old 5-step
+      // procedure (which reproduced the v2 chaos at #85) is gone.
+      expect(sendToAsh).not.toHaveBeenCalled();
+      // Toast in the volunteer's language. Telegram's languageCode is
+      // "de" (no stored Resident.language since the record vanished),
+      // so the German toast fires.
+      expect(answerCallback).toHaveBeenCalledWith(
+        "cb_abc",
+        "Etwas ist schiefgelaufen. Bitte erneut versuchen.",
+      );
+      // Keyboard stays intact so the volunteer can re-tap once the
+      // race/Redis hiccup clears.
+      expect(stripKeyboard).not.toHaveBeenCalled();
+    });
+
+    it("FAILS LOUD when acceptReceptionRequest throws: toast, no agent call, keyboard intact (v2.1 Bug 3 / #95)", async () => {
+      const volunteer = makeVolunteer({ language: "de" });
+      const {
+        deps,
+        sendToAsh,
+        acceptReceptionRequest,
+        editGroupCard,
+        answerCallback,
+        stripKeyboard,
+      } = buildDeps({
+        isRegisteredResident: true,
+        registeredResident: volunteer,
+      });
+      acceptReceptionRequest.mockRejectedValueOnce(
+        new Error("request already matched"),
+      );
+
+      const res = await processInboundTelegramUpdate(
+        makeRequest(
+          cbUpdate({
+            chatId: -100123,
+            messageId: 555,
+            fromUserId: 300,
+            data: "accept_reception_group:req_42",
+            chatType: "supergroup",
+          }),
+        ),
+        deps,
+      );
+
+      expect(res.status).toBe(204);
+      expect(editGroupCard).not.toHaveBeenCalled();
+      // No agent invocation — same fail-loud contract as the null-lookup
+      // branch. Even Slice 5's (#90) apology synthetic burned an Ash
+      // turn we don't need.
+      expect(sendToAsh).not.toHaveBeenCalled();
+      expect(answerCallback).toHaveBeenCalledWith(
+        "cb_abc",
+        "Etwas ist schiefgelaufen. Bitte erneut versuchen.",
+      );
+      expect(stripKeyboard).not.toHaveBeenCalled();
+    });
+
+    it("localizes the failure toast to the volunteer's stored Resident.language (en) when acceptReceptionRequest throws (v2.1 Bug 3 / #95)", async () => {
+      const englishVolunteer = makeVolunteer({ language: "en" });
+      const { deps, acceptReceptionRequest, answerCallback, sendToAsh } =
+        buildDeps({
+          isRegisteredResident: true,
+          registeredResident: englishVolunteer,
+        });
+      acceptReceptionRequest.mockRejectedValueOnce(new Error("boom"));
+
+      await processInboundTelegramUpdate(
+        makeRequest(
+          cbUpdate({
+            chatId: -100123,
+            messageId: 555,
+            fromUserId: 300,
+            // Telegram language hint deliberately wrong — stored
+            // Resident.language should win.
+            languageCode: "de",
+            data: "accept_reception_group:req_42",
+            chatType: "supergroup",
+          }),
+        ),
+        deps,
+      );
+
+      expect(answerCallback).toHaveBeenCalledWith(
+        "cb_abc",
+        "Something went wrong. Please try again.",
+      );
+      expect(sendToAsh).not.toHaveBeenCalled();
+    });
+
+    it("falls back to Telegram's languageCode when the Resident record is null and the volunteer has no stored language (v2.1 Bug 3 / #95)", async () => {
+      const { deps, answerCallback, sendToAsh } = buildDeps({
+        isRegisteredResident: true,
+        registeredResident: null, // null path; languageCode is the only signal
       });
 
       await processInboundTelegramUpdate(
@@ -1677,6 +1799,7 @@ describe("processInboundTelegramUpdate — callback_query", () => {
             chatId: -100123,
             messageId: 555,
             fromUserId: 300,
+            languageCode: "tr",
             data: "accept_reception_group:req_42",
             chatType: "supergroup",
           }),
@@ -1684,29 +1807,21 @@ describe("processInboundTelegramUpdate — callback_query", () => {
         deps,
       );
 
-      expect(acceptReceptionRequest).not.toHaveBeenCalled();
-      expect(editGroupCard).not.toHaveBeenCalled();
-      // Fallback after Slice 5 (#90): the backing tool is gone, so the
-      // synthetic just tells the agent to apologise in the volunteer's
-      // language and ask them to retry. It does NOT re-run the legacy
-      // 5-step procedure (that procedure relied on tools that no longer
-      // exist).
-      const [text] = sendToAsh.mock.calls[0]!;
-      expect(text).toMatch(/could not be processed/);
-      expect(text).toContain("req_42");
-      expect(text).toMatch(/Do NOT call any tools/);
+      expect(answerCallback).toHaveBeenCalledWith(
+        "cb_abc",
+        "Bir şeyler ters gitti. Lütfen tekrar deneyin.",
+      );
+      expect(sendToAsh).not.toHaveBeenCalled();
     });
 
-    it("falls back to an apology synthetic when acceptReceptionRequest throws", async () => {
-      const volunteer = makeVolunteer();
-      const { deps, sendToAsh, acceptReceptionRequest, editGroupCard } =
+    it("falls back to German when neither Resident.language nor Telegram languageCode is set (v2.1 Bug 3 / #95)", async () => {
+      const volunteer = makeVolunteer({ language: undefined });
+      const { deps, acceptReceptionRequest, answerCallback, sendToAsh } =
         buildDeps({
           isRegisteredResident: true,
           registeredResident: volunteer,
         });
-      acceptReceptionRequest.mockRejectedValueOnce(
-        new Error("request already matched"),
-      );
+      acceptReceptionRequest.mockRejectedValueOnce(new Error("boom"));
 
       await processInboundTelegramUpdate(
         makeRequest(
@@ -1714,6 +1829,7 @@ describe("processInboundTelegramUpdate — callback_query", () => {
             chatId: -100123,
             messageId: 555,
             fromUserId: 300,
+            // No languageCode at all.
             data: "accept_reception_group:req_42",
             chatType: "supergroup",
           }),
@@ -1721,11 +1837,50 @@ describe("processInboundTelegramUpdate — callback_query", () => {
         deps,
       );
 
+      expect(answerCallback).toHaveBeenCalledWith(
+        "cb_abc",
+        "Etwas ist schiefgelaufen. Bitte erneut versuchen.",
+      );
+      expect(sendToAsh).not.toHaveBeenCalled();
+    });
+
+    it("FAILS LOUD when getRegisteredResident throws (Redis hiccup): toast, no agent call, keyboard intact (v2.1 Bug 3 / #95)", async () => {
+      const {
+        deps,
+        sendToAsh,
+        acceptReceptionRequest,
+        editGroupCard,
+        answerCallback,
+        stripKeyboard,
+        getRegisteredResident,
+      } = buildDeps({
+        isRegisteredResident: true,
+      });
+      getRegisteredResident.mockRejectedValueOnce(new Error("redis exploded"));
+
+      const res = await processInboundTelegramUpdate(
+        makeRequest(
+          cbUpdate({
+            chatId: -100123,
+            messageId: 555,
+            fromUserId: 300,
+            languageCode: "es",
+            data: "accept_reception_group:req_42",
+            chatType: "supergroup",
+          }),
+        ),
+        deps,
+      );
+
+      expect(res.status).toBe(204);
+      expect(acceptReceptionRequest).not.toHaveBeenCalled();
       expect(editGroupCard).not.toHaveBeenCalled();
-      const [text] = sendToAsh.mock.calls[0]!;
-      expect(text).toMatch(/could not be processed/);
-      expect(text).toContain("req_42");
-      expect(text).toMatch(/Do NOT call any tools/);
+      expect(sendToAsh).not.toHaveBeenCalled();
+      expect(answerCallback).toHaveBeenCalledWith(
+        "cb_abc",
+        "Algo salió mal. Por favor inténtalo de nuevo.",
+      );
+      expect(stripKeyboard).not.toHaveBeenCalled();
     });
 
     it("still hands the agent [VOLUNTEER_ACCEPTED] when editGroupCard throws (state flip already landed)", async () => {
