@@ -36,6 +36,11 @@
  * @see lib/telegram-channel/process-update.ts — channel call site
  */
 
+import {
+  berlinClockToUnixMs,
+  berlinDayParts,
+  formatBerlinDate,
+} from "./berlin-time.js";
 import type { PackageCarrier } from "./redis.js";
 
 export interface ParsedReceiveCommand {
@@ -90,7 +95,7 @@ export function parseReceiveCommand(
   const dateOffset = matchDateOffset(stripped);
   const dayDate = berlinDayParts(now, dateOffset ?? 0);
   if (dateOffset !== null) {
-    result.expectedDate = formatYmd(dayDate);
+    result.expectedDate = formatBerlinDate(dayDate);
   }
 
   const windowMatch = stripped.match(
@@ -104,7 +109,7 @@ export function parseReceiveCommand(
       result.expectedWindowEndAt = berlinClockToUnixMs(dayDate, endH, 0);
       if (result.expectedDate === undefined) {
         // Window without a date word anchors to today.
-        result.expectedDate = formatYmd(dayDate);
+        result.expectedDate = formatBerlinDate(dayDate);
       }
     }
   }
@@ -146,79 +151,3 @@ function matchDateOffset(text: string): number | null {
   return null;
 }
 
-interface BerlinDayParts {
-  readonly year: number;
-  readonly month: number;
-  readonly day: number;
-}
-
-const BERLIN_DAY_FORMAT = new Intl.DateTimeFormat("en-US", {
-  timeZone: "Europe/Berlin",
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-});
-
-function berlinDayParts(now: number, dayOffset: number): BerlinDayParts {
-  const parts = BERLIN_DAY_FORMAT.formatToParts(new Date(now));
-  const year = Number(parts.find((p) => p.type === "year")!.value);
-  const month = Number(parts.find((p) => p.type === "month")!.value);
-  const day = Number(parts.find((p) => p.type === "day")!.value);
-  if (dayOffset === 0) return { year, month, day };
-  const oneDayMs = 24 * 60 * 60 * 1000;
-  const shifted = new Date(
-    Date.UTC(year, month - 1, day) + dayOffset * oneDayMs,
-  );
-  return {
-    year: shifted.getUTCFullYear(),
-    month: shifted.getUTCMonth() + 1,
-    day: shifted.getUTCDate(),
-  };
-}
-
-function formatYmd(d: BerlinDayParts): string {
-  return `${d.year}-${String(d.month).padStart(2, "0")}-${String(d.day).padStart(2, "0")}`;
-}
-
-const BERLIN_CLOCK_FORMAT = new Intl.DateTimeFormat("en-US", {
-  timeZone: "Europe/Berlin",
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
-  hourCycle: "h23",
-});
-
-/**
- * Convert a Berlin-local clock instant (date + hour:minute) to Unix ms.
- *
- * Uses the standard "format-and-correct" offset trick: assume the
- * clock-fields name a UTC instant, ask `Intl.DateTimeFormat` what
- * Berlin would show for that instant, compute the discrepancy, and
- * subtract it. Robust across DST transitions because the formatter
- * itself owns the tzdb rules.
- */
-function berlinClockToUnixMs(
-  date: BerlinDayParts,
-  hour: number,
-  minute: number,
-): number {
-  const naiveUtc = Date.UTC(
-    date.year,
-    date.month - 1,
-    date.day,
-    hour,
-    minute,
-    0,
-  );
-  const parts = BERLIN_CLOCK_FORMAT.formatToParts(new Date(naiveUtc));
-  const bY = Number(parts.find((p) => p.type === "year")!.value);
-  const bM = Number(parts.find((p) => p.type === "month")!.value);
-  const bD = Number(parts.find((p) => p.type === "day")!.value);
-  const bH = Number(parts.find((p) => p.type === "hour")!.value);
-  const bMin = Number(parts.find((p) => p.type === "minute")!.value);
-  const berlinAsUtc = Date.UTC(bY, bM - 1, bD, bH, bMin, 0);
-  const offsetMs = berlinAsUtc - naiveUtc;
-  return naiveUtc - offsetMs;
-}

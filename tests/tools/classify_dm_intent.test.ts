@@ -2,7 +2,7 @@
  * `classify_dm_intent` — channel-side classifier replacing the
  * agent-driven branching that produced the v2 regression (#85).
  *
- * Tests cover three concerns:
+ * Tests cover four concerns:
  *
  *   1. The fallback chain (primary throws → fallback runs → fallback
  *      throws → re-throw primary).
@@ -11,8 +11,12 @@
  *   3. Negative cases — the v2 regression's root cause was the model
  *      firing tools opportunistically on inputs that should NOT
  *      trigger Flow 2 (Flow 0, Flow 1, Flow 3, registration, chat).
- *      Twelve positive cases + eight negative cases = ≥20 per the
- *      issue's acceptance criterion.
+ *   4. The v2.1 Bug 1 regression (#93 / #92 Trace A): the production
+ *      ship attempt produced `heute 06:00–08:00` for the input
+ *      `morgen 14-16 Uhr`. The tool now asks the model for local
+ *      clock strings and converts to Unix ms in-code; tests pin
+ *      "today" via `vi.setSystemTime` and assert the conversion is
+ *      correct on the exact production input.
  *
  * The model is stubbed via `vi.mock("ai", ...)` exactly the way
  * `parse_tracking_page.test.ts` does it, so the assertions describe
@@ -20,7 +24,7 @@
  * prompt contains) rather than re-implementing the model itself.
  */
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const generateObjectMock = vi.hoisted(() => vi.fn());
 
@@ -142,12 +146,24 @@ describe("classify_dm_intent — prompt shape", () => {
     });
   });
 
-  it("includes today's date in the user prompt so relative-day parsing has an anchor", async () => {
+  it("includes today's, tomorrow's, and day-after-tomorrow's Berlin dates so relative-day parsing has concrete anchors", async () => {
     await runExecute({ text: "morgen kommt mein Paket" });
     const call = generateObjectMock.mock.calls[0]![0];
-    // Today's date in ISO YYYY-MM-DD; we don't pin the exact value
-    // (the test runs whenever) but we do pin the shape.
-    expect(call.prompt).toMatch(/Today's date.*\d{4}-\d{2}-\d{2}/);
+    // The new prompt names all three offsets explicitly so the model
+    // doesn't have to compute "tomorrow" itself — the bug-1 #93 root
+    // cause was the model emitting today's date when the user wrote
+    // "morgen".
+    expect(call.prompt).toMatch(/Today is \d{4}-\d{2}-\d{2}/);
+    expect(call.prompt).toMatch(/Tomorrow is \d{4}-\d{2}-\d{2}/);
+    expect(call.prompt).toMatch(/Day after tomorrow is \d{4}-\d{2}-\d{2}/);
+  });
+
+  it("names the Berlin weekday alongside today's date so weekday references ('Montag', ...) have an anchor", async () => {
+    await runExecute({ text: "Montag kommt mein Paket" });
+    const call = generateObjectMock.mock.calls[0]![0];
+    expect(call.prompt).toMatch(
+      /Today is \d{4}-\d{2}-\d{2} \((montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonntag), Europe\/Berlin\)/i,
+    );
   });
 
   it("threads the languageHint into the user prompt when supplied", async () => {
@@ -188,8 +204,8 @@ describe("classify_dm_intent — positive Flow 2 cases (DE/EN/ES/TR)", () => {
         absenceSignal: true,
         carrier: "DHL",
         expectedDate: "2026-05-22",
-        expectedWindowStartAt: Date.parse("2026-05-22T12:00:00Z"),
-        expectedWindowEndAt: Date.parse("2026-05-22T14:00:00Z"),
+        expectedWindowStartLocal: "14:00",
+        expectedWindowEndLocal: "16:00",
         confidence: "high",
         reason: "explicit absence + carrier + window",
       },
@@ -321,8 +337,8 @@ describe("classify_dm_intent — positive Flow 2 cases (DE/EN/ES/TR)", () => {
         absenceSignal: true,
         carrier: "DPD",
         expectedDate: "2026-05-21",
-        expectedWindowStartAt: Date.parse("2026-05-21T08:00:00Z"),
-        expectedWindowEndAt: Date.parse("2026-05-21T10:00:00Z"),
+        expectedWindowStartLocal: "10:00",
+        expectedWindowEndLocal: "12:00",
         confidence: "high",
         reason: "absence ('unterwegs') + DPD + window",
       },
@@ -342,8 +358,8 @@ describe("classify_dm_intent — positive Flow 2 cases (DE/EN/ES/TR)", () => {
         absenceSignal: true,
         carrier: "Amazon",
         expectedDate: "2026-05-21",
-        expectedWindowStartAt: Date.parse("2026-05-21T12:00:00Z"),
-        expectedWindowEndAt: Date.parse("2026-05-21T14:00:00Z"),
+        expectedWindowStartLocal: "14:00",
+        expectedWindowEndLocal: "16:00",
         confidence: "high",
         reason: "Spanish absence + Amazon + window",
       },
@@ -364,8 +380,8 @@ describe("classify_dm_intent — positive Flow 2 cases (DE/EN/ES/TR)", () => {
         absenceSignal: true,
         carrier: "GLS",
         expectedDate: "2026-05-21",
-        expectedWindowStartAt: Date.parse("2026-05-21T13:00:00Z"),
-        expectedWindowEndAt: Date.parse("2026-05-21T15:00:00Z"),
+        expectedWindowStartLocal: "15:00",
+        expectedWindowEndLocal: "17:00",
         confidence: "high",
         reason: "Turkish absence + GLS + window",
       },
@@ -590,8 +606,8 @@ describe("classify_dm_intent — negative cases (NOT Flow 2)", () => {
         absenceSignal: false,
         carrier: "DHL",
         expectedDate: "2026-05-21",
-        expectedWindowStartAt: Date.parse("2026-05-21T12:00:00Z"),
-        expectedWindowEndAt: Date.parse("2026-05-21T12:00:00Z"),
+        expectedWindowStartLocal: "14:00",
+        expectedWindowEndLocal: "14:00",
         confidence: "low",
         reason: "carrier + window but no absence — Flow 0",
       },
@@ -603,5 +619,320 @@ describe("classify_dm_intent — negative cases (NOT Flow 2)", () => {
 
     expect(result.isFlow2).toBe(false);
     expect(result.absenceSignal).toBe(false);
+  });
+});
+
+describe("classify_dm_intent — v2.1 Bug 1 regression (#93 / #92 Trace A): local-clock → Unix ms conversion", () => {
+  // The production card read `heute 06:00–08:00` for the input
+  // `Ich erwarte morgen 14-16 Uhr DHL und bin nicht zu Hause`. Two bugs
+  // composed:
+  //   1. Model emitted Unix ms directly — easy to get wrong by 8h.
+  //   2. Prompt didn't disambiguate `morgen` (tomorrow) vs `morgens`
+  //      (in the morning).
+  //
+  // The fix has the model emit local clock strings; `execute()`
+  // converts to Unix ms via the Berlin-anchored helper used by
+  // `/receive`. These tests pin `Date.now()` to a fixed Berlin moment
+  // so the converted Unix ms values are exact.
+  beforeEach(() => {
+    generateObjectMock.mockReset();
+    // Anchor "now" to 2026-05-21 10:00 Europe/Berlin (which is 08:00 UTC
+    // in summer, +02:00 offset). The system prompt advertises
+    // "Tomorrow is 2026-05-22"; the test asserts the converted Unix ms
+    // matches Berlin 14:00 / 16:00 on that day.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-21T08:00:00.000Z"));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("regression: 'Ich erwarte morgen 14-16 Uhr DHL und bin nicht zu Hause' → tomorrow 14:00–16:00 Berlin, not today 06:00–08:00", async () => {
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        isFlow2: true,
+        absenceSignal: true,
+        carrier: "DHL",
+        expectedDate: "2026-05-22",
+        expectedWindowStartLocal: "14:00",
+        expectedWindowEndLocal: "16:00",
+        confidence: "high",
+        reason: "explicit absence + carrier + window on tomorrow",
+      },
+    });
+
+    const result = (await runExecute({
+      text: "Ich erwarte morgen 14-16 Uhr DHL und bin nicht zu Hause",
+      languageHint: "de",
+    })) as {
+      isFlow2: boolean;
+      carrier: string;
+      expectedDate: string;
+      expectedWindowStartAt: number;
+      expectedWindowEndAt: number;
+      confidence: string;
+    };
+
+    expect(result.isFlow2).toBe(true);
+    expect(result.carrier).toBe("DHL");
+    expect(result.confidence).toBe("high");
+    expect(result.expectedDate).toBe("2026-05-22");
+
+    // 2026-05-22 14:00 Europe/Berlin is summer time (+02:00) → 12:00 UTC.
+    expect(result.expectedWindowStartAt).toBe(
+      Date.UTC(2026, 4, 22, 12, 0, 0),
+    );
+    expect(result.expectedWindowEndAt).toBe(Date.UTC(2026, 4, 22, 14, 0, 0));
+
+    // And the buggy value the production trace produced — today
+    // 2026-05-21 06:00 Berlin (= 04:00 UTC) — must NOT appear.
+    expect(result.expectedWindowStartAt).not.toBe(
+      Date.UTC(2026, 4, 21, 4, 0, 0),
+    );
+  });
+
+  it("'morgen Vormittag' → tomorrow 09:00–12:00 (NOT today morning)", async () => {
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        isFlow2: true,
+        absenceSignal: true,
+        carrier: "Hermes",
+        expectedDate: "2026-05-22",
+        expectedWindowStartLocal: "09:00",
+        expectedWindowEndLocal: "12:00",
+        confidence: "high",
+        reason: "Vormittag = 09-12 on tomorrow",
+      },
+    });
+
+    const result = (await runExecute({
+      text: "Hermes kommt morgen Vormittag, ich bin im Büro",
+    })) as {
+      expectedDate: string;
+      expectedWindowStartAt: number;
+      expectedWindowEndAt: number;
+    };
+
+    expect(result.expectedDate).toBe("2026-05-22");
+    expect(result.expectedWindowStartAt).toBe(Date.UTC(2026, 4, 22, 7, 0, 0));
+    expect(result.expectedWindowEndAt).toBe(Date.UTC(2026, 4, 22, 10, 0, 0));
+  });
+
+  it("'heute Vormittag' → today 09:00–12:00", async () => {
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        isFlow2: true,
+        absenceSignal: true,
+        carrier: "DHL",
+        expectedDate: "2026-05-21",
+        expectedWindowStartLocal: "09:00",
+        expectedWindowEndLocal: "12:00",
+        confidence: "high",
+        reason: "absence + today Vormittag + DHL",
+      },
+    });
+
+    const result = (await runExecute({
+      text: "Heute Vormittag kommt DHL, ich bin nicht zu Hause",
+    })) as {
+      expectedDate: string;
+      expectedWindowStartAt: number;
+      expectedWindowEndAt: number;
+    };
+
+    expect(result.expectedDate).toBe("2026-05-21");
+    expect(result.expectedWindowStartAt).toBe(Date.UTC(2026, 4, 21, 7, 0, 0));
+    expect(result.expectedWindowEndAt).toBe(Date.UTC(2026, 4, 21, 10, 0, 0));
+  });
+
+  it("'heute Nachmittag' → today 14:00–18:00", async () => {
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        isFlow2: true,
+        absenceSignal: true,
+        carrier: "UPS",
+        expectedDate: "2026-05-21",
+        expectedWindowStartLocal: "14:00",
+        expectedWindowEndLocal: "18:00",
+        confidence: "high",
+        reason: "Nachmittag = 14-18 today",
+      },
+    });
+
+    const result = (await runExecute({
+      text: "UPS kommt heute Nachmittag, ich bin auf der Arbeit",
+    })) as {
+      expectedWindowStartAt: number;
+      expectedWindowEndAt: number;
+    };
+
+    expect(result.expectedWindowStartAt).toBe(Date.UTC(2026, 4, 21, 12, 0, 0));
+    expect(result.expectedWindowEndAt).toBe(Date.UTC(2026, 4, 21, 16, 0, 0));
+  });
+
+  it("'übermorgen' → day after tomorrow (2026-05-23)", async () => {
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        isFlow2: true,
+        absenceSignal: true,
+        carrier: "UPS",
+        expectedDate: "2026-05-23",
+        confidence: "medium",
+        reason: "absence + carrier + übermorgen but no window",
+      },
+    });
+
+    const result = (await runExecute({
+      text: "Übermorgen UPS, ich bin auf der Arbeit",
+    })) as { expectedDate: string; expectedWindowStartAt?: number };
+
+    expect(result.expectedDate).toBe("2026-05-23");
+    expect(result.expectedWindowStartAt).toBeUndefined();
+  });
+
+  it("German weekday names resolve via the prompt's weekday anchor (Montag from a Donnerstag → next Monday)", async () => {
+    // Today (pinned) is Donnerstag 2026-05-21. Next Montag is 2026-05-25.
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        isFlow2: true,
+        absenceSignal: true,
+        carrier: "DHL",
+        expectedDate: "2026-05-25",
+        confidence: "medium",
+        reason: "Montag from Donnerstag → next Monday",
+      },
+    });
+
+    const result = (await runExecute({
+      text: "Montag kommt DHL, ich bin im Büro",
+    })) as { expectedDate: string };
+
+    expect(result.expectedDate).toBe("2026-05-25");
+
+    // The prompt must give the model the weekday anchor so it can do
+    // this resolution at all.
+    const call = generateObjectMock.mock.calls[0]![0];
+    expect(call.prompt).toMatch(/donnerstag/i);
+  });
+
+  it("malformed model output (window with missing date) drops the window rather than throwing or inventing a date", async () => {
+    // Defensive: if the model emits clock strings but forgets
+    // `expectedDate`, the post-processor has nothing to anchor the
+    // window against. Drop the window fields; keep the rest of the
+    // classification.
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        isFlow2: true,
+        absenceSignal: true,
+        carrier: "DHL",
+        // expectedDate omitted on purpose
+        expectedWindowStartLocal: "14:00",
+        expectedWindowEndLocal: "16:00",
+        confidence: "medium",
+        reason: "window without a date — drop window",
+      },
+    });
+
+    const result = (await runExecute({
+      text: "DHL 14-16 Uhr, bin nicht da",
+    })) as {
+      isFlow2: boolean;
+      carrier: string;
+      expectedWindowStartAt?: number;
+      expectedWindowEndAt?: number;
+    };
+
+    expect(result.isFlow2).toBe(true);
+    expect(result.carrier).toBe("DHL");
+    expect(result.expectedWindowStartAt).toBeUndefined();
+    expect(result.expectedWindowEndAt).toBeUndefined();
+  });
+
+  it("malformed model output (start > end) drops the window rather than emitting an inverted range", async () => {
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        isFlow2: true,
+        absenceSignal: true,
+        carrier: "DHL",
+        expectedDate: "2026-05-22",
+        expectedWindowStartLocal: "16:00",
+        expectedWindowEndLocal: "14:00", // inverted
+        confidence: "high",
+        reason: "inverted range — drop",
+      },
+    });
+
+    const result = (await runExecute({
+      text: "DHL morgen 16-14 Uhr, bin nicht da",
+    })) as {
+      isFlow2: boolean;
+      expectedWindowStartAt?: number;
+      expectedWindowEndAt?: number;
+    };
+
+    expect(result.isFlow2).toBe(true);
+    expect(result.expectedWindowStartAt).toBeUndefined();
+    expect(result.expectedWindowEndAt).toBeUndefined();
+  });
+});
+
+describe("classify_dm_intent — system prompt disambiguation (v2.1 Bug 1 / #93)", () => {
+  it("the system prompt explicitly disambiguates 'morgen' (tomorrow) from 'morgens' (in the morning)", async () => {
+    // This is the single most important prompt-engineering fix in this
+    // slice. The system prompt MUST contain prose that tells the model
+    // 'morgen' is never a time-of-day. Asserting the literal text
+    // pins the constraint so future prompt tweaks can't silently
+    // delete it.
+    generateObjectMock.mockReset();
+    generateObjectMock.mockResolvedValue({
+      object: {
+        isFlow2: false,
+        absenceSignal: false,
+        confidence: "low",
+        reason: "test stub",
+      },
+    });
+    await runExecute({ text: "anything" });
+    const call = generateObjectMock.mock.calls[0]![0];
+    expect(call.system).toMatch(/morgen.*≠.*morgens/i);
+    expect(call.system).toMatch(/'morgen'\s+ALWAYS means 'tomorrow'/i);
+  });
+
+  it("the system prompt lists German time-of-day phrases with concrete hour windows", async () => {
+    generateObjectMock.mockReset();
+    generateObjectMock.mockResolvedValue({
+      object: {
+        isFlow2: false,
+        absenceSignal: false,
+        confidence: "low",
+        reason: "test stub",
+      },
+    });
+    await runExecute({ text: "anything" });
+    const call = generateObjectMock.mock.calls[0]![0];
+    // The Vormittag / Nachmittag / Abend mappings must be in the prompt
+    // so the model can map 'morgen Vormittag' to a 09-12 window.
+    expect(call.system).toMatch(/Vormittag.*09:00-12:00/);
+    expect(call.system).toMatch(/Nachmittag.*14:00-18:00/);
+    expect(call.system).toMatch(/Abend.*18:00-21:00/);
+  });
+
+  it("the system prompt instructs the model to emit local clock strings, NOT Unix timestamps", async () => {
+    generateObjectMock.mockReset();
+    generateObjectMock.mockResolvedValue({
+      object: {
+        isFlow2: false,
+        absenceSignal: false,
+        confidence: "low",
+        reason: "test stub",
+      },
+    });
+    await runExecute({ text: "anything" });
+    const call = generateObjectMock.mock.calls[0]![0];
+    // The output schema only accepts HH:mm strings, but a belt-and-braces
+    // hint in the system prompt helps the model when it would otherwise
+    // try to be helpful and emit numbers.
+    expect(call.system).toMatch(/Do NOT emit Unix timestamps/i);
   });
 });
