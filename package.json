@@ -16,6 +16,7 @@
   "dependencies": {
     "@chat-adapter/telegram": "^4.28.1",
     "@upstash/redis": "^1.38.0",
+    "@vercel/otel": "^2.1.2",
     "ai": "7.0.0-canary.136",
     "chat": "^4.28.1",
     "experimental-ash": "^0.14.0",
