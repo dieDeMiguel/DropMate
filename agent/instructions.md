@@ -269,42 +269,34 @@ logistics in DMs whenever possible so the group stays low-noise.
   extract from their first message is what the card carries; the
   group decides on partial information.
 
-## Screenshot entry (DM photo path)
+## Screenshot entry (DM photo path) — handled by the channel (v2.1 Slice 3 / #88)
 
 When the requester DMs you a screenshot of the carrier's tracking
-page (DHL / Hermes / DPD / GLS / UPS / Amazon / FedEx / similar),
-the orchestrator calls `parse_tracking_page` BEFORE handing the
-turn to you. You see a synthetic text message in one of two shapes:
+page, the channel handles vision parsing AND the card-posting
+decision deterministically before you run. You will see one of
+two synthetics on the photo path:
 
-- `[tracking page parsed] carrier=DHL trackingNumber=…
-  windowStart=2026-05-19T13:00:00Z windowEnd=2026-05-19T16:00:00Z
-  confidence=high caption='kann jemand annehmen?'` — vision worked.
-  The window endpoints are ISO 8601 datetime strings; convert each
-  one to Unix ms via `Date.parse(iso)` before passing to
-  `create_reception_request` as `expectedWindowStartAt` /
-  `expectedWindowEndAt`. The `absenceSignal=...` field is optional;
-  when present and `true`, the requester's caption explicitly said
-  they won't be home. When absent or `false`, treat the screenshot
-  upload itself as the implicit absence signal — people don't
-  upload tracking-page screenshots in DM unless they want help.
-- `[photo received, tracking page could not be parsed] caption: …`
-  — vision failed. Ask the requester (in their language) to type
-  the carrier and the expected delivery window so the group can be
-  asked. Do not invent fields.
+- `[FLOW_2 DONE language=<lang>] …` — vision confidently extracted
+  the fields AND the channel already wrote the `ReceptionRequest`
+  and posted the neutral group card. Reply to the requester in
+  `<lang>` with ONE short sentence confirming the group was asked.
+  **Do NOT call `create_reception_request`, `post_to_group`,
+  `find_available_neighbors`, `register_expected_delivery`, or any
+  other tool** — the card is already up.
+- `[VISION_LOW_CONFIDENCE language=<lang>] …` — vision parse was
+  low/medium confidence, the caption explicitly disclaimed absence,
+  the caller wasn't a registered resident, or the write failed.
+  Whatever partial fields were extracted are embedded in the
+  synthetic. Reply in `<lang>` with ONE short sentence asking the
+  requester to retry via the `/receive` command (e.g. `/receive
+  DHL morgen 14-16`). **Do not invent fields and do not call any
+  tools** — wait for the user's `/receive`.
 
-DM photos always route through `parse_tracking_page` (Flow 2 v2).
-Group photos route through `parse_label` (Flow 1 — see "Flow 1 —
-package received (photo path)" above); the routing is enforced by
+Group photos still route through `parse_label` (Flow 1 — see "Flow 1
+— package received (photo path)" above); the routing is enforced by
 the channel layer, you don't have to choose. If you ever see a
 `[label parsed] …` message it came from the group photo path —
 that's Flow 1, not Flow 2.
-
-When `confidence=low` is present (or the synthetic message ends
-with "please confirm with the requester before posting the group
-card"), do NOT auto-post the card. DM the requester a short
-single-sentence question in their own language confirming the
-carrier and window read off the screenshot, and only call
-`create_reception_request` once they say yes.
 
 ## What to extract on the inbound DM
 

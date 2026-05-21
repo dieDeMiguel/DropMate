@@ -157,14 +157,21 @@ export function telegramChannel(config: TelegramChannelConfig) {
             parseTrackingPage: async (input) => {
               // Same no-silent-catch policy as parseLabel above: errors
               // propagate to process-update.ts's catch which logs with
-              // stack + chatId, and the agent gets a "couldn't read"
-              // prompt to ask the requester for the carrier + window
-              // manually.
+              // stack + chatId, and the channel hands the agent a
+              // `[VISION_LOW_CONFIDENCE]` synthetic to prompt the user to
+              // retry via /receive.
               const execute = parseTrackingPageTool.execute as (
                 input: unknown,
                 options: unknown,
               ) => Promise<{
-                carrier: string;
+                carrier:
+                  | "DHL"
+                  | "Hermes"
+                  | "DPD"
+                  | "GLS"
+                  | "UPS"
+                  | "Amazon"
+                  | "unknown";
                 trackingNumber?: string;
                 expectedWindowStartAt?: string;
                 expectedWindowEndAt?: string;

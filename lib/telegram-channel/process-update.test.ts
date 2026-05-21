@@ -568,66 +568,128 @@ describe("processInboundTelegramUpdate", () => {
     expect(message).not.toContain("tracking=");
   });
 
-  describe("DM photo → parseTrackingPage (Flow 2 v2 / #69)", () => {
-    it("parses a DM tracking-page photo via parseTrackingPage and forwards a synthetic text message naming the extracted fields", async () => {
-      const fileUrl =
-        "https://api.telegram.org/file/bot111:AAA/photos/file_77.jpg";
-      const { deps, sendToAsh, getFileUrl, parseLabel, parseTrackingPage } =
-        buildDeps({
-          fileUrl,
-          parsedTrackingPage: {
-            carrier: "DHL",
-            trackingNumber: "00340434161094021899",
-            expectedWindowStartAt: "2026-05-19T13:00:00Z",
-            expectedWindowEndAt: "2026-05-19T16:00:00Z",
-            absenceSignal: true,
-            confidence: "high",
-            reason: "all fields legible",
-          },
-        });
+  describe("DM photo → parseTrackingPage → channel-side Flow 2 routing (v2.1 Slice 3, #88)", () => {
+    function dmRegisteredResident(language: string | undefined = "de"): Resident {
+      return {
+        id: "patricia",
+        name: "Patricia Höfer",
+        street: "Methfesselstraße",
+        houseNumber: "90",
+        platformId: "patricia",
+        platform: "telegram",
+        language,
+        availabilityPatterns: [],
+        registeredAt: Date.now(),
+        source: "explicit",
+        confirmed: true,
+      };
+    }
 
-      const update = {
-        update_id: 100,
+    function dmPhotoUpdate(opts: {
+      updateId?: number;
+      chatId?: number;
+      fromUserId?: number;
+      languageCode?: string;
+      caption?: string;
+      photoFileIds?: ReadonlyArray<string>;
+    } = {}): Record<string, unknown> {
+      return {
+        update_id: opts.updateId ?? 200,
         message: {
           message_id: 1,
           date: 1,
-          caption: "kann jemand annehmen? bin nicht da",
-          chat: { id: 42, type: "private" },
-          from: { id: 99, is_bot: false, first_name: "T", language_code: "de" },
-          photo: [
-            { file_id: "small", file_size: 100, width: 90, height: 90 },
-            { file_id: "large", file_size: 5000, width: 1280, height: 1280 },
-          ],
+          ...(opts.caption !== undefined ? { caption: opts.caption } : {}),
+          chat: { id: opts.chatId ?? 42, type: "private" },
+          ...(opts.fromUserId !== undefined
+            ? {
+                from: {
+                  id: opts.fromUserId,
+                  is_bot: false,
+                  first_name: "T",
+                  language_code: opts.languageCode,
+                },
+              }
+            : {}),
+          photo: (opts.photoFileIds ?? ["only"]).map((file_id) => ({
+            file_id,
+            file_size: 1024,
+            width: 1024,
+            height: 1024,
+          })),
         },
       };
+    }
 
-      const res = await processInboundTelegramUpdate(makeRequest(update), deps);
+    it("on high-confidence + absenceSignal:true + registered caller, writes a ReceptionRequest and hands [FLOW_2 DONE]", async () => {
+      const fileUrl =
+        "https://api.telegram.org/file/bot111:AAA/photos/file_77.jpg";
+      const resident = dmRegisteredResident("de");
+      const {
+        deps,
+        sendToAsh,
+        getFileUrl,
+        parseLabel,
+        parseTrackingPage,
+        createReceptionRequest,
+        getRegisteredResident,
+      } = buildDeps({
+        fileUrl,
+        parsedTrackingPage: {
+          carrier: "DHL",
+          trackingNumber: "00340434161094021899",
+          expectedWindowStartAt: "2026-05-19T13:00:00Z",
+          expectedWindowEndAt: "2026-05-19T16:00:00Z",
+          absenceSignal: true,
+          confidence: "high",
+          reason: "all fields legible",
+        },
+        registeredResident: resident,
+      });
+
+      const res = await processInboundTelegramUpdate(
+        makeRequest(
+          dmPhotoUpdate({
+            caption: "kann jemand annehmen? bin nicht da",
+            fromUserId: 99,
+            languageCode: "de",
+            photoFileIds: ["small", "large"],
+          }),
+        ),
+        deps,
+      );
+
       expect(res.status).toBe(204);
-
       expect(getFileUrl).toHaveBeenCalledWith("large");
 
-      // parseTrackingPage receives the URL + caption verbatim.
       expect(parseTrackingPage).toHaveBeenCalledTimes(1);
       const parseArgs = parseTrackingPage.mock.calls[0]![0];
       expect(parseArgs.imageUrl).toBe(fileUrl);
       expect(parseArgs.caption).toBe("kann jemand annehmen? bin nicht da");
-
-      // parseLabel must NOT fire on the DM path.
       expect(parseLabel).not.toHaveBeenCalled();
+
+      // Channel writes the ReceptionRequest BEFORE the agent runs.
+      expect(getRegisteredResident).toHaveBeenCalledWith(99);
+      expect(createReceptionRequest).toHaveBeenCalledTimes(1);
+      const [caller, input] = createReceptionRequest.mock.calls[0]!;
+      expect(caller).toBe(resident);
+      expect(input.carrier).toBe("DHL");
+      // ISO endpoints are converted to Unix ms before the lib call.
+      expect(input.expectedWindowStartAt).toBe(
+        Date.parse("2026-05-19T13:00:00Z"),
+      );
+      expect(input.expectedWindowEndAt).toBe(
+        Date.parse("2026-05-19T16:00:00Z"),
+      );
 
       const [message, options] = sendToAsh.mock.calls[0]!;
       expect(typeof message).toBe("string");
-      expect(message).toContain("[tracking page parsed]");
-      expect(message).toContain("carrier=DHL");
-      expect(message).toContain("trackingNumber=00340434161094021899");
-      expect(message).toContain("windowStart=2026-05-19T13:00:00Z");
-      expect(message).toContain("windowEnd=2026-05-19T16:00:00Z");
-      expect(message).toContain("absenceSignal=true");
-      expect(message).toContain("confidence=high");
-      expect(message).toContain(
-        "caption='kann jemand annehmen? bin nicht da'",
-      );
-      expect(message).not.toMatch(/please confirm/);
+      expect(message).toContain("[FLOW_2 DONE language=de]");
+      // The synthetic must close down further tool calls — same shape
+      // Slice 1 ships from the classifier path.
+      expect(message).toMatch(/do not call/i);
+      expect(message).toContain("create_reception_request");
+      // No remnants of the v2 [tracking page parsed] synthetic.
+      expect(message).not.toContain("[tracking page parsed]");
 
       expect(options.state).toEqual<TelegramChannelState>({
         chatId: 42,
@@ -637,145 +699,350 @@ describe("processInboundTelegramUpdate", () => {
       });
     });
 
-    it("appends a please-confirm suffix when the tracking-page vision tool returns low confidence", async () => {
-      const { deps, sendToAsh, parseTrackingPage } = buildDeps({
+    it("treats absenceSignal:undefined as implicit absence (uploading a tracking page in DM is itself the absence signal)", async () => {
+      const resident = dmRegisteredResident("de");
+      const { deps, sendToAsh, createReceptionRequest } = buildDeps({
+        parsedTrackingPage: {
+          carrier: "Hermes",
+          // No absenceSignal — the vision tool found no caption signal
+          // either way. Channel must treat this as Flow 2.
+          confidence: "high",
+          reason: "clean tracking page, empty caption",
+        },
+        registeredResident: resident,
+      });
+
+      await processInboundTelegramUpdate(
+        makeRequest(dmPhotoUpdate({ fromUserId: 99, languageCode: "de" })),
+        deps,
+      );
+
+      expect(createReceptionRequest).toHaveBeenCalledTimes(1);
+      const [, input] = createReceptionRequest.mock.calls[0]!;
+      expect(input.carrier).toBe("Hermes");
+      expect(input.expectedWindowStartAt).toBeUndefined();
+      expect(input.expectedWindowEndAt).toBeUndefined();
+
+      const [message] = sendToAsh.mock.calls[0]!;
+      expect(message).toContain("[FLOW_2 DONE language=de]");
+    });
+
+    it("on absenceSignal:false (explicit non-absence — search intent), hands [VISION_LOW_CONFIDENCE] and does NOT post the card", async () => {
+      const resident = dmRegisteredResident("de");
+      const { deps, sendToAsh, createReceptionRequest } = buildDeps({
+        parsedTrackingPage: {
+          carrier: "DHL",
+          trackingNumber: "00340434161094021899",
+          expectedWindowStartAt: "2026-05-19T13:00:00Z",
+          expectedWindowEndAt: "2026-05-19T16:00:00Z",
+          absenceSignal: false,
+          confidence: "high",
+          reason: "tracking page legible but caption is a search query",
+        },
+        registeredResident: resident,
+      });
+
+      await processInboundTelegramUpdate(
+        makeRequest(
+          dmPhotoUpdate({
+            caption: "wo ist mein Paket?",
+            fromUserId: 99,
+            languageCode: "de",
+          }),
+        ),
+        deps,
+      );
+
+      // Critical privacy guarantee: no card posted when the caption
+      // explicitly disclaims absence.
+      expect(createReceptionRequest).not.toHaveBeenCalled();
+
+      const [message] = sendToAsh.mock.calls[0]!;
+      expect(message).toContain("[VISION_LOW_CONFIDENCE language=de]");
+      // The synthetic must embed the parsed fields so the agent can
+      // reason about the user's intent.
+      expect(message).toContain("carrier=DHL");
+      expect(message).toContain("absenceSignal=false");
+      // And it must direct the agent at /receive — Slice 2's recovery path.
+      expect(message).toMatch(/\/receive/);
+    });
+
+    it("on confidence:low, hands [VISION_LOW_CONFIDENCE] with partial fields and does NOT post the card", async () => {
+      const resident = dmRegisteredResident("de");
+      const { deps, sendToAsh, createReceptionRequest } = buildDeps({
         parsedTrackingPage: {
           carrier: "unknown",
           confidence: "low",
           reason: "carrier logo cropped",
         },
+        registeredResident: resident,
       });
 
-      const update = {
-        update_id: 101,
-        message: {
-          message_id: 2,
-          date: 1,
-          chat: { id: 42, type: "private" },
-          from: { id: 99, is_bot: false, first_name: "T" },
-          photo: [{ file_id: "only", file_size: 100, width: 90, height: 90 }],
-        },
-      };
+      await processInboundTelegramUpdate(
+        makeRequest(dmPhotoUpdate({ fromUserId: 99, languageCode: "de" })),
+        deps,
+      );
 
-      await processInboundTelegramUpdate(makeRequest(update), deps);
-
-      expect(parseTrackingPage).toHaveBeenCalledTimes(1);
+      expect(createReceptionRequest).not.toHaveBeenCalled();
       const [message] = sendToAsh.mock.calls[0]!;
-      expect(message).toContain("[tracking page parsed]");
+      expect(message).toContain("[VISION_LOW_CONFIDENCE language=de]");
+      expect(message).toContain("carrier=unknown");
       expect(message).toContain("confidence=low");
-      expect(message).toMatch(/please confirm with the requester/i);
+      expect(message).toMatch(/\/receive/);
     });
 
-    it("falls back to a tracking-page-flavoured parse-failure message when parseTrackingPage returns null", async () => {
-      const { deps, sendToAsh, parseLabel, parseTrackingPage } = buildDeps({
-        parsedTrackingPage: null,
+    it("on confidence:medium (not high), hands [VISION_LOW_CONFIDENCE] and does NOT post the card", async () => {
+      const resident = dmRegisteredResident("de");
+      const { deps, sendToAsh, createReceptionRequest } = buildDeps({
+        parsedTrackingPage: {
+          carrier: "DHL",
+          absenceSignal: true,
+          confidence: "medium",
+          reason: "carrier legible but window obscured",
+        },
+        registeredResident: resident,
       });
 
-      const update = {
-        update_id: 102,
-        message: {
-          message_id: 3,
-          date: 1,
-          caption: "kannst du das lesen?",
-          chat: { id: 42, type: "private" },
-          from: { id: 99, is_bot: false, first_name: "T" },
-          photo: [{ file_id: "f", file_size: 100, width: 90, height: 90 }],
-        },
-      };
+      await processInboundTelegramUpdate(
+        makeRequest(dmPhotoUpdate({ fromUserId: 99, languageCode: "de" })),
+        deps,
+      );
 
-      await processInboundTelegramUpdate(makeRequest(update), deps);
+      expect(createReceptionRequest).not.toHaveBeenCalled();
+      const [message] = sendToAsh.mock.calls[0]!;
+      expect(message).toContain("[VISION_LOW_CONFIDENCE language=de]");
+      expect(message).toContain("carrier=DHL");
+      expect(message).toContain("confidence=medium");
+    });
+
+    it("on parseTrackingPage returning null, hands [VISION_LOW_CONFIDENCE] with no partial fields", async () => {
+      const { deps, sendToAsh, parseLabel, parseTrackingPage, createReceptionRequest } =
+        buildDeps({ parsedTrackingPage: null });
+
+      await processInboundTelegramUpdate(
+        makeRequest(
+          dmPhotoUpdate({
+            caption: "kannst du das lesen?",
+            fromUserId: 99,
+            languageCode: "de",
+          }),
+        ),
+        deps,
+      );
 
       expect(parseTrackingPage).toHaveBeenCalledTimes(1);
       expect(parseLabel).not.toHaveBeenCalled();
+      expect(createReceptionRequest).not.toHaveBeenCalled();
       const [message] = sendToAsh.mock.calls[0]!;
-      expect(message).toContain(
-        "[photo received, tracking page could not be parsed]",
-      );
+      expect(message).toContain("[VISION_LOW_CONFIDENCE language=de]");
       expect(message).toContain("caption: kannst du das lesen?");
-      expect(message).toMatch(/carrier and expected delivery window/i);
+      expect(message).toContain("No fields were extracted");
+      expect(message).toMatch(/\/receive/);
     });
 
-    it("falls back to the tracking-page parse-failure message when parseTrackingPage throws", async () => {
-      const { deps, sendToAsh, parseTrackingPage } = buildDeps();
+    it("on parseTrackingPage throwing, hands [VISION_LOW_CONFIDENCE]", async () => {
+      const { deps, sendToAsh, parseTrackingPage, createReceptionRequest } =
+        buildDeps();
       parseTrackingPage.mockRejectedValueOnce(
         new Error("vision provider down"),
       );
 
-      const update = {
-        update_id: 103,
-        message: {
-          message_id: 4,
-          date: 1,
-          chat: { id: 42, type: "private" },
-          from: { id: 99, is_bot: false, first_name: "T" },
-          photo: [{ file_id: "f", file_size: 100, width: 90, height: 90 }],
-        },
-      };
-
-      await processInboundTelegramUpdate(makeRequest(update), deps);
-
-      const [message] = sendToAsh.mock.calls[0]!;
-      expect(message).toContain(
-        "[photo received, tracking page could not be parsed]",
+      await processInboundTelegramUpdate(
+        makeRequest(dmPhotoUpdate({ fromUserId: 99, languageCode: "de" })),
+        deps,
       );
+
+      expect(createReceptionRequest).not.toHaveBeenCalled();
+      const [message] = sendToAsh.mock.calls[0]!;
+      expect(message).toContain("[VISION_LOW_CONFIDENCE language=de]");
     });
 
-    it("falls back to the tracking-page parse-failure message when getFileUrl throws (DM photo)", async () => {
-      const { deps, sendToAsh, parseLabel, parseTrackingPage, getFileUrl } =
+    it("on getFileUrl throwing (DM photo), hands [VISION_LOW_CONFIDENCE] without invoking any vision tool", async () => {
+      const { deps, sendToAsh, parseLabel, parseTrackingPage, getFileUrl, createReceptionRequest } =
         buildDeps();
       getFileUrl.mockRejectedValueOnce(new Error("Bot API 404"));
 
-      const update = {
-        update_id: 104,
-        message: {
-          message_id: 5,
-          date: 1,
-          chat: { id: 42, type: "private" },
-          from: { id: 99, is_bot: false, first_name: "T" },
-          photo: [{ file_id: "f", file_size: 100, width: 90, height: 90 }],
-        },
-      };
-
-      await processInboundTelegramUpdate(makeRequest(update), deps);
+      await processInboundTelegramUpdate(
+        makeRequest(dmPhotoUpdate({ fromUserId: 99, languageCode: "de" })),
+        deps,
+      );
 
       expect(parseTrackingPage).not.toHaveBeenCalled();
       expect(parseLabel).not.toHaveBeenCalled();
+      expect(createReceptionRequest).not.toHaveBeenCalled();
       const [message] = sendToAsh.mock.calls[0]!;
-      expect(message).toContain(
-        "[photo received, tracking page could not be parsed]",
-      );
+      expect(message).toContain("[VISION_LOW_CONFIDENCE language=de]");
     });
 
-    it("omits absent tracking-page fields from the synthetic message", async () => {
+    it("on high-confidence but unregistered caller, hands [VISION_LOW_CONFIDENCE] (no Resident to attach the request to)", async () => {
+      const { deps, sendToAsh, createReceptionRequest } = buildDeps({
+        parsedTrackingPage: {
+          carrier: "DHL",
+          absenceSignal: true,
+          confidence: "high",
+          reason: "clean tracking page",
+        },
+        registeredResident: null,
+      });
+
+      await processInboundTelegramUpdate(
+        makeRequest(dmPhotoUpdate({ fromUserId: 99, languageCode: "de" })),
+        deps,
+      );
+
+      expect(createReceptionRequest).not.toHaveBeenCalled();
+      const [message] = sendToAsh.mock.calls[0]!;
+      expect(message).toContain("[VISION_LOW_CONFIDENCE language=de]");
+    });
+
+    it("on high-confidence + createReceptionRequest throwing (Redis hiccup), hands [VISION_LOW_CONFIDENCE]", async () => {
+      const resident = dmRegisteredResident("de");
+      const { deps, sendToAsh, createReceptionRequest } = buildDeps({
+        parsedTrackingPage: {
+          carrier: "DHL",
+          absenceSignal: true,
+          confidence: "high",
+          reason: "clean tracking page",
+        },
+        registeredResident: resident,
+      });
+      createReceptionRequest.mockRejectedValueOnce(new Error("redis down"));
+
+      await processInboundTelegramUpdate(
+        makeRequest(dmPhotoUpdate({ fromUserId: 99, languageCode: "de" })),
+        deps,
+      );
+
+      // The throw means no card was posted. The agent now gets the
+      // low-confidence prompt to ask the user to retry via /receive —
+      // the same shape as the classifier path on Redis failure.
+      const [message] = sendToAsh.mock.calls[0]!;
+      expect(message).toContain("[VISION_LOW_CONFIDENCE language=de]");
+    });
+
+    it("on anonymous DM photo (no fromUserId), hands [VISION_LOW_CONFIDENCE] without consulting the directory", async () => {
+      const { deps, sendToAsh, createReceptionRequest, getRegisteredResident } =
+        buildDeps({
+          parsedTrackingPage: {
+            carrier: "DHL",
+            absenceSignal: true,
+            confidence: "high",
+            reason: "clean tracking page",
+          },
+        });
+
+      await processInboundTelegramUpdate(
+        // No `from` field → fromUserId is null.
+        makeRequest(dmPhotoUpdate({})),
+        deps,
+      );
+
+      expect(getRegisteredResident).not.toHaveBeenCalled();
+      expect(createReceptionRequest).not.toHaveBeenCalled();
+      const [message] = sendToAsh.mock.calls[0]!;
+      expect(message).toContain("[VISION_LOW_CONFIDENCE");
+    });
+
+    it("uses the resident's stored language for the FLOW_2 DONE synthetic when present", async () => {
+      const resident = dmRegisteredResident("tr");
       const { deps, sendToAsh } = buildDeps({
         parsedTrackingPage: {
           carrier: "DHL",
-          // No trackingNumber, no window, no absenceSignal.
-          confidence: "medium",
-          reason: "only carrier legible",
+          absenceSignal: true,
+          confidence: "high",
+          reason: "clean tracking page",
+        },
+        registeredResident: resident,
+      });
+
+      await processInboundTelegramUpdate(
+        makeRequest(dmPhotoUpdate({ fromUserId: 99, languageCode: "tr" })),
+        deps,
+      );
+
+      const [message] = sendToAsh.mock.calls[0]!;
+      expect(message).toContain("[FLOW_2 DONE language=tr]");
+    });
+
+    it("falls back to the Telegram client language code when the resident has no stored language", async () => {
+      const resident: Resident = {
+        ...dmRegisteredResident("de"),
+        language: undefined,
+      };
+      const { deps, sendToAsh } = buildDeps({
+        parsedTrackingPage: {
+          carrier: "DHL",
+          absenceSignal: true,
+          confidence: "high",
+          reason: "clean tracking page",
+        },
+        registeredResident: resident,
+      });
+
+      await processInboundTelegramUpdate(
+        makeRequest(dmPhotoUpdate({ fromUserId: 99, languageCode: "en" })),
+        deps,
+      );
+
+      const [message] = sendToAsh.mock.calls[0]!;
+      expect(message).toContain("[FLOW_2 DONE language=en]");
+    });
+
+    it("falls back to 'de' when neither the resident nor Telegram supply a language code on the low-confidence path", async () => {
+      const { deps, sendToAsh } = buildDeps({
+        parsedTrackingPage: {
+          carrier: "unknown",
+          confidence: "low",
+          reason: "blurry image",
         },
       });
 
-      const update = {
-        update_id: 105,
-        message: {
-          message_id: 6,
-          date: 1,
-          chat: { id: 42, type: "private" },
-          from: { id: 99, is_bot: false, first_name: "T" },
-          photo: [{ file_id: "f", file_size: 100, width: 90, height: 90 }],
-        },
-      };
-
-      await processInboundTelegramUpdate(makeRequest(update), deps);
+      // No language_code on the Telegram side AND unregistered caller.
+      await processInboundTelegramUpdate(
+        makeRequest(dmPhotoUpdate({ fromUserId: 99 })),
+        deps,
+      );
 
       const [message] = sendToAsh.mock.calls[0]!;
-      expect(message).toContain("[tracking page parsed]");
-      expect(message).toContain("carrier=DHL");
-      expect(message).not.toContain("trackingNumber=");
-      expect(message).not.toContain("windowStart=");
-      expect(message).not.toContain("windowEnd=");
-      expect(message).not.toContain("absenceSignal=");
+      expect(message).toContain("[VISION_LOW_CONFIDENCE language=de]");
+    });
+
+    it("substitutes (no caption) when the DM photo arrives without text on the low-confidence path", async () => {
+      const { deps, sendToAsh } = buildDeps({
+        parsedTrackingPage: {
+          carrier: "unknown",
+          confidence: "low",
+          reason: "blurry image",
+        },
+      });
+
+      await processInboundTelegramUpdate(
+        makeRequest(dmPhotoUpdate({ fromUserId: 99, languageCode: "de" })),
+        deps,
+      );
+
+      const [message] = sendToAsh.mock.calls[0]!;
+      expect(message).toContain("caption: (no caption)");
+    });
+
+    it("does NOT invoke parseLabel on the DM path even when registered residents would otherwise short-circuit", async () => {
+      const resident = dmRegisteredResident("de");
+      const { deps, parseLabel } = buildDeps({
+        parsedTrackingPage: {
+          carrier: "DHL",
+          absenceSignal: true,
+          confidence: "high",
+          reason: "clean tracking page",
+        },
+        registeredResident: resident,
+      });
+
+      await processInboundTelegramUpdate(
+        makeRequest(dmPhotoUpdate({ fromUserId: 99, languageCode: "de" })),
+        deps,
+      );
+
+      expect(parseLabel).not.toHaveBeenCalled();
     });
   });
 
