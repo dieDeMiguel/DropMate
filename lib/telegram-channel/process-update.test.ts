@@ -1604,3 +1604,225 @@ describe("processInboundTelegramUpdate — DM text → classify_dm_intent (v2.1 
     expect(classifyDmIntent).not.toHaveBeenCalled();
   });
 });
+
+describe("processInboundTelegramUpdate — /receive slash command (v2.1 Slice 2, #87)", () => {
+  function dmRegisteredResident(language = "de"): Resident {
+    return {
+      id: "patricia",
+      name: "Patricia Höfer",
+      street: "Methfesselstraße",
+      houseNumber: "90",
+      platformId: "patricia",
+      platform: "telegram",
+      language,
+      availabilityPatterns: [],
+      registeredAt: Date.now(),
+      source: "explicit",
+      confirmed: true,
+    };
+  }
+
+  it("bare /receive writes a request with no carrier or window and hands [FLOW_2 DONE]", async () => {
+    const resident = dmRegisteredResident("de");
+    const { deps, sendToAsh, createReceptionRequest } = buildDeps({
+      registeredResident: resident,
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 42,
+          text: "/receive",
+          fromUserId: 99,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(createReceptionRequest).toHaveBeenCalledTimes(1);
+    const [caller, input] = createReceptionRequest.mock.calls[0]!;
+    expect(caller).toBe(resident);
+    // Bare /receive → empty input → createReceptionRequest renders the
+    // sparse card "📦 Paket erwartet. Kann jemand annehmen?".
+    expect(input).toEqual({
+      carrier: undefined,
+      expectedDate: undefined,
+      expectedWindowStartAt: undefined,
+      expectedWindowEndAt: undefined,
+    });
+
+    const [message] = sendToAsh.mock.calls[0]!;
+    expect(message).toContain("[FLOW_2 DONE language=de]");
+  });
+
+  it("`/receive DHL morgen 14-16` parses args and forwards them to createReceptionRequest", async () => {
+    const resident = dmRegisteredResident("de");
+    const { deps, sendToAsh, createReceptionRequest } = buildDeps({
+      registeredResident: resident,
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 42,
+          text: "/receive DHL morgen 14-16",
+          fromUserId: 99,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(createReceptionRequest).toHaveBeenCalledTimes(1);
+    const [caller, input] = createReceptionRequest.mock.calls[0]!;
+    expect(caller).toBe(resident);
+    expect(input.carrier).toBe("DHL");
+    expect(input.expectedDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(typeof input.expectedWindowStartAt).toBe("number");
+    expect(typeof input.expectedWindowEndAt).toBe("number");
+    // The window is exactly 2 hours.
+    expect(input.expectedWindowEndAt - input.expectedWindowStartAt).toBe(
+      2 * 60 * 60 * 1000,
+    );
+
+    const [message] = sendToAsh.mock.calls[0]!;
+    expect(message).toContain("[FLOW_2 DONE language=de]");
+  });
+
+  it("uses the resident's stored language for the FLOW_2 DONE synthetic", async () => {
+    const resident = dmRegisteredResident("tr");
+    const { deps, sendToAsh } = buildDeps({ registeredResident: resident });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 42,
+          text: "/receive",
+          fromUserId: 99,
+          languageCode: "tr",
+        }),
+      ),
+      deps,
+    );
+
+    const [message] = sendToAsh.mock.calls[0]!;
+    expect(message).toContain("[FLOW_2 DONE language=tr]");
+  });
+
+  it("does NOT call the classifier when the inbound is /receive", async () => {
+    const resident = dmRegisteredResident("de");
+    const { deps, classifyDmIntent } = buildDeps({
+      registeredResident: resident,
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 42,
+          text: "/receive DHL",
+          fromUserId: 99,
+        }),
+      ),
+      deps,
+    );
+
+    expect(classifyDmIntent).not.toHaveBeenCalled();
+  });
+
+  it("falls through to raw text when the caller is unregistered (no createReceptionRequest)", async () => {
+    const { deps, sendToAsh, createReceptionRequest } = buildDeps({
+      registeredResident: null,
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({ chatId: 42, text: "/receive DHL", fromUserId: 99 }),
+      ),
+      deps,
+    );
+
+    expect(createReceptionRequest).not.toHaveBeenCalled();
+    const [message] = sendToAsh.mock.calls[0]!;
+    // The agent receives the raw /receive text and will typically ask
+    // the user to /register first.
+    expect(message).toBe("/receive DHL");
+  });
+
+  it("falls through to raw text when createReceptionRequest throws (Redis hiccup)", async () => {
+    const resident = dmRegisteredResident("de");
+    const { deps, sendToAsh, createReceptionRequest } = buildDeps({
+      registeredResident: resident,
+    });
+    createReceptionRequest.mockRejectedValueOnce(new Error("redis down"));
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({ chatId: 42, text: "/receive DHL morgen", fromUserId: 99 }),
+      ),
+      deps,
+    );
+
+    const [message] = sendToAsh.mock.calls[0]!;
+    expect(message).toBe("/receive DHL morgen");
+  });
+
+  it("does NOT trigger on /receivex (no word boundary) — classifier runs instead", async () => {
+    const { deps, classifyDmIntent, createReceptionRequest } = buildDeps();
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({ chatId: 42, text: "/receivex DHL", fromUserId: 99 }),
+      ),
+      deps,
+    );
+
+    expect(classifyDmIntent).toHaveBeenCalledTimes(1);
+    expect(createReceptionRequest).not.toHaveBeenCalled();
+  });
+
+  it("does NOT trigger on /receive in a group chat (group is not a Flow 2 entry point)", async () => {
+    const { deps, createReceptionRequest, sendToAsh } = buildDeps();
+
+    await processInboundTelegramUpdate(
+      makeRequest({
+        update_id: 1,
+        message: {
+          message_id: 1,
+          date: 1,
+          text: "/receive DHL morgen",
+          chat: { id: -100123, type: "supergroup" },
+          from: { id: 99, is_bot: false, first_name: "T" },
+        },
+      }),
+      deps,
+    );
+
+    expect(createReceptionRequest).not.toHaveBeenCalled();
+    // Raw text passes through to the agent in groups.
+    const [message] = sendToAsh.mock.calls[0]!;
+    expect(message).toBe("/receive DHL morgen");
+  });
+
+  it("accepts /receive followed by a bot @-mention", async () => {
+    const resident = dmRegisteredResident("de");
+    const { deps, createReceptionRequest } = buildDeps({
+      registeredResident: resident,
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 42,
+          text: "/receive@DropMate_bot Hermes morgen",
+          fromUserId: 99,
+        }),
+      ),
+      deps,
+    );
+
+    expect(createReceptionRequest).toHaveBeenCalledTimes(1);
+    const [, input] = createReceptionRequest.mock.calls[0]!;
+    expect(input.carrier).toBe("Hermes");
+  });
+});

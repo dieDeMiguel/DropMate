@@ -69,6 +69,7 @@ import type {
   CreateReceptionRequestResult,
 } from "../reception-request.js";
 import type { PackageCarrier, Resident } from "../redis.js";
+import { isReceiveCommand, parseReceiveCommand } from "../slash-command.js";
 
 import {
   extractInboundCallback,
@@ -770,6 +771,68 @@ async function routeDmTextThroughClassifier(
   return buildFlow2DoneSyntheticMessage(language);
 }
 
+/**
+ * v2.1 Slice 2 (#87): `/receive` slash-command route. Deterministic,
+ * classifier-bypassing entry into Flow 2. The user explicitly invoked
+ * the flow by typing `/receive`, so we treat it as high-confidence by
+ * construction — no classifier call, no confidence threshold, no
+ * fallthrough to the agent's intent reasoning.
+ *
+ * Parsing is a small regex extractor (`lib/slash-command.ts`): carrier
+ * from {DHL, Hermes, DPD, GLS, UPS, Amazon}, date word from {heute,
+ * morgen, übermorgen, today, tomorrow}, hour window like `14-16`. A
+ * bare `/receive` produces an empty input; `createReceptionRequest`
+ * still writes the request and the group card renders as the generic
+ * "📦 Paket erwartet. Kann jemand annehmen?" — exactly the sparse-card
+ * shape #87 asks for.
+ *
+ * Same failure-tolerance as the classifier path: unregistered caller or
+ * a `createReceptionRequest` throw both fall through to handing the raw
+ * `/receive ...` text to the agent. The agent will then prompt the user
+ * to `/register` (unregistered case) or apologise and ask them to retry
+ * (Redis hiccup) — neither leaks privacy because the card-posting side
+ * effect never landed.
+ */
+async function routeReceiveCommand(
+  inbound: TelegramInboundMessage,
+  deps: ProcessUpdateDeps,
+): Promise<string> {
+  if (inbound.fromUserId === null) return inbound.text;
+
+  const caller = await deps
+    .getRegisteredResident(inbound.fromUserId)
+    .catch(() => null);
+  if (!caller) {
+    return inbound.text;
+  }
+
+  const parsed = parseReceiveCommand(inbound.text);
+
+  try {
+    await deps.createReceptionRequest(caller, {
+      carrier: parsed.carrier,
+      expectedDate: parsed.expectedDate,
+      expectedWindowStartAt: parsed.expectedWindowStartAt,
+      expectedWindowEndAt: parsed.expectedWindowEndAt,
+    });
+  } catch (err) {
+    console.error(
+      "[/receive] createReceptionRequest failed for chatId",
+      inbound.chatId,
+      "userId",
+      inbound.fromUserId,
+      "error:",
+      err instanceof Error
+        ? { name: err.name, message: err.message, stack: err.stack }
+        : err,
+    );
+    return inbound.text;
+  }
+
+  const language = caller.language ?? inbound.fromLanguageCode ?? "de";
+  return buildFlow2DoneSyntheticMessage(language);
+}
+
 function buildFlow2DoneSyntheticMessage(language: string): string {
   return [
     `[FLOW_2 DONE language=${language}]`,
@@ -875,7 +938,15 @@ export async function processInboundTelegramUpdate(
   if (inbound.photoFileId !== null) {
     message = await buildSyntheticPhotoMessage(inbound, deps);
   } else if (!inbound.isGroup && inbound.fromUserId !== null) {
-    message = await routeDmTextThroughClassifier(inbound, deps);
+    // `/receive` is the explicit, classifier-bypassing entry point for
+    // Flow 2 v2 (#87). It must run BEFORE `classify_dm_intent` because
+    // the user invoking the slash is already a high-confidence signal
+    // — there's no reason to ask Gemini Flash to second-guess them.
+    if (isReceiveCommand(inbound.text)) {
+      message = await routeReceiveCommand(inbound, deps);
+    } else {
+      message = await routeDmTextThroughClassifier(inbound, deps);
+    }
   } else {
     message = inbound.text;
   }
