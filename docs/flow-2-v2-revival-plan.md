@@ -112,6 +112,30 @@ For each regression found in Phase C: file targeted bug ticket, ralph it AFK, re
 
 When Phase C is clean, merge PR #70. Close #66, #67, #68, #69.
 
+### Phase C result — FAILED 2026-05-21
+
+V2 deployed to prod at 07:54 UTC; Trace A failed on the first inbound. Bot emitted **9 reply messages** to one user DM, invoking Flow 0 ack + Flow 2 v1 `find_available_neighbors` + Flow 1 `notify_recipient` + `post_to_group` (naming the requester in the group), with a hallucinated `Ich kann das Bild nicht direkt lesen` prefix on a text-only message. Three of four v1 failure modes reproduced + a privacy violation. Production rolled back to `dpl_FyyT689rSt53jV2TYDZegPVNz16M` (pre-v2) at 07:57 UTC. Full diagnosis in #85.
+
+**Root cause: three structural issues, not bug-fixable in v2's current shape:**
+
+1. **Soft-deprecation doesn't deprecate.** V2 left every legacy tool in `agent/tools/` and added "do not use" instructions. The model has tool access regardless and used them.
+2. **No tool-surface filtering at the agent layer.** `agent/agent.ts` is `defineAgent({ model })` — all 22 tools auto-register on every turn.
+3. **Session-context pollution from `tg:<chatId>` continuity.** Sessions retain full history; old photos in earlier turns made the model hallucinate a photo on a text-only DM.
+
+**Phase A missed this** because it audited *structure* not *behaviour*. Six structural checks passed; the first live trace failed because the model didn't follow the instructions when the legacy tools remained callable.
+
+### v2.1 — next attempt (separate plan)
+
+PR #70 stays open as a record. Branch `feat/flow-2-v2` carries the cherry-pick commits (`13e20e5` instrumentation, `15ed3ae` this plan doc) — those remain independently useful.
+
+v2.1 needs three structural changes:
+
+1. **Hard-remove legacy tools from disk** (`find_available_neighbors`, `classify_message`, `candidateResidentIds` param). Make wrong branches uncallable, not "instructed against".
+2. **Hard-route Flow 2 in the channel layer.** Pre-classify inbound for absenceSignal; emit `[FLOW_2_ROUTE]` synthetic that the agent reads as "call create_reception_request, nothing else".
+3. **Bound session context** so the model doesn't hallucinate photos from prior turns.
+
+These are systemic changes to how DropMate uses Ash, not patches to v2. v2.1 should be planned as a fresh design exercise. See #85.
+
 ### Phase E — Post-ship observability polish
 
 Parked, deliberately not bundled into v2's ship:
