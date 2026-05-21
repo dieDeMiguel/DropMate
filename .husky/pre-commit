@@ -1,2 +1,4 @@
+export PATH="$HOME/Library/pnpm:/opt/homebrew/bin:/usr/local/bin:$PATH"
+
 pnpm run typecheck
 pnpm run test
