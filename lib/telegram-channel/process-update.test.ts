@@ -78,6 +78,7 @@ interface BuiltDeps {
   createReceptionRequest: ReturnType<typeof vi.fn>;
   acceptReceptionRequest: ReturnType<typeof vi.fn>;
   editGroupCard: ReturnType<typeof vi.fn>;
+  sendDirectMessage: ReturnType<typeof vi.fn>;
 }
 
 type ParsedLabel = NonNullable<
@@ -230,6 +231,7 @@ function buildDeps(overrides: {
     .fn()
     .mockResolvedValue(overrides.acceptResult ?? defaultAcceptResult);
   const editGroupCard = vi.fn().mockResolvedValue(undefined);
+  const sendDirectMessage = vi.fn().mockResolvedValue(undefined);
   return {
     sendToAsh,
     waitUntil,
@@ -247,6 +249,7 @@ function buildDeps(overrides: {
     createReceptionRequest,
     acceptReceptionRequest,
     editGroupCard,
+    sendDirectMessage,
     deps: {
       expectedSecret:
         "expectedSecret" in overrides ? overrides.expectedSecret : SECRET,
@@ -266,6 +269,7 @@ function buildDeps(overrides: {
       createReceptionRequest,
       acceptReceptionRequest,
       editGroupCard,
+      sendDirectMessage,
     },
   };
 }
@@ -1491,7 +1495,7 @@ describe("processInboundTelegramUpdate — callback_query", () => {
     expect(text).toMatch(/weird_action/);
   });
 
-  describe("accept_reception_group (v2.1 Slice 4, #89 — channel-deterministic)", () => {
+  describe("accept_reception_group (v2.1 #96 — channel-deterministic DMs, no agent invocation)", () => {
     /** Reusable volunteer Resident shape for the channel's `getRegisteredResident` dep. */
     function makeVolunteer(overrides: Partial<Resident> = {}): Resident {
       return {
@@ -1512,7 +1516,7 @@ describe("processInboundTelegramUpdate — callback_query", () => {
       };
     }
 
-    it("flips the request via acceptReceptionRequest + edits the group card BEFORE handing the agent the [VOLUNTEER_ACCEPTED] synthetic", async () => {
+    it("flips the request + edits the card + sends both DMs deterministically, NEVER invoking the agent (#96 Part A)", async () => {
       const volunteer = makeVolunteer();
       const {
         deps,
@@ -1522,6 +1526,7 @@ describe("processInboundTelegramUpdate — callback_query", () => {
         getRegisteredResident,
         acceptReceptionRequest,
         editGroupCard,
+        sendDirectMessage,
       } = buildDeps({
         isRegisteredResident: true,
         registeredResident: volunteer,
@@ -1548,7 +1553,7 @@ describe("processInboundTelegramUpdate — callback_query", () => {
         requestId: "req_42",
       });
       // Availability is intentionally omitted — the tap alone is the
-      // "I can help" signal; the agent's DMs land without a window.
+      // "I can help" signal; the DMs go out without a stated window.
       const acceptInput = acceptReceptionRequest.mock.calls[0]![1] as {
         availability?: string;
       };
@@ -1561,10 +1566,10 @@ describe("processInboundTelegramUpdate — callback_query", () => {
         "✅ angenommen von Marlene Hartmann",
       );
 
-      // v2.1 Bug 3 (#95): stripKeyboard now runs AFTER acceptReceptionRequest
-      // (vs before it in the v2 shape) so a thrown accept leaves the
-      // keyboard intact for a re-tap. The order is now:
-      //   accept → stripKeyboard → editGroupCard → sendToAsh.
+      // Call order:
+      //   accept → stripKeyboard → editGroupCard → sendDirectMessage(×2).
+      // (stripKeyboard runs AFTER accept so a thrown accept leaves the
+      // keyboard intact for a re-tap — v2.1 Bug 3 / #95.)
       expect(acceptReceptionRequest.mock.invocationCallOrder[0]).toBeLessThan(
         stripKeyboard.mock.invocationCallOrder[0]!,
       );
@@ -1572,34 +1577,216 @@ describe("processInboundTelegramUpdate — callback_query", () => {
         editGroupCard.mock.invocationCallOrder[0]!,
       );
       expect(editGroupCard.mock.invocationCallOrder[0]).toBeLessThan(
-        sendToAsh.mock.invocationCallOrder[0]!,
+        sendDirectMessage.mock.invocationCallOrder[0]!,
       );
 
-      expect(sendToAsh).toHaveBeenCalledTimes(1);
-      const [text] = sendToAsh.mock.calls[0]!;
-      expect(text).toMatch(/^\[VOLUNTEER_ACCEPTED card_id=req_42/);
-      expect(text).toContain('volunteer={name="Marlene Hartmann"');
-      expect(text).toContain('houseNumber="88"');
-      expect(text).toContain('platformId="300"');
-      expect(text).toContain('language="de"');
-      expect(text).toContain('floor="V."');
-      expect(text).toContain('buzzerName="Hartmann"');
-      expect(text).toContain('requester={name="Patricia Höfer"');
-      expect(text).toContain("carrier=DHL");
-      expect(text).toContain("expectedWindowStartAt=1716122400000");
-      expect(text).toContain("expectedWindowEndAt=1716133200000");
-      expect(text).toMatch(/edit_group_card/);
-      expect(text).toMatch(/post_to_group/);
-      // Slice 5 (#90) hard-deleted accept_reception_request from the
-      // tool surface, so the synthetic must NOT name it (the model has
-      // no such tool now).
-      expect(text).not.toContain("accept_reception_request");
-      // The v2 5-step prompt phrase MUST NOT leak — that was the old
-      // synthesizeCallbackMessage output we replaced.
-      expect(text).not.toMatch(/Procedure: \(1\) DM me back/);
+      // #96 Part A: TWO deterministic DMs, ZERO sendToAsh.
+      expect(sendToAsh).not.toHaveBeenCalled();
+      expect(sendDirectMessage).toHaveBeenCalledTimes(2);
+
+      // Volunteer DM (operational handoff) → chatId = volunteer.platformId = 300.
+      const [volChatId, volText, volEntities] = sendDirectMessage.mock.calls[0]!;
+      expect(volChatId).toBe(300);
+      expect(typeof volText).toBe("string");
+      // Volunteer's language is "de" → German operational template.
+      expect(volText).toMatch(/^Danke fürs Helfen!/);
+      expect(volText).toContain("Patricia Höfer");
+      expect(volText).toContain("Haus 90");
+      expect(volText).toContain("Etage: II.");
+      expect(volText).toContain("Klingel: Höfer");
+      expect(volText).toContain("Carrier: DHL");
+      // Window is rendered as Berlin-local same-day if today.
+      // Defensive: assert just that *something* window-shaped lands.
+      expect(volText).toMatch(/Erwartet: /);
+      // Volunteer DM has NO text_mention entity (it names the
+      // requester, not the volunteer — and the recipient IS the
+      // volunteer, so no need to mention self).
+      expect(volEntities).toBeUndefined();
+      // The synthetic shape this used to produce MUST NOT leak into
+      // the deterministic DM text — that string belongs to a deleted
+      // code path.
+      expect(volText).not.toContain("[VOLUNTEER_ACCEPTED");
+
+      // Requester DM (named confirmation) → chatId = requester.id = 200.
+      const [reqChatId, reqText, reqEntities] = sendDirectMessage.mock.calls[1]!;
+      expect(reqChatId).toBe(200);
+      expect(typeof reqText).toBe("string");
+      // Requester's language is "de" → German confirmation template
+      // starts with the volunteer's name (so the text_mention offset
+      // is at 0).
+      expect(reqText).toMatch(/^Marlene Hartmann aus Haus 88 nimmt dein DHL-Paket/);
+      expect(reqText).toContain("entgegen.");
+
+      // text_mention entity pings the volunteer at the start of the
+      // string (offset 0, length = len("Marlene Hartmann")).
+      expect(reqEntities).toEqual([
+        {
+          type: "text_mention",
+          offset: 0,
+          length: "Marlene Hartmann".length,
+          user: { id: 300 },
+        },
+      ]);
     });
 
-    it("omits carrier and window from the synthetic when the request has neither", async () => {
+    it("renders DMs in each party's stored language (volunteer=en, requester=de)", async () => {
+      const englishVolunteer = makeVolunteer({
+        language: "en",
+        // Re-shape platformId to a different id for clarity.
+        platformId: "400",
+        id: "400",
+        name: "Marlene",
+        floor: undefined,
+        buzzerName: undefined,
+      });
+      // Build an accept result with mixed languages.
+      const mixed: AcceptReceptionRequestResult = {
+        request: {
+          id: "req_mix",
+          streetId: "Methfesselstraße",
+          requesterResidentId: "200",
+          requesterName: "Patricia",
+          requesterHouseNumber: "90",
+          carrier: "DHL",
+          expectedAt: null,
+          volunteerResidentId: "400",
+          volunteerAvailability: null,
+          status: "matched",
+          createdAt: Date.now(),
+          respondedAt: Date.now(),
+          groupCardChatId: -100123,
+          groupCardMessageId: 555,
+        } satisfies ReceptionRequest,
+        requester: {
+          id: "200",
+          name: "Patricia",
+          houseNumber: "90",
+          language: "de",
+          floor: null,
+          buzzerName: null,
+        },
+        volunteer: {
+          id: "400",
+          name: "Marlene",
+          houseNumber: "88",
+          language: "en",
+          floor: null,
+          buzzerName: null,
+          platformId: "400",
+        },
+        groupCardChatId: -100123,
+        groupCardMessageId: 555,
+      };
+      const { deps, sendDirectMessage, sendToAsh } = buildDeps({
+        isRegisteredResident: true,
+        registeredResident: englishVolunteer,
+        acceptResult: mixed,
+      });
+
+      await processInboundTelegramUpdate(
+        makeRequest(
+          cbUpdate({
+            chatId: -100123,
+            messageId: 555,
+            fromUserId: 400,
+            data: "accept_reception_group:req_mix",
+            chatType: "supergroup",
+          }),
+        ),
+        deps,
+      );
+
+      expect(sendToAsh).not.toHaveBeenCalled();
+      expect(sendDirectMessage).toHaveBeenCalledTimes(2);
+
+      // Volunteer DM → English template.
+      const [, volText] = sendDirectMessage.mock.calls[0]!;
+      expect(volText).toMatch(/^Thanks for helping!/);
+
+      // Requester DM → German template (named confirmation).
+      const [, reqText] = sendDirectMessage.mock.calls[1]!;
+      expect(reqText).toMatch(/^Marlene aus Haus 88 nimmt dein DHL-Paket/);
+    });
+
+    it("renders Spanish + Turkish templates with German fallback for unknown languages", async () => {
+      const cases: ReadonlyArray<{
+        language: string;
+        expectedPrefix: RegExp;
+      }> = [
+        { language: "es", expectedPrefix: /^¡Gracias por ayudar!/ },
+        { language: "tr", expectedPrefix: /^Yardım ettiğin için teşekkürler!/ },
+        // Unknown language → German fallback.
+        { language: "xx", expectedPrefix: /^Danke fürs Helfen!/ },
+      ];
+
+      for (const { language, expectedPrefix } of cases) {
+        const volunteer = makeVolunteer({ language });
+        // Build an acceptResult whose volunteer.language matches the
+        // language under test — the template picker reads
+        // `accepted.volunteer.language`, not the looked-up Resident.
+        const acceptResult: AcceptReceptionRequestResult = {
+          request: {
+            id: "req_42",
+            streetId: "Methfesselstraße",
+            requesterResidentId: "200",
+            requesterName: "Patricia",
+            requesterHouseNumber: "90",
+            carrier: "DHL",
+            expectedAt: null,
+            volunteerResidentId: "300",
+            volunteerAvailability: null,
+            status: "matched",
+            createdAt: Date.now(),
+            respondedAt: Date.now(),
+            groupCardChatId: -100123,
+            groupCardMessageId: 555,
+          } satisfies ReceptionRequest,
+          requester: {
+            id: "200",
+            name: "Patricia",
+            houseNumber: "90",
+            language: "de",
+            floor: null,
+            buzzerName: null,
+          },
+          volunteer: {
+            id: "300",
+            name: "Marlene",
+            houseNumber: "88",
+            language,
+            floor: null,
+            buzzerName: null,
+            platformId: "300",
+          },
+          groupCardChatId: -100123,
+          groupCardMessageId: 555,
+        };
+        const { deps, sendDirectMessage } = buildDeps({
+          isRegisteredResident: true,
+          registeredResident: volunteer,
+          acceptResult,
+        });
+
+        await processInboundTelegramUpdate(
+          makeRequest(
+            cbUpdate({
+              chatId: -100123,
+              messageId: 555,
+              fromUserId: 300,
+              data: "accept_reception_group:req_42",
+              chatType: "supergroup",
+            }),
+          ),
+          deps,
+        );
+
+        expect(sendDirectMessage).toHaveBeenCalled();
+        const [, volText] = sendDirectMessage.mock.calls[0]!;
+        expect(volText).toMatch(expectedPrefix);
+      }
+    });
+
+    it("omits carrier / window / floor / buzzer from BOTH DMs when the request has neither (#96 Part A — sparse request)", async () => {
       const volunteer = makeVolunteer();
       const sparse: AcceptReceptionRequestResult = {
         request: {
@@ -1638,7 +1825,7 @@ describe("processInboundTelegramUpdate — callback_query", () => {
         groupCardChatId: -100123,
         groupCardMessageId: 555,
       };
-      const { deps, sendToAsh } = buildDeps({
+      const { deps, sendDirectMessage } = buildDeps({
         isRegisteredResident: true,
         registeredResident: volunteer,
         acceptResult: sparse,
@@ -1657,16 +1844,21 @@ describe("processInboundTelegramUpdate — callback_query", () => {
         deps,
       );
 
-      const [text] = sendToAsh.mock.calls[0]!;
-      expect(text).not.toContain("carrier=");
-      expect(text).not.toContain("expectedWindowStartAt=");
-      expect(text).not.toContain("expectedWindowEndAt=");
-      // Optional fields collapse cleanly when null.
-      expect(text).not.toContain("floor=");
-      expect(text).not.toContain("buzzerName=");
+      const [, volText] = sendDirectMessage.mock.calls[0]!;
+      // Volunteer DM: no carrier/window/floor/buzzer phrases.
+      expect(volText).not.toMatch(/Carrier:/);
+      expect(volText).not.toMatch(/Erwartet:/);
+      expect(volText).not.toMatch(/Etage:/);
+      expect(volText).not.toMatch(/Klingel:/);
+
+      const [, reqText] = sendDirectMessage.mock.calls[1]!;
+      // Requester DM: generic "Paket" (no carrier prefix) + no
+      // window phrase.
+      expect(reqText).toMatch(/dein Paket entgegen\.$/);
+      expect(reqText).not.toMatch(/DHL/);
     });
 
-    it("FAILS LOUD when getRegisteredResident returns null (gate/lookup race): toast, no agent call, keyboard intact (v2.1 Bug 3 / #95)", async () => {
+    it("FAILS LOUD when getRegisteredResident returns null (gate/lookup race): toast, no DMs, no agent call, keyboard intact (v2.1 Bug 3 / #95)", async () => {
       const {
         deps,
         sendToAsh,
@@ -1674,6 +1866,7 @@ describe("processInboundTelegramUpdate — callback_query", () => {
         editGroupCard,
         answerCallback,
         stripKeyboard,
+        sendDirectMessage,
       } = buildDeps({
         isRegisteredResident: true, // gate admits
         registeredResident: null, // race: lookup returns null
@@ -1696,23 +1889,16 @@ describe("processInboundTelegramUpdate — callback_query", () => {
       expect(res.status).toBe(204);
       expect(acceptReceptionRequest).not.toHaveBeenCalled();
       expect(editGroupCard).not.toHaveBeenCalled();
-      // No agent invocation on the failure branch — the entire v2.1
-      // Bug 3 fix is that the fallback to the agent's old 5-step
-      // procedure (which reproduced the v2 chaos at #85) is gone.
       expect(sendToAsh).not.toHaveBeenCalled();
-      // Toast in the volunteer's language. Telegram's languageCode is
-      // "de" (no stored Resident.language since the record vanished),
-      // so the German toast fires.
+      expect(sendDirectMessage).not.toHaveBeenCalled();
       expect(answerCallback).toHaveBeenCalledWith(
         "cb_abc",
         "Etwas ist schiefgelaufen. Bitte erneut versuchen.",
       );
-      // Keyboard stays intact so the volunteer can re-tap once the
-      // race/Redis hiccup clears.
       expect(stripKeyboard).not.toHaveBeenCalled();
     });
 
-    it("FAILS LOUD when acceptReceptionRequest throws: toast, no agent call, keyboard intact (v2.1 Bug 3 / #95)", async () => {
+    it("FAILS LOUD when acceptReceptionRequest throws with a recoverable error: generic toast, no DMs, no agent call, keyboard intact (v2.1 Bug 3 / #95)", async () => {
       const volunteer = makeVolunteer({ language: "de" });
       const {
         deps,
@@ -1721,6 +1907,7 @@ describe("processInboundTelegramUpdate — callback_query", () => {
         editGroupCard,
         answerCallback,
         stripKeyboard,
+        sendDirectMessage,
       } = buildDeps({
         isRegisteredResident: true,
         registeredResident: volunteer,
@@ -1744,15 +1931,107 @@ describe("processInboundTelegramUpdate — callback_query", () => {
 
       expect(res.status).toBe(204);
       expect(editGroupCard).not.toHaveBeenCalled();
-      // No agent invocation — same fail-loud contract as the null-lookup
-      // branch. Even Slice 5's (#90) apology synthetic burned an Ash
-      // turn we don't need.
       expect(sendToAsh).not.toHaveBeenCalled();
+      expect(sendDirectMessage).not.toHaveBeenCalled();
       expect(answerCallback).toHaveBeenCalledWith(
         "cb_abc",
         "Etwas ist schiefgelaufen. Bitte erneut versuchen.",
       );
+      // Keyboard stays live on recoverable failure → user can re-tap.
       expect(stripKeyboard).not.toHaveBeenCalled();
+    });
+
+    it("renders the dedicated cross-street toast AND strips the keyboard when acceptReceptionRequest throws with code ACCEPT_DIFFERENT_STREET (#96 Part B)", async () => {
+      const volunteer = makeVolunteer({ language: "de" });
+      const {
+        deps,
+        sendToAsh,
+        acceptReceptionRequest,
+        editGroupCard,
+        answerCallback,
+        stripKeyboard,
+        sendDirectMessage,
+      } = buildDeps({
+        isRegisteredResident: true,
+        registeredResident: volunteer,
+      });
+      // Build the typed cross-street error so the handler can branch
+      // on `.code`. Doing it inline (vs importing the class) keeps
+      // the test independent of the lib's export shape — the
+      // handler's contract is "the error has a `.code` field equal
+      // to the string `ACCEPT_DIFFERENT_STREET`".
+      const crossStreet = Object.assign(
+        new Error("different street"),
+        { code: "ACCEPT_DIFFERENT_STREET", name: "AcceptReceptionRequestError" },
+      );
+      acceptReceptionRequest.mockRejectedValueOnce(crossStreet);
+
+      const res = await processInboundTelegramUpdate(
+        makeRequest(
+          cbUpdate({
+            chatId: -100123,
+            messageId: 555,
+            fromUserId: 300,
+            data: "accept_reception_group:req_42",
+            chatType: "supergroup",
+          }),
+        ),
+        deps,
+      );
+
+      expect(res.status).toBe(204);
+      expect(acceptReceptionRequest).toHaveBeenCalledTimes(1);
+      expect(editGroupCard).not.toHaveBeenCalled();
+      // No agent invocation, no DMs.
+      expect(sendToAsh).not.toHaveBeenCalled();
+      expect(sendDirectMessage).not.toHaveBeenCalled();
+      // Dedicated toast (de) — NOT the generic retry shape.
+      expect(answerCallback).toHaveBeenCalledWith(
+        "cb_abc",
+        "Du und dieser Nachbar müsst auf derselben Straße wohnen.",
+      );
+      // Keyboard IS stripped — the cross-street constraint is permanent;
+      // the volunteer cannot succeed by re-tapping the same button.
+      expect(stripKeyboard).toHaveBeenCalledWith(-100123, 555);
+    });
+
+    it("localises the cross-street toast across de/en/es/tr (#96 Part B)", async () => {
+      const cases: ReadonlyArray<{ language: string; expected: string }> = [
+        { language: "de", expected: "Du und dieser Nachbar müsst auf derselben Straße wohnen." },
+        { language: "en", expected: "You and this neighbor must live on the same street." },
+        { language: "es", expected: "Tú y este vecino debéis vivir en la misma calle." },
+        { language: "tr", expected: "Sen ve bu komşu aynı sokakta yaşamalısınız." },
+      ];
+
+      for (const { language, expected } of cases) {
+        const volunteer = makeVolunteer({ language });
+        const { deps, acceptReceptionRequest, answerCallback, stripKeyboard } =
+          buildDeps({
+            isRegisteredResident: true,
+            registeredResident: volunteer,
+          });
+        const crossStreet = Object.assign(
+          new Error("different street"),
+          { code: "ACCEPT_DIFFERENT_STREET" },
+        );
+        acceptReceptionRequest.mockRejectedValueOnce(crossStreet);
+
+        await processInboundTelegramUpdate(
+          makeRequest(
+            cbUpdate({
+              chatId: -100123,
+              messageId: 555,
+              fromUserId: 300,
+              data: "accept_reception_group:req_42",
+              chatType: "supergroup",
+            }),
+          ),
+          deps,
+        );
+
+        expect(answerCallback).toHaveBeenCalledWith("cb_abc", expected);
+        expect(stripKeyboard).toHaveBeenCalledWith(-100123, 555);
+      }
     });
 
     it("localizes the failure toast to the volunteer's stored Resident.language (en) when acceptReceptionRequest throws (v2.1 Bug 3 / #95)", async () => {
@@ -1844,7 +2123,7 @@ describe("processInboundTelegramUpdate — callback_query", () => {
       expect(sendToAsh).not.toHaveBeenCalled();
     });
 
-    it("FAILS LOUD when getRegisteredResident throws (Redis hiccup): toast, no agent call, keyboard intact (v2.1 Bug 3 / #95)", async () => {
+    it("FAILS LOUD when getRegisteredResident throws (Redis hiccup): toast, no DMs, no agent call, keyboard intact (v2.1 Bug 3 / #95)", async () => {
       const {
         deps,
         sendToAsh,
@@ -1853,6 +2132,7 @@ describe("processInboundTelegramUpdate — callback_query", () => {
         answerCallback,
         stripKeyboard,
         getRegisteredResident,
+        sendDirectMessage,
       } = buildDeps({
         isRegisteredResident: true,
       });
@@ -1876,6 +2156,7 @@ describe("processInboundTelegramUpdate — callback_query", () => {
       expect(acceptReceptionRequest).not.toHaveBeenCalled();
       expect(editGroupCard).not.toHaveBeenCalled();
       expect(sendToAsh).not.toHaveBeenCalled();
+      expect(sendDirectMessage).not.toHaveBeenCalled();
       expect(answerCallback).toHaveBeenCalledWith(
         "cb_abc",
         "Algo salió mal. Por favor inténtalo de nuevo.",
@@ -1883,9 +2164,9 @@ describe("processInboundTelegramUpdate — callback_query", () => {
       expect(stripKeyboard).not.toHaveBeenCalled();
     });
 
-    it("still hands the agent [VOLUNTEER_ACCEPTED] when editGroupCard throws (state flip already landed)", async () => {
+    it("still sends both DMs when editGroupCard throws (state flip already landed) — #96 Part A: no agent invocation either way", async () => {
       const volunteer = makeVolunteer();
-      const { deps, sendToAsh, editGroupCard } = buildDeps({
+      const { deps, sendToAsh, editGroupCard, sendDirectMessage } = buildDeps({
         isRegisteredResident: true,
         registeredResident: volunteer,
       });
@@ -1905,13 +2186,40 @@ describe("processInboundTelegramUpdate — callback_query", () => {
       );
 
       expect(editGroupCard).toHaveBeenCalledTimes(1);
-      const [text] = sendToAsh.mock.calls[0]!;
-      // Agent still gets the [VOLUNTEER_ACCEPTED] synthetic — DMs go out;
-      // the stale card can be reconciled separately.
-      expect(text).toMatch(/^\[VOLUNTEER_ACCEPTED/);
+      expect(sendToAsh).not.toHaveBeenCalled();
+      // Both DMs still go out — the stale card can be reconciled
+      // separately, but the volunteer + requester each get their
+      // notification.
+      expect(sendDirectMessage).toHaveBeenCalledTimes(2);
     });
 
-    it("skips editGroupCard when the request has no card on record", async () => {
+    it("still sends the second DM when the first DM throws (#96 Part A: don't bail mid-flow)", async () => {
+      const volunteer = makeVolunteer();
+      const { deps, sendDirectMessage } = buildDeps({
+        isRegisteredResident: true,
+        registeredResident: volunteer,
+      });
+      // First DM (volunteer) fails; second (requester) still goes.
+      sendDirectMessage.mockRejectedValueOnce(new Error("Bot API timeout"));
+      sendDirectMessage.mockResolvedValueOnce(undefined);
+
+      await processInboundTelegramUpdate(
+        makeRequest(
+          cbUpdate({
+            chatId: -100123,
+            messageId: 555,
+            fromUserId: 300,
+            data: "accept_reception_group:req_42",
+            chatType: "supergroup",
+          }),
+        ),
+        deps,
+      );
+
+      expect(sendDirectMessage).toHaveBeenCalledTimes(2);
+    });
+
+    it("skips editGroupCard when the request has no card on record but still sends both DMs", async () => {
       const volunteer = makeVolunteer();
       const noCardResult: AcceptReceptionRequestResult = {
         request: {
@@ -1950,7 +2258,7 @@ describe("processInboundTelegramUpdate — callback_query", () => {
         groupCardChatId: null,
         groupCardMessageId: null,
       };
-      const { deps, sendToAsh, editGroupCard } = buildDeps({
+      const { deps, sendToAsh, editGroupCard, sendDirectMessage } = buildDeps({
         isRegisteredResident: true,
         registeredResident: volunteer,
         acceptResult: noCardResult,
@@ -1970,9 +2278,10 @@ describe("processInboundTelegramUpdate — callback_query", () => {
       );
 
       expect(editGroupCard).not.toHaveBeenCalled();
-      // Synthetic still lands so the agent emits the two DMs.
-      const [text] = sendToAsh.mock.calls[0]!;
-      expect(text).toMatch(/^\[VOLUNTEER_ACCEPTED card_id=req_legacy/);
+      // Both DMs still land — the channel doesn't need a card to
+      // notify either party.
+      expect(sendToAsh).not.toHaveBeenCalled();
+      expect(sendDirectMessage).toHaveBeenCalledTimes(2);
     });
 
     it("rejects unregistered tappers with a German toast and leaves the keyboard intact", async () => {

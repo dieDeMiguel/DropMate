@@ -61,6 +61,7 @@ import {
   processInboundTelegramUpdate,
   type TelegramChannelState,
 } from "./process-update.js";
+import { sendTelegramMessage } from "./send.js";
 
 /**
  * Factory inputs. Both fields are required strings — the spike's
@@ -241,6 +242,9 @@ export function telegramChannel(config: TelegramChannelConfig) {
               acceptReceptionRequest(caller, input),
             editGroupCard: (chatId, messageId, text) =>
               editGroupCard(token, chatId, messageId, text),
+            sendDirectMessage: async (chatId, text, entities) => {
+              await sendTelegramMessage(token, chatId, text, undefined, entities);
+            },
           });
         },
       ),

@@ -332,6 +332,44 @@ describe("acceptReceptionRequest (v2.1 Bug 3 / #95 — defensive sparse-field ha
     ).rejects.toThrow(/different street/);
   });
 
+  // #96 Part B: the cross-street error must be a typed
+  // `AcceptReceptionRequestError` with
+  // `code: ACCEPT_DIFFERENT_STREET_ERROR_CODE` so the channel's
+  // callback handler can render the dedicated toast (and strip the
+  // keyboard) instead of the generic retry shape. Before #96 the
+  // street-mismatch path threw a plain `Error`, the handler couldn't
+  // distinguish it from a recoverable Redis hiccup, and the volunteer
+  // would re-tap (the toast said "try again", the button was still
+  // there) on a permanent rejection. Live trace observed 5 taps in 10
+  // seconds.
+  it("throws AcceptReceptionRequestError with code=ACCEPT_DIFFERENT_STREET on streetId mismatch (#96 Part B)", async () => {
+    const volunteer = seedResident({
+      platformId: "308",
+      name: "Marlene",
+      houseNumber: "88",
+      street: "Methfesselstraße",
+    });
+    seedRequest({
+      id: "req_crossstreet",
+      streetId: "Some Other Street",
+    });
+
+    const lib = await loadLib();
+    let thrown: unknown;
+    try {
+      await lib.acceptReceptionRequest(volunteer, {
+        requestId: "req_crossstreet",
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(lib.AcceptReceptionRequestError);
+    expect((thrown as { code?: string }).code).toBe(
+      lib.ACCEPT_DIFFERENT_STREET_ERROR_CODE,
+    );
+    expect((thrown as Error).message).toMatch(/different street/);
+  });
+
   it("rejects with the expected message when the request is already matched", async () => {
     const volunteer = seedResident({
       platformId: "307",

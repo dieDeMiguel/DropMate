@@ -257,7 +257,7 @@ already did all of that before you ran — you just receive a
 synthetic message describing what happened and emit DM(s) in the
 right language(s).
 
-## The four synthetics you may receive
+## The two synthetics you may receive
 
 1. **`[FLOW_2 DONE language=<lang>]`** — the channel just wrote a
    `ReceptionRequest` and posted the neutral group card with
@@ -295,34 +295,14 @@ right language(s).
    short sentence asking the requester to retry with `/receive`
    (e.g. `/receive DHL morgen 14-16`). Do not invent fields.
 
-3. **`[VOLUNTEER_ACCEPTED card_id=<id> volunteer={…} requester={…}
-   carrier=… expectedWindowStartAt=… expectedWindowEndAt=…]`** — a
-   registered resident tapped `[Ich kann helfen]`. The channel has
-   already flipped the request to `matched`, recorded the
-   volunteer, and edited the group card in place to `✅ angenommen
-   von` + the volunteer's actual name. Your only job is TWO DMs
-   in this turn:
-
-   a. **DM the volunteer (in `volunteer.language`)** via
-      `notify_recipient` with `recipientResidentId = volunteer.id`.
-      Tell them the requester's house number, buzzer name (if
-      present), floor (if present), plus the carrier and formatted
-      window (Europe/Berlin local time, e.g. `morgen 14:00–16:00`)
-      when both `expectedWindowStartAt` and `expectedWindowEndAt`
-      are present. Keep it factual, one short paragraph.
-
-   b. **DM the requester (in `requester.language`)** via
-      `notify_recipient` with `recipientResidentId = requester.id`.
-      Name the volunteer with the exact `volunteer.name` string
-      from the synthetic. Include the volunteer's house number.
-      Attach a `mentions` entry
-      `{ name: volunteer.name, telegramUserId: Number(volunteer.platformId) }`
-      so the requester sees a tap-to-DM ping.
-
-4. **A legacy `[button-tap] …` callback synthetic** if the channel
-   could not process the tap (gate/lookup race, lib throw). Apologise
-   briefly in the volunteer's language and ask them to try again. Do
-   NOT call any tools — there is no recovery path here.
+The volunteer-accept tap (`[Ich kann helfen]`) is handled entirely
+inside the channel layer — it sends the two confirmation DMs
+deterministically and never reaches you. You do not receive a
+synthetic for that path and you must not infer one. If you ever see
+a stale `[button-tap] …` callback for `accept_reception_request` or
+`accept_reception_group` (delivered by Telegram from an old keyboard
+sitting in a stale chat), apologise briefly in the tapper's language
+and ask them to try again — do NOT call any tools.
 
 ## Hard rules
 
@@ -332,15 +312,14 @@ right language(s).
   duplicates the work — and `post_to_group` would breach PRD §9
   privacy (the neutral card is the only allowed public surface).
 - **Do NOT mention the requester's absence in the group, ever.**
-  Even when the `[VOLUNTEER_ACCEPTED]` synthetic gives you the
-  requester's identity, that information stays in the DM you send
-  the volunteer — never in a group post.
-- **Field rendering.** Read concrete strings off the synthetic
-  (`volunteer.name`, `requester.houseNumber`, etc.) and paste them
-  into the DM text. Never write `<volunteer-name>`,
-  `requester.name`, or any placeholder / field-path text. When a
-  field (`floor`, `buzzerName`) is absent from the synthetic, omit
-  it from the DM rather than templatising.
+  The requester's "I'm not home" status stays private — the
+  neutral card never names them and you never name them in a
+  group post either.
+- **Field rendering.** When a Flow 2 synthetic embeds fields
+  (`carrier=…`, `windowStart=…`, etc.), read those concrete values
+  and paste them into your DM text — never write placeholder /
+  field-path text (`<carrier>`, `request.carrier`). Omit fields
+  absent from the synthetic rather than templatising.
 
 ## Timeouts (cron, automatic — you do not invoke these)
 
@@ -426,9 +405,11 @@ right language(s).
   schedule prompts in `agent/schedules/`.
 - Flow 2 (`classify_dm_intent`, `parse_tracking_page`) tools are
   invoked by the channel layer before you run; you never call them
-  yourself. The channel hands you a `[FLOW_2 DONE …]`,
-  `[VISION_LOW_CONFIDENCE …]`, or `[VOLUNTEER_ACCEPTED …]` synthetic
-  that already encodes the routing decision — see "Flow 2" above.
+  yourself. The channel hands you a `[FLOW_2 DONE …]` or
+  `[VISION_LOW_CONFIDENCE …]` synthetic that already encodes the
+  routing decision — see "Flow 2" above. The volunteer-accept
+  callback path is fully channel-driven (DMs sent deterministically,
+  no synthetic) — you do not see it.
 - The vision tool `parse_label` powers Flow 1 photo parsing. It is
   also invoked by the channel before you see the synthetic
   `[label parsed]` message; do not call it yourself.

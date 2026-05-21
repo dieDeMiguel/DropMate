@@ -42,9 +42,9 @@ import {
 
 /**
  * Pre-resolved summary of the request's requester. Surfaced by
- * `acceptReceptionRequest` so the caller can compose the confirmation
- * DM (and, on the channel-side path, the `[VOLUNTEER_ACCEPTED]`
- * synthetic) without re-loading the requester's Resident record.
+ * `acceptReceptionRequest` so the caller (the channel's
+ * `handleAcceptReceptionGroup`) can render the requester-facing
+ * confirmation DM without re-loading the requester's Resident record.
  */
 export interface RequesterSummary {
   readonly id: string;
@@ -250,6 +250,38 @@ export interface AcceptReceptionRequestResult {
 }
 
 /**
+ * Discriminator on errors thrown by `acceptReceptionRequest` so the
+ * channel handler can render the right toast and decide whether to strip
+ * the keyboard.
+ *
+ * v2.1 #96 Part B: a cross-street accept is a permanent rejection — the
+ * tapper's stored `Resident.street` differs from the request's `streetId`
+ * and that does not change without the user re-registering. The button
+ * SHOULD disappear (no retry possible), and the toast SHOULD spell out
+ * the constraint rather than the generic "try again". Every other failure
+ * class (Redis hiccup, request gone, already matched, lookup race) is
+ * recoverable from the user's perspective, so those keep the keyboard
+ * live and the generic toast.
+ *
+ * The error class carries the discriminator on `.code` so the handler
+ * can `instanceof`-or-`code`-check without parsing the message string.
+ */
+export const ACCEPT_DIFFERENT_STREET_ERROR_CODE =
+  "ACCEPT_DIFFERENT_STREET" as const;
+
+export type AcceptReceptionRequestErrorCode =
+  typeof ACCEPT_DIFFERENT_STREET_ERROR_CODE;
+
+export class AcceptReceptionRequestError extends Error {
+  readonly code: AcceptReceptionRequestErrorCode;
+  constructor(code: AcceptReceptionRequestErrorCode, message: string) {
+    super(message);
+    this.name = "AcceptReceptionRequestError";
+    this.code = code;
+  }
+}
+
+/**
  * Flip an open `ReceptionRequest` to `"matched"`, recording the
  * caller as the volunteer.
  *
@@ -300,7 +332,8 @@ export async function acceptReceptionRequest(
       );
     }
     if (target.streetId !== caller.street) {
-      throw new Error(
+      throw new AcceptReceptionRequestError(
+        ACCEPT_DIFFERENT_STREET_ERROR_CODE,
         `acceptReceptionRequest: reception request ${input.requestId} is on a different street — only residents on the same street can claim.`,
       );
     }
