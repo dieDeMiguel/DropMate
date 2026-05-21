@@ -16,7 +16,11 @@ left to load.
 ## Synthetics the channel emits
 
 - `[FLOW_2 DONE language=<lang>]` — request written + card posted.
-  Reply to the requester with ONE short ack sentence in `<lang>`.
+  Reply to the requester with ONE short ack sentence in `<lang>`
+  confirming the group was asked. Do NOT mention the carrier,
+  date, or window. Do NOT include 📦. Do NOT repeat the card
+  text. See the four worked examples in `agent/instructions.md`
+  Flow 2 stanza for the exact ack shape per language.
 - `[VISION_LOW_CONFIDENCE language=<lang>] …` — DM-photo path
   couldn't extract enough fields. Ask the requester in `<lang>` to
   retry via `/receive`.

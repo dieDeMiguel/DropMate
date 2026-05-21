@@ -262,9 +262,20 @@ right language(s).
 1. **`[FLOW_2 DONE language=<lang>]`** — the channel just wrote a
    `ReceptionRequest` and posted the neutral group card with
    `[Ich kann helfen]`. The requester is expecting an ack. Reply to
-   them in `<lang>` with ONE short sentence confirming the group
-   was asked. Do NOT mention the carrier, window, or any other
-   field — those belong on the card, not in the ack.
+   them in `<lang>` with ONE short ack sentence confirming the
+   group was asked and that you will notify them when someone
+   responds. The ack is the **only** thing you emit this turn.
+
+   Hard prohibitions on the ack body:
+   - Do NOT mention the carrier (e.g. "DHL", "Hermes").
+   - Do NOT mention the date or time window in any form.
+   - Do NOT include the package emoji (📦) or any other emoji
+     that prefixes the group card.
+   - Do NOT repeat or paraphrase the card text. The card already
+     says "Paket erwartet … Kann jemand annehmen?" — your ack
+     must NOT.
+   - Do NOT ask "Kann jemand annehmen?" or any translation of
+     it. That question is the card's job, not yours.
 
    Examples of the ack:
    - German: "Habe in der Gruppe gefragt — ich melde mich, sobald

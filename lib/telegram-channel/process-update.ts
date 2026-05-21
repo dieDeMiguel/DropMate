@@ -1179,14 +1179,47 @@ function buildVolunteerAcceptedSyntheticMessage(
   ].join(" ");
 }
 
+/**
+ * Per-language ack examples for the FLOW_2 DONE synthetic.
+ *
+ * v2.1 Bug 2 (#94) regression: live trace produced the DM ack
+ * `📦 DHL-Paket erwartet heute 06:00–08:00. Kann jemand annehmen?` —
+ * literally the card text, not an ack. Root cause: the previous
+ * synthetic was informative ("the channel just wrote a request") but
+ * not directive enough to stop the model from mimicking the card. The
+ * fix is twofold: (1) the synthetic now explicitly prohibits the card
+ * shape (no 📦, no carrier, no window, no `Kann jemand annehmen?`),
+ * and (2) it embeds a known-good example in the requester's language
+ * so the model has a concrete sentence to mirror instead of inventing
+ * one. The four languages here mirror the four examples in
+ * `agent/instructions.md`'s Flow 2 stanza — the same source of truth.
+ *
+ * For languages outside this set the synthetic omits the example
+ * line and the model falls back to `agent/instructions.md`'s prose
+ * rules; the prohibitions still apply.
+ */
+const FLOW_2_DONE_ACK_EXAMPLES: Readonly<Record<string, string>> = {
+  de: "Habe in der Gruppe gefragt — ich melde mich, sobald jemand zusagt.",
+  en: "Asked in the group — I'll let you know as soon as someone says yes.",
+  es: "Pregunté en el grupo — te aviso en cuanto alguien responda.",
+  tr: "Gruba sordum — biri yanıt verince haber veririm.",
+};
+
 function buildFlow2DoneSyntheticMessage(language: string): string {
+  const example = FLOW_2_DONE_ACK_EXAMPLES[language];
+  const exampleLine = example
+    ? ` Example (${language}): "${example}".`
+    : "";
   return [
     `[FLOW_2 DONE language=${language}]`,
-    "The channel just wrote a ReceptionRequest and posted a neutral",
-    "group card with [Ich kann helfen]. Reply to the requester in",
-    `${language} with ONE short sentence confirming the group was`,
-    "asked. Do NOT call post_to_group, register_expected_delivery, or",
-    "any other tool — the card is already up.",
+    "The channel posted the neutral group card with [Ich kann helfen].",
+    `Your only job is ONE short ack sentence to the requester in ${language}`,
+    "confirming you asked the group and will notify them when someone",
+    "responds. Do NOT mention the carrier, date, or time window. Do NOT",
+    "include any package emoji (📦). Do NOT repeat the card text. Do NOT",
+    "ask whether anyone can help — that is the card's job, not yours.",
+    "Do NOT call post_to_group, register_expected_delivery, or any other",
+    `tool — the card is already up.${exampleLine}`,
   ].join(" ");
 }
 

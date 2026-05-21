@@ -2458,3 +2458,136 @@ describe("processInboundTelegramUpdate — /receive slash command (v2.1 Slice 2,
     expect(input.carrier).toBe("Hermes");
   });
 });
+
+describe("FLOW_2 DONE synthetic shape (v2.1 Bug 2 regression, #94)", () => {
+  // Trace A failure (#92 / #94): with the previous synthetic ("Reply
+  // … with ONE short sentence confirming the group was asked. Do
+  // NOT call post_to_group …") the model interpreted the
+  // informative clauses as guidance it could ignore and emitted the
+  // card text verbatim ("📦 DHL-Paket erwartet heute 06:00–08:00.
+  // Kann jemand annehmen?") as the DM ack. The synthetic now has
+  // to be DIRECTIVE: it must (a) name every shape the ack must NOT
+  // take and (b) embed a known-good example sentence so the model
+  // mirrors it instead of inventing one. These cases pin those
+  // load-bearing constraints so future prompt tweaks can't silently
+  // delete them.
+
+  function dmRegisteredResident(language = "de"): Resident {
+    return {
+      id: "patricia",
+      name: "Patricia Höfer",
+      street: "Methfesselstraße",
+      houseNumber: "90",
+      platformId: "patricia",
+      platform: "telegram",
+      language,
+      availabilityPatterns: [],
+      registeredAt: Date.now(),
+      source: "explicit",
+      confirmed: true,
+    };
+  }
+
+  async function runFlow2Done(language: string): Promise<string> {
+    const resident = dmRegisteredResident(language);
+    const { deps, sendToAsh } = buildDeps({
+      classification: {
+        isFlow2: true,
+        absenceSignal: true,
+        carrier: "DHL",
+        expectedDate: "2026-05-22",
+        expectedWindowStartAt: 1747915200000,
+        expectedWindowEndAt: 1747922400000,
+        confidence: "high",
+        reason: "absence + DHL + window",
+      },
+      registeredResident: resident,
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 42,
+          text: "Ich erwarte morgen 14-16 Uhr DHL und bin nicht zu Hause",
+          fromUserId: 99,
+          languageCode: language,
+        }),
+      ),
+      deps,
+    );
+
+    const [message] = sendToAsh.mock.calls[0]!;
+    if (typeof message !== "string") {
+      throw new Error("expected synthetic to be a string");
+    }
+    return message;
+  }
+
+  it("prohibits the card-shaped ack patterns the model regurgitated live (#94 trace)", async () => {
+    const message = await runFlow2Done("de");
+
+    // Carrier name — observed in the buggy ack ("DHL-Paket erwartet …").
+    expect(message).toMatch(/do not mention the carrier/i);
+    // Window/date — observed as "heute 06:00–08:00" in the bug report.
+    // The prohibition lives in the same `Do NOT mention …` clause that
+    // forbids the carrier; assert the date + time window words land
+    // inside that prohibition (rather than appearing accidentally in
+    // an example sentence).
+    expect(message).toMatch(/do not mention .*(date|window|time)/i);
+    // Package emoji — observed prefix on the buggy ack body.
+    expect(message).toContain("📦");
+    expect(message).toMatch(/do not include.+(emoji|📦)/i);
+    // The literal card question — observed as "Kann jemand
+    // annehmen?" in the buggy ack.
+    expect(message).toMatch(/do not (repeat|paraphrase).+card/i);
+    expect(message).toMatch(/do not ask whether anyone can help/i);
+  });
+
+  it("embeds a known-good German example for de-language requesters", async () => {
+    const message = await runFlow2Done("de");
+    expect(message).toContain('Example (de):');
+    expect(message).toContain(
+      "Habe in der Gruppe gefragt — ich melde mich, sobald jemand zusagt.",
+    );
+    // The example MUST NOT contain the card-shaped tokens — if it did
+    // the model would mirror the wrong shape.
+    const exampleSegment = message.slice(message.indexOf('Example (de):'));
+    expect(exampleSegment).not.toContain("📦");
+    expect(exampleSegment).not.toContain("DHL");
+    expect(exampleSegment).not.toContain("Kann jemand annehmen?");
+  });
+
+  it("embeds a known-good English example for en-language requesters", async () => {
+    const message = await runFlow2Done("en");
+    expect(message).toContain('Example (en):');
+    expect(message).toContain(
+      "Asked in the group — I'll let you know as soon as someone says yes.",
+    );
+  });
+
+  it("embeds a known-good Spanish example for es-language requesters", async () => {
+    const message = await runFlow2Done("es");
+    expect(message).toContain('Example (es):');
+    expect(message).toContain(
+      "Pregunté en el grupo — te aviso en cuanto alguien responda.",
+    );
+  });
+
+  it("embeds a known-good Turkish example for tr-language requesters", async () => {
+    const message = await runFlow2Done("tr");
+    expect(message).toContain('Example (tr):');
+    expect(message).toContain(
+      "Gruba sordum — biri yanıt verince haber veririm.",
+    );
+  });
+
+  it("omits the example line for unknown languages (falls back to instructions.md rules)", async () => {
+    const message = await runFlow2Done("ja");
+    // Still names the language…
+    expect(message).toContain("language=ja");
+    expect(message).toContain("in ja");
+    // …but the example block is omitted rather than emitting a German
+    // example that the model would mistakenly mirror in Japanese.
+    expect(message).not.toContain("Example (");
+  });
+});

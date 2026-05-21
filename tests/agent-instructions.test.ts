@@ -124,6 +124,73 @@ describe("model-facing surfaces (tools, skills, schedules, lib/redis.ts)", () =>
   });
 });
 
+// Regression for v2.1 Bug 2 (#94) — observed live 2026-05-21: on the
+// `[FLOW_2 DONE]` synthetic the model emitted the card text verbatim
+// ("📦 DHL-Paket erwartet heute 06:00–08:00. Kann jemand annehmen?") as
+// the DM ack instead of the one-sentence "Habe in der Gruppe gefragt …"
+// confirmation. The fix has two layers: (1) the synthetic itself is now
+// directive (asserted in `lib/telegram-channel/process-update.test.ts`),
+// and (2) the Flow 2 stanza in `instructions.md` calls out every
+// card-shaped pattern the ack must NOT take. This block pins the
+// instructions.md side of (2) so a future doc tweak can't silently
+// delete the load-bearing prohibitions.
+describe("agent/instructions.md Flow 2 ack format rules (v2.1 Bug 2, #94)", () => {
+  let flow2Stanza: string;
+
+  function extractFlow2Stanza(contents: string): string {
+    const start = contents.indexOf("# Flow 2 — \"I won't be home\"");
+    if (start === -1) {
+      throw new Error(
+        'could not locate the Flow 2 stanza header in instructions.md; if it was renamed, update this test',
+      );
+    }
+    const after = contents.indexOf("\n# ", start + 1);
+    return after === -1 ? contents.slice(start) : contents.slice(start, after);
+  }
+
+  it("contains explicit hard prohibitions on the card-shaped ack patterns from the bug trace", async () => {
+    const contents = await readFile(instructionsPath, "utf8");
+    flow2Stanza = extractFlow2Stanza(contents);
+
+    // Each clause names a specific pattern observed in the buggy live
+    // ack — collectively they tell the model "the card is not the
+    // template for your reply."
+    expect(flow2Stanza).toMatch(/do not mention the carrier/i);
+    expect(flow2Stanza).toMatch(/do not mention the date/i);
+    expect(flow2Stanza).toMatch(/package emoji \(📦\)/i);
+    expect(flow2Stanza).toMatch(/do not repeat.+card text/i);
+    expect(flow2Stanza).toMatch(/do not ask "kann jemand annehmen\?"/i);
+  });
+
+  it("keeps the four per-language ack examples in sync with the synthetic's embedded examples", async () => {
+    const contents = await readFile(instructionsPath, "utf8");
+    flow2Stanza = extractFlow2Stanza(contents);
+    // The markdown source wraps long example sentences across multiple
+    // lines with leading indentation. Normalise whitespace before
+    // comparing so the assertions match the reader's mental model of
+    // the sentence rather than the literal wrap.
+    const normalised = flow2Stanza.replace(/\s+/g, " ");
+
+    // The synthetic embeds these examples in `process-update.ts`'s
+    // `FLOW_2_DONE_ACK_EXAMPLES` map. The stanza below MUST list the
+    // same four examples verbatim — they are the canonical fallback
+    // the model leans on for unknown-language requesters who fall
+    // outside the synthetic's per-language example block.
+    expect(normalised).toContain(
+      "Habe in der Gruppe gefragt — ich melde mich, sobald jemand zusagt.",
+    );
+    expect(normalised).toContain(
+      "Asked in the group — I'll let you know as soon as someone says yes.",
+    );
+    expect(normalised).toContain(
+      "Pregunté en el grupo — te aviso en cuanto alguien responda.",
+    );
+    expect(normalised).toContain(
+      "Gruba sordum — biri yanıt verince haber veririm.",
+    );
+  });
+});
+
 // Regression for #43 item 2b round 3 — observed live 2026-05-18: the
 // model produced the literal string "<holder.name>" in its reply because
 // previous instructions used angle-bracket dashed placeholders
