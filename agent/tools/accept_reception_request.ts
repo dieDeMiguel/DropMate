@@ -2,6 +2,14 @@
  * `accept_reception_request` — a candidate neighbor agrees to receive
  * a package for someone who pre-announced they wouldn't be home.
  *
+ * v2.1 (#86): this file is now a thin wrapper around
+ * `lib/reception-request.ts::acceptReceptionRequest`. The business
+ * logic (status flip, volunteer write, requester/volunteer summary
+ * resolution, defensive scope guards) lives in the lib so the channel
+ * callback handler can call it directly without staging an Ash session
+ * — see v2.1 Slice 4 (#89). This file resolves the Telegram-authenticated
+ * caller from session context and delegates to the lib.
+ *
  * Two acceptance paths share this tool:
  *
  *   1. **Legacy DM-3 flow** (`candidateResidentIds` non-empty on the
@@ -22,10 +30,9 @@
  * group-card requests, any open request on the street is eligible;
  * for DM-3, the volunteer must appear in the snapshot.
  *
- * On success, the tool flips `status: "open"` → `"matched"`, records
- * the volunteer + their availability + `respondedAt`, and returns the
- * updated record plus pre-resolved summaries the model uses to compose
- * the two downstream DMs (volunteer + requester) and the card edit:
+ * Returns the updated record plus pre-resolved summaries the model
+ * uses to compose the two downstream DMs (volunteer + requester) and
+ * the card edit:
  *
  *   - `requester` — id, name, houseNumber, language, floor, buzzerName.
  *   - `volunteer` — id, name, houseNumber, language, floor, buzzerName,
@@ -44,33 +51,12 @@ import { defineTool } from "experimental-ash/tools";
 import { z } from "zod";
 
 import { requireRegisteredTelegramCaller } from "../../lib/auth.js";
-import {
-  getReceptionRequest,
-  getResident,
-  listReceptionRequestsForStreet,
-  setReceptionRequest,
-  type ReceptionRequest,
-  type Resident,
-} from "../../lib/redis.js";
+import { acceptReceptionRequest } from "../../lib/reception-request.js";
 
-export interface RequesterSummary {
-  readonly id: string;
-  readonly name: string;
-  readonly houseNumber: string;
-  readonly language: string | null;
-  readonly floor: string | null;
-  readonly buzzerName: string | null;
-}
-
-export interface VolunteerSummary {
-  readonly id: string;
-  readonly name: string;
-  readonly houseNumber: string;
-  readonly language: string | null;
-  readonly floor: string | null;
-  readonly buzzerName: string | null;
-  readonly platformId: string;
-}
+export type {
+  RequesterSummary,
+  VolunteerSummary,
+} from "../../lib/reception-request.js";
 
 const inputSchema = z.object({
   availability: z
@@ -94,24 +80,6 @@ const inputSchema = z.object({
         "and threads it into the synthesized intent message.",
     ),
 });
-
-function summariseResident(resident: Resident): {
-  id: string;
-  name: string;
-  houseNumber: string;
-  language: string | null;
-  floor: string | null;
-  buzzerName: string | null;
-} {
-  return {
-    id: resident.platformId,
-    name: resident.name,
-    houseNumber: resident.houseNumber,
-    language: resident.language ?? null,
-    floor: resident.floor ?? null,
-    buzzerName: resident.buzzerName ?? null,
-  };
-}
 
 export default defineTool({
   description:
@@ -138,82 +106,6 @@ export default defineTool({
       "accept_reception_request",
     );
 
-    let target: ReceptionRequest | null;
-    if (requestId) {
-      target = await getReceptionRequest(requestId);
-      if (!target) {
-        throw new Error(
-          `accept_reception_request: no reception request found for id=${requestId}.`,
-        );
-      }
-      if (target.status !== "open") {
-        throw new Error(
-          `accept_reception_request: reception request ${requestId} is already ${target.status}, cannot accept.`,
-        );
-      }
-      if (target.streetId !== caller.street) {
-        throw new Error(
-          `accept_reception_request: reception request ${requestId} is on a different street — only residents on the same street can claim.`,
-        );
-      }
-      if (
-        target.candidateResidentIds.length > 0 &&
-        !target.candidateResidentIds.includes(caller.id)
-      ) {
-        throw new Error(
-          `accept_reception_request: caller ${caller.id} is not in the candidate list for reception request ${requestId}.`,
-        );
-      }
-    } else {
-      const all = await listReceptionRequestsForStreet(caller.street);
-      const eligible = all
-        .filter((r) => r.status === "open")
-        .filter(
-          (r) =>
-            r.candidateResidentIds.length === 0 ||
-            r.candidateResidentIds.includes(caller.id),
-        )
-        .sort((a, b) => b.createdAt - a.createdAt);
-      if (eligible.length === 0) {
-        throw new Error(
-          "accept_reception_request: no open reception request on your street that you can claim.",
-        );
-      }
-      target = eligible[0]!;
-    }
-
-    const updated: ReceptionRequest = {
-      ...target,
-      status: "matched",
-      volunteerResidentId: caller.id,
-      volunteerAvailability: availability,
-      respondedAt: Date.now(),
-    };
-    await setReceptionRequest(updated);
-
-    const requester = await getResident(updated.requesterResidentId);
-    const requesterSummary: RequesterSummary = requester
-      ? summariseResident(requester)
-      : {
-          id: updated.requesterResidentId,
-          name: updated.requesterName,
-          houseNumber: updated.requesterHouseNumber,
-          language: null,
-          floor: null,
-          buzzerName: null,
-        };
-
-    const volunteerSummary: VolunteerSummary = {
-      ...summariseResident(caller),
-      platformId: caller.platformId,
-    };
-
-    return {
-      request: updated,
-      requester: requesterSummary,
-      volunteer: volunteerSummary,
-      groupCardChatId: updated.groupCardChatId ?? null,
-      groupCardMessageId: updated.groupCardMessageId ?? null,
-    };
+    return acceptReceptionRequest(caller, { availability, requestId });
   },
 });

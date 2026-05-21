@@ -35,8 +35,10 @@
 
 import { defineChannel, GET, POST } from "experimental-ash/channels";
 
+import classifyDmIntentTool from "../../agent/tools/classify_dm_intent.js";
 import parseLabelTool from "../../agent/tools/parse_label.js";
 import parseTrackingPageTool from "../../agent/tools/parse_tracking_page.js";
+import { createReceptionRequest } from "../reception-request.js";
 import {
   getPackage,
   getResident,
@@ -190,6 +192,40 @@ export function telegramChannel(config: TelegramChannelConfig) {
               const resident = await getResident(String(userId));
               return resident !== null;
             },
+            classifyDmIntent: async (input) => {
+              // No silent catch: errors propagate to process-update.ts's
+              // catch which logs with stack + chatId, and falls through
+              // to v2 behaviour (raw text to the agent). A silent
+              // `return safe-default` here would mask classifier outages.
+              const execute = classifyDmIntentTool.execute as (
+                input: unknown,
+                options: unknown,
+              ) => Promise<{
+                isFlow2: boolean;
+                absenceSignal: boolean;
+                carrier?:
+                  | "DHL"
+                  | "Hermes"
+                  | "DPD"
+                  | "GLS"
+                  | "UPS"
+                  | "Amazon"
+                  | "unknown";
+                expectedDate?: string;
+                expectedWindowStartAt?: number;
+                expectedWindowEndAt?: number;
+                confidence: "high" | "medium" | "low";
+                reason: string;
+              }>;
+              return execute(input, {
+                toolCallId: `classify_dm_intent:${Date.now()}`,
+                messages: [],
+              });
+            },
+            getRegisteredResident: async (userId) =>
+              getResident(String(userId)),
+            createReceptionRequest: (caller, input) =>
+              createReceptionRequest(caller, input),
           });
         },
       ),

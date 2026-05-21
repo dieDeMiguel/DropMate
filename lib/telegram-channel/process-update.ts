@@ -64,6 +64,12 @@
 
 import type { Session } from "experimental-ash/channels";
 
+import type {
+  CreateReceptionRequestInput,
+  CreateReceptionRequestResult,
+} from "../reception-request.js";
+import type { PackageCarrier, Resident } from "../redis.js";
+
 import {
   extractInboundCallback,
   extractInboundMessage,
@@ -256,6 +262,65 @@ export interface ProcessUpdateDeps {
    * be rejected.
    */
   readonly isRegisteredResident: (userId: number) => Promise<boolean>;
+  /**
+   * v2.1 Slice 1 (#86): classifier for free-text DM text inbounds.
+   * The channel calls this on every DM text message BEFORE the agent
+   * runs so the card-posting decision is deterministic and lives
+   * outside the model's reasoning loop (the v2 regression at #85
+   * showed the model can't be trusted with this routing).
+   *
+   * Throws on irrecoverable failure (both primary + fallback errored).
+   * The channel's catch logs the error and falls through to handing
+   * the raw text to the agent — so a classifier outage degrades to v2
+   * behaviour rather than blocking the user entirely.
+   */
+  readonly classifyDmIntent: (input: {
+    text: string;
+    languageHint?: string;
+  }) => Promise<Flow2ClassificationResult>;
+  /**
+   * Resolves a Telegram `user_id` to the full `Resident` record (or
+   * `null` if unregistered). Consumed by the Flow 2 v2 channel path:
+   * when the classifier returns `confidence: "high"`, the channel
+   * needs the caller's stored language for the `[FLOW_2 DONE]`
+   * synthetic + the caller object to hand to `createReceptionRequest`.
+   *
+   * Implemented in the factory via `getResident(String(userId))`.
+   */
+  readonly getRegisteredResident: (userId: number) => Promise<Resident | null>;
+  /**
+   * v2.1 Slice 1 (#86): channel-side handle for the lib-level
+   * `createReceptionRequest`. The channel calls this directly (no
+   * agent invocation) when the classifier returns high-confidence
+   * Flow 2. Implemented in the factory as a thin re-export of
+   * `lib/reception-request.ts::createReceptionRequest`.
+   *
+   * Throws on Redis/Bot-API failure; the channel's catch logs the
+   * error and falls through to handing the raw text to the agent.
+   */
+  readonly createReceptionRequest: (
+    caller: Resident,
+    input: CreateReceptionRequestInput,
+  ) => Promise<CreateReceptionRequestResult>;
+}
+
+/**
+ * Subset of the `classify_dm_intent` tool output the orchestrator
+ * consumes. Defined as a structural type so process-update.ts stays
+ * decoupled from the tool implementation (factory wires the real
+ * tool's `execute` into the dep).
+ *
+ * @see agent/tools/classify_dm_intent.ts
+ */
+export interface Flow2ClassificationResult {
+  readonly isFlow2: boolean;
+  readonly absenceSignal: boolean;
+  readonly carrier?: PackageCarrier;
+  readonly expectedDate?: string;
+  readonly expectedWindowStartAt?: number;
+  readonly expectedWindowEndAt?: number;
+  readonly confidence: "high" | "medium" | "low";
+  readonly reason: string;
 }
 
 /**
@@ -622,6 +687,101 @@ async function parseDmPhotoToSynthetic(
   return synthetic;
 }
 
+/**
+ * v2.1 Slice 1 (#86): on every DM text inbound from a known sender,
+ * call `classifyDmIntent` to decide whether this is a Flow 2 v2
+ * trigger. If the classifier returns `confidence: "high"` AND the
+ * sender is a registered resident, the channel deterministically:
+ *
+ *   1. Calls `createReceptionRequest(caller, fields)` (lib function)
+ *      to write the request + post the neutral group card.
+ *   2. Hands the agent a narrow `[FLOW_2 DONE language=<lang>]`
+ *      synthetic so it emits ONE DM ack in the user's language and
+ *      nothing else — closing the v2 regression's "agent runs nine
+ *      tools in one turn" failure mode (#85).
+ *
+ * Every step is tolerant of failure: a classifier outage, an
+ * unregistered caller, or a Redis/Bot-API hiccup on
+ * `createReceptionRequest` all fall through to the v2 behaviour of
+ * handing the raw text to the agent. The card-posting decision is
+ * the only place a privacy-violating side effect can land; if any
+ * upstream step fails, we'd rather miss the routing than misroute.
+ */
+async function routeDmTextThroughClassifier(
+  inbound: TelegramInboundMessage,
+  deps: ProcessUpdateDeps,
+): Promise<string> {
+  if (inbound.fromUserId === null) return inbound.text;
+
+  let classification: Flow2ClassificationResult;
+  try {
+    classification = await deps.classifyDmIntent({
+      text: inbound.text,
+      languageHint: inbound.fromLanguageCode ?? undefined,
+    });
+  } catch (err) {
+    console.error(
+      "[classify_dm_intent] failed for chatId",
+      inbound.chatId,
+      "error:",
+      err instanceof Error
+        ? { name: err.name, message: err.message, stack: err.stack }
+        : err,
+    );
+    return inbound.text;
+  }
+
+  if (!classification.isFlow2 || classification.confidence !== "high") {
+    return inbound.text;
+  }
+
+  const caller = await deps
+    .getRegisteredResident(inbound.fromUserId)
+    .catch(() => null);
+  if (!caller) {
+    // Unregistered users can't have a ReceptionRequest written for
+    // them. Fall through and let the agent handle (it'll typically
+    // ask them to /register first).
+    return inbound.text;
+  }
+
+  try {
+    await deps.createReceptionRequest(caller, {
+      carrier: classification.carrier,
+      expectedDate: classification.expectedDate,
+      expectedWindowStartAt: classification.expectedWindowStartAt,
+      expectedWindowEndAt: classification.expectedWindowEndAt,
+    });
+  } catch (err) {
+    console.error(
+      "[create_reception_request] failed for chatId",
+      inbound.chatId,
+      "userId",
+      inbound.fromUserId,
+      "error:",
+      err instanceof Error
+        ? { name: err.name, message: err.message, stack: err.stack }
+        : err,
+    );
+    return inbound.text;
+  }
+
+  const language = caller.language ?? inbound.fromLanguageCode ?? "de";
+  return buildFlow2DoneSyntheticMessage(language);
+}
+
+function buildFlow2DoneSyntheticMessage(language: string): string {
+  return [
+    `[FLOW_2 DONE language=${language}]`,
+    "The channel just wrote a ReceptionRequest and posted a neutral",
+    "group card with [Ich kann helfen]. Reply to the requester in",
+    `${language} with ONE short sentence confirming the group was`,
+    "asked. Do NOT call create_reception_request, post_to_group,",
+    "find_available_neighbors, register_expected_delivery, or any",
+    "other tool — the card is already up.",
+  ].join(" ");
+}
+
 function buildLabelParseFailureMessage(captionForAgent: string): string {
   return [
     "[photo received, label could not be parsed]",
@@ -714,6 +874,8 @@ export async function processInboundTelegramUpdate(
   let message: string;
   if (inbound.photoFileId !== null) {
     message = await buildSyntheticPhotoMessage(inbound, deps);
+  } else if (!inbound.isGroup && inbound.fromUserId !== null) {
+    message = await routeDmTextThroughClassifier(inbound, deps);
   } else {
     message = inbound.text;
   }

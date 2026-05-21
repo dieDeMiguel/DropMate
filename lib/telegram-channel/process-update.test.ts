@@ -4,10 +4,12 @@ import type { Session } from "experimental-ash/channels";
 
 import {
   processInboundTelegramUpdate,
+  type Flow2ClassificationResult,
   type ProcessUpdateDeps,
   type TelegramChannelState,
   type TelegramSessionAuth,
 } from "./process-update.js";
+import type { Resident } from "../redis.js";
 
 const SECRET = "expected-secret";
 
@@ -69,6 +71,9 @@ interface BuiltDeps {
   getPackageRecipientId: ReturnType<typeof vi.fn>;
   recordTelegramObservation: ReturnType<typeof vi.fn>;
   isRegisteredResident: ReturnType<typeof vi.fn>;
+  classifyDmIntent: ReturnType<typeof vi.fn>;
+  getRegisteredResident: ReturnType<typeof vi.fn>;
+  createReceptionRequest: ReturnType<typeof vi.fn>;
 }
 
 type ParsedLabel = NonNullable<
@@ -86,6 +91,8 @@ function buildDeps(overrides: {
   parsedTrackingPage?: ParsedTrackingPage | null;
   packageRecipientId?: string | null;
   isRegisteredResident?: boolean;
+  classification?: Flow2ClassificationResult;
+  registeredResident?: Resident | null;
 } = {}): BuiltDeps {
   const session = overrides.session ?? makeSession("sess_new");
   const sendToAsh = vi.fn().mockResolvedValue(session);
@@ -141,6 +148,41 @@ function buildDeps(overrides: {
         ? Boolean(overrides.isRegisteredResident)
         : true,
     );
+  // Default classifier verdict: not Flow 2. Tests that exercise the
+  // routing override this explicitly. Default keeps the existing 30+
+  // pre-v2.1 cases unchanged (they all hand raw text to the agent).
+  const defaultClassification: Flow2ClassificationResult = {
+    isFlow2: false,
+    absenceSignal: false,
+    confidence: "low",
+    reason: "default test stub: not Flow 2",
+  };
+  const classifyDmIntent = vi
+    .fn()
+    .mockResolvedValue(overrides.classification ?? defaultClassification);
+  const getRegisteredResident = vi
+    .fn()
+    .mockResolvedValue(
+      "registeredResident" in overrides ? overrides.registeredResident : null,
+    );
+  const createReceptionRequest = vi.fn().mockResolvedValue({
+    request: {
+      id: "req_test",
+      streetId: "Methfesselstraße",
+      requesterResidentId: "patricia",
+      requesterName: "Patricia",
+      requesterHouseNumber: "90",
+      carrier: "unknown",
+      expectedAt: null,
+      candidateResidentIds: [],
+      volunteerResidentId: null,
+      volunteerAvailability: null,
+      status: "open",
+      createdAt: Date.now(),
+      respondedAt: null,
+    },
+    groupCard: { chatId: -100123, messageId: 42 },
+  });
   return {
     sendToAsh,
     waitUntil,
@@ -153,6 +195,9 @@ function buildDeps(overrides: {
     getPackageRecipientId,
     recordTelegramObservation,
     isRegisteredResident,
+    classifyDmIntent,
+    getRegisteredResident,
+    createReceptionRequest,
     deps: {
       expectedSecret:
         "expectedSecret" in overrides ? overrides.expectedSecret : SECRET,
@@ -167,6 +212,9 @@ function buildDeps(overrides: {
       getPackageRecipientId,
       recordTelegramObservation,
       isRegisteredResident,
+      classifyDmIntent,
+      getRegisteredResident,
+      createReceptionRequest,
     },
   };
 }
@@ -1255,5 +1303,304 @@ describe("processInboundTelegramUpdate — callback_query", () => {
       });
       expect(sendToAsh).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe("processInboundTelegramUpdate — DM text → classify_dm_intent (v2.1 Slice 1, #86)", () => {
+  function dmRegisteredResident(language = "de"): Resident {
+    return {
+      id: "patricia",
+      name: "Patricia Höfer",
+      street: "Methfesselstraße",
+      houseNumber: "90",
+      platformId: "patricia",
+      platform: "telegram",
+      language,
+      availabilityPatterns: [],
+      registeredAt: Date.now(),
+      source: "explicit",
+      confirmed: true,
+    };
+  }
+
+  it("calls the classifier on every DM text inbound, passing text + language hint", async () => {
+    const { deps, classifyDmIntent } = buildDeps();
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 42,
+          text: "Hallo, wie spät ist es?",
+          fromUserId: 99,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(classifyDmIntent).toHaveBeenCalledTimes(1);
+    expect(classifyDmIntent).toHaveBeenCalledWith({
+      text: "Hallo, wie spät ist es?",
+      languageHint: "de",
+    });
+  });
+
+  it("hands the raw text to the agent on classifier verdict isFlow2=false", async () => {
+    const { deps, sendToAsh, createReceptionRequest } = buildDeps({
+      classification: {
+        isFlow2: false,
+        absenceSignal: false,
+        confidence: "low",
+        reason: "chit-chat",
+      },
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(dmUpdate({ chatId: 42, text: "Danke!", fromUserId: 99 })),
+      deps,
+    );
+
+    const [message] = sendToAsh.mock.calls[0]!;
+    expect(message).toBe("Danke!");
+    expect(createReceptionRequest).not.toHaveBeenCalled();
+  });
+
+  it("hands the raw text to the agent on isFlow2=true but confidence < high", async () => {
+    const { deps, sendToAsh, createReceptionRequest } = buildDeps({
+      classification: {
+        isFlow2: true,
+        absenceSignal: true,
+        confidence: "medium",
+        reason: "absence but no supporting field",
+      },
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({ chatId: 42, text: "Bin morgen nicht da", fromUserId: 99 }),
+      ),
+      deps,
+    );
+
+    const [message] = sendToAsh.mock.calls[0]!;
+    expect(message).toBe("Bin morgen nicht da");
+    expect(createReceptionRequest).not.toHaveBeenCalled();
+  });
+
+  it("on high-confidence Flow 2, calls createReceptionRequest and hands the agent a [FLOW_2 DONE] synthetic", async () => {
+    const resident = dmRegisteredResident("de");
+    const { deps, sendToAsh, createReceptionRequest } = buildDeps({
+      classification: {
+        isFlow2: true,
+        absenceSignal: true,
+        carrier: "DHL",
+        expectedDate: "2026-05-22",
+        expectedWindowStartAt: 1747915200000,
+        expectedWindowEndAt: 1747922400000,
+        confidence: "high",
+        reason: "absence + DHL + window",
+      },
+      registeredResident: resident,
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 42,
+          text: "Ich erwarte morgen 14-16 Uhr DHL und bin nicht zu Hause",
+          fromUserId: 99,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(createReceptionRequest).toHaveBeenCalledTimes(1);
+    const [caller, input] = createReceptionRequest.mock.calls[0]!;
+    expect(caller).toBe(resident);
+    expect(input).toEqual({
+      carrier: "DHL",
+      expectedDate: "2026-05-22",
+      expectedWindowStartAt: 1747915200000,
+      expectedWindowEndAt: 1747922400000,
+    });
+
+    const [message] = sendToAsh.mock.calls[0]!;
+    expect(message).toContain("[FLOW_2 DONE language=de]");
+    // The synthetic must explicitly tell the agent NOT to fire any tools.
+    expect(message).toMatch(/do not call/i);
+    // And explicitly tell it not to call create_reception_request etc. so
+    // we close the v2 regression (#85) where the agent fired tools across
+    // multiple flows.
+    expect(message).toContain("create_reception_request");
+  });
+
+  it("uses the resident's stored language for the FLOW_2 DONE synthetic when present", async () => {
+    const resident = dmRegisteredResident("es");
+    const { deps, sendToAsh } = buildDeps({
+      classification: {
+        isFlow2: true,
+        absenceSignal: true,
+        carrier: "DHL",
+        confidence: "high",
+        reason: "absence + carrier",
+      },
+      registeredResident: resident,
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 42,
+          text: "Mañana DHL, no estaré",
+          fromUserId: 99,
+          languageCode: "es",
+        }),
+      ),
+      deps,
+    );
+
+    const [message] = sendToAsh.mock.calls[0]!;
+    expect(message).toContain("[FLOW_2 DONE language=es]");
+  });
+
+  it("falls back to the Telegram client language code when the resident has no stored language", async () => {
+    const resident: Resident = {
+      ...dmRegisteredResident("de"),
+      language: undefined,
+    };
+    const { deps, sendToAsh } = buildDeps({
+      classification: {
+        isFlow2: true,
+        absenceSignal: true,
+        carrier: "Hermes",
+        confidence: "high",
+        reason: "absence + Hermes",
+      },
+      registeredResident: resident,
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 42,
+          text: "Tomorrow Hermes, I'm out",
+          fromUserId: 99,
+          languageCode: "en",
+        }),
+      ),
+      deps,
+    );
+
+    const [message] = sendToAsh.mock.calls[0]!;
+    expect(message).toContain("[FLOW_2 DONE language=en]");
+  });
+
+  it("falls through to raw text when the caller is unregistered (createReceptionRequest needs a Resident)", async () => {
+    const { deps, sendToAsh, createReceptionRequest } = buildDeps({
+      classification: {
+        isFlow2: true,
+        absenceSignal: true,
+        carrier: "DHL",
+        confidence: "high",
+        reason: "absence + DHL",
+      },
+      registeredResident: null,
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 42,
+          text: "Ich erwarte DHL und bin nicht da",
+          fromUserId: 99,
+        }),
+      ),
+      deps,
+    );
+
+    const [message] = sendToAsh.mock.calls[0]!;
+    expect(message).toBe("Ich erwarte DHL und bin nicht da");
+    expect(createReceptionRequest).not.toHaveBeenCalled();
+  });
+
+  it("falls through to raw text when the classifier throws (graceful degradation to v2 behaviour)", async () => {
+    const { deps, sendToAsh, classifyDmIntent, createReceptionRequest } =
+      buildDeps();
+    classifyDmIntent.mockRejectedValueOnce(new Error("gateway timeout"));
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({ chatId: 42, text: "anything", fromUserId: 99 }),
+      ),
+      deps,
+    );
+
+    const [message] = sendToAsh.mock.calls[0]!;
+    expect(message).toBe("anything");
+    expect(createReceptionRequest).not.toHaveBeenCalled();
+  });
+
+  it("falls through to raw text when createReceptionRequest throws (e.g. Redis hiccup)", async () => {
+    const resident = dmRegisteredResident("de");
+    const { deps, sendToAsh, createReceptionRequest } = buildDeps({
+      classification: {
+        isFlow2: true,
+        absenceSignal: true,
+        carrier: "DHL",
+        confidence: "high",
+        reason: "absence + DHL",
+      },
+      registeredResident: resident,
+    });
+    createReceptionRequest.mockRejectedValueOnce(new Error("redis down"));
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 42,
+          text: "Ich erwarte morgen DHL und bin nicht da",
+          fromUserId: 99,
+        }),
+      ),
+      deps,
+    );
+
+    const [message] = sendToAsh.mock.calls[0]!;
+    // The agent gets the raw text — better to let the user retry than
+    // to give them a [FLOW_2 DONE] ack for a card that was never posted.
+    expect(message).toBe("Ich erwarte morgen DHL und bin nicht da");
+  });
+
+  it("does NOT classify group messages — only DMs go through the classifier", async () => {
+    const { deps, classifyDmIntent } = buildDeps();
+
+    await processInboundTelegramUpdate(
+      makeRequest({
+        update_id: 99,
+        message: {
+          message_id: 1,
+          date: 1,
+          text: "Ich erwarte morgen DHL und bin nicht da",
+          chat: { id: -100123, type: "supergroup" },
+          from: { id: 99, is_bot: false, first_name: "T" },
+        },
+      }),
+      deps,
+    );
+
+    expect(classifyDmIntent).not.toHaveBeenCalled();
+  });
+
+  it("does NOT classify anonymous DMs (no fromUserId — synthetic create would have no caller)", async () => {
+    const { deps, classifyDmIntent } = buildDeps();
+
+    await processInboundTelegramUpdate(
+      // No `from` field → fromUserId is null.
+      makeRequest(dmUpdate({ chatId: 42, text: "anon msg" })),
+      deps,
+    );
+
+    expect(classifyDmIntent).not.toHaveBeenCalled();
   });
 });

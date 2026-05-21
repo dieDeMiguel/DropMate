@@ -2,15 +2,21 @@
  * `create_reception_request` — record that the calling resident is
  * expecting a package while they won't be home.
  *
- * Two modes:
+ * v2.1 (#86): this file is now a thin wrapper around
+ * `lib/reception-request.ts::createReceptionRequest`. The business
+ * logic (write request + post group card + patch with card ids) lives
+ * in the lib so the channel layer can call it directly without
+ * staging an Ash session. This file resolves the Telegram-authenticated
+ * caller from session context and delegates to the lib.
  *
- *   1. **One-shot Flow 2 v2 (#66, default)**: omit `candidateResidentIds`.
- *      The tool writes the `ReceptionRequest`, posts a neutral group
- *      card with an `[Ich kann helfen]` button, and patches the
- *      record with the resulting `groupCardChatId` / `groupCardMessageId`
- *      so later edits (volunteer accept, 4h / 48h timeouts) can target
- *      the same message. The card NEVER names the requester or states
- *      their absence — PRD §9 privacy. Sample card text:
+ * Two modes (driven by `candidateResidentIds`):
+ *
+ *   1. **One-shot Flow 2 v2 (default)**: omit `candidateResidentIds`
+ *      (or pass `[]`). The lib writes a `ReceptionRequest`, posts a
+ *      neutral group card with `[Ich kann helfen]`, and patches the
+ *      record with the resulting card location. The card NEVER names
+ *      the requester or states their absence — PRD §9 privacy.
+ *      Sample card text:
  *
  *          📦 DHL-Paket erwartet morgen 14:00–16:00. Kann jemand
  *          annehmen?
@@ -18,10 +24,9 @@
  *      Missing optional fields just drop their line from the card.
  *
  *   2. **Soft-deprecated DM-3 flow**: pass `candidateResidentIds`. The
- *      tool stores the snapshot and skips the group card. Preserved so
- *      the `expecting_package` skill's older requester path still
- *      works for any caller that still produces it; new code should
- *      prefer mode 1.
+ *      lib stores the snapshot and skips the group card. v2.1 Slice 5
+ *      removes this path entirely; preserved here so any legacy
+ *      caller still wins.
  *
  * The carrier / window / notes fields are all optional. The Flow 2 v2
  * acceptance bar is "post the card with whatever we have" — don't
@@ -32,13 +37,8 @@ import { defineTool } from "experimental-ash/tools";
 import { z } from "zod";
 
 import { requireRegisteredTelegramCaller } from "../../lib/auth.js";
-import {
-  newReceptionRequestId,
-  packageCarrierSchema,
-  setReceptionRequest,
-  type ReceptionRequest,
-} from "../../lib/redis.js";
-import { postToGroup } from "../../lib/telegram-channel/notify.js";
+import { createReceptionRequest } from "../../lib/reception-request.js";
+import { packageCarrierSchema } from "../../lib/redis.js";
 
 const inputSchema = z
   .object({
@@ -143,197 +143,18 @@ export default defineTool({
       "create_reception_request",
     );
 
-    const useGroupCard =
-      candidateResidentIds === undefined ||
-      candidateResidentIds.length === 0;
-
-    const base: ReceptionRequest = {
-      id: newReceptionRequestId(),
-      streetId: caller.street,
-      requesterResidentId: caller.id,
-      requesterName: caller.name,
-      requesterHouseNumber: caller.houseNumber,
-      carrier: carrier ?? "unknown",
-      expectedAt: expectedDate ? Date.parse(expectedDate) : null,
+    return createReceptionRequest(caller, {
+      expectedDate,
+      carrier,
       notes,
-      candidateResidentIds: candidateResidentIds ?? [],
-      volunteerResidentId: null,
-      volunteerAvailability: null,
-      status: "open",
-      createdAt: Date.now(),
-      respondedAt: null,
+      candidateResidentIds,
       expectedWindowStartAt,
       expectedWindowEndAt,
-    };
-
-    await setReceptionRequest(base);
-
-    if (!useGroupCard) {
-      return { request: base };
-    }
-
-    const cardText = buildGroupCardText({
-      carrier: base.carrier,
-      expectedWindowStartAt,
-      expectedWindowEndAt,
-      expectedAt: base.expectedAt,
     });
-
-    const token = process.env.TELEGRAM_BOT_TOKEN;
-    if (!token) {
-      throw new Error(
-        "create_reception_request: TELEGRAM_BOT_TOKEN is not set; cannot post the group card.",
-      );
-    }
-    const groupId = process.env.TELEGRAM_GROUP_CHAT_ID;
-    if (!groupId) {
-      throw new Error(
-        "create_reception_request: TELEGRAM_GROUP_CHAT_ID is not set; cannot resolve the group chat id.",
-      );
-    }
-    const groupChatId = Number(groupId);
-    if (!Number.isFinite(groupChatId)) {
-      throw new Error(
-        `create_reception_request: TELEGRAM_GROUP_CHAT_ID=${groupId} is not a valid number.`,
-      );
-    }
-
-    const sendResult = await postToGroup(token, groupChatId, cardText, {
-      inline_keyboard: [
-        [
-          {
-            text: "Ich kann helfen",
-            callback_data: `accept_reception_group:${base.id}`,
-          },
-        ],
-      ],
-    });
-
-    if (sendResult.messageId === undefined) {
-      return { request: base, groupCard: { chatId: groupChatId } };
-    }
-
-    const patched: ReceptionRequest = {
-      ...base,
-      groupCardChatId: groupChatId,
-      groupCardMessageId: sendResult.messageId,
-    };
-    await setReceptionRequest(patched);
-
-    return {
-      request: patched,
-      groupCard: { chatId: groupChatId, messageId: sendResult.messageId },
-    };
   },
 });
 
-/**
- * Compose the neutral group-card body. Privacy rule (PRD §9): never
- * name the requester, never say "ich bin nicht zu Hause". The card
- * advertises the package and asks for help; the absence is implicit.
- *
- * Card lines are appended only when their underlying field is set, so
- * the model can pass a sparse record (e.g. carrier without window)
- * and still get a coherent card.
- *
- * Format target (German, since the MVP street is German-speaking; a
- * future per-street localisation slice can swap this for a
- * group-language template lookup):
- *
- *     📦 DHL-Paket erwartet morgen 14:00–16:00. Kann jemand annehmen?
- *
- * Falls back to a fully generic line when no fields are available
- * ("📦 Paket erwartet. Kann jemand annehmen?").
- */
-export function buildGroupCardText(input: {
-  readonly carrier: ReceptionRequest["carrier"];
-  readonly expectedWindowStartAt?: number;
-  readonly expectedWindowEndAt?: number;
-  readonly expectedAt: ReceptionRequest["expectedAt"];
-}): string {
-  const subject =
-    input.carrier && input.carrier !== "unknown"
-      ? `${input.carrier}-Paket`
-      : "Paket";
-
-  const windowText = formatExpectedWindow({
-    start: input.expectedWindowStartAt,
-    end: input.expectedWindowEndAt,
-    date: input.expectedAt,
-  });
-
-  const head = windowText
-    ? `📦 ${subject} erwartet ${windowText}.`
-    : `📦 ${subject} erwartet.`;
-  return `${head} Kann jemand annehmen?`;
-}
-
-function formatExpectedWindow(input: {
-  readonly start?: number;
-  readonly end?: number;
-  readonly date: ReceptionRequest["expectedAt"];
-}): string | null {
-  if (input.start !== undefined && input.end !== undefined) {
-    const startDay = berlinDayKey(input.start);
-    const endDay = berlinDayKey(input.end);
-    const startTime = formatBerlinTime(input.start);
-    const endTime = formatBerlinTime(input.end);
-    if (startDay === endDay) {
-      const relative = formatRelativeBerlinDay(input.start);
-      const dayLabel = relative ?? formatBerlinDate(input.start);
-      if (startTime === endTime) {
-        return `${dayLabel} um ${startTime}`;
-      }
-      return `${dayLabel} ${startTime}–${endTime}`;
-    }
-    return `${formatBerlinDate(input.start)} ${startTime} – ${formatBerlinDate(input.end)} ${endTime}`;
-  }
-  if (input.date !== null && input.date !== undefined) {
-    const relative = formatRelativeBerlinDay(input.date);
-    return relative ?? formatBerlinDate(input.date);
-  }
-  return null;
-}
-
-const BERLIN_DAY_FORMATTER = new Intl.DateTimeFormat("de-DE", {
-  timeZone: "Europe/Berlin",
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-});
-
-const BERLIN_DATE_FORMATTER = new Intl.DateTimeFormat("de-DE", {
-  timeZone: "Europe/Berlin",
-  day: "numeric",
-  month: "long",
-});
-
-const BERLIN_TIME_FORMATTER = new Intl.DateTimeFormat("de-DE", {
-  timeZone: "Europe/Berlin",
-  hour: "2-digit",
-  minute: "2-digit",
-  hourCycle: "h23",
-});
-
-function berlinDayKey(unixMs: number): string {
-  return BERLIN_DAY_FORMATTER.format(unixMs);
-}
-
-function formatBerlinDate(unixMs: number): string {
-  return BERLIN_DATE_FORMATTER.format(unixMs);
-}
-
-function formatBerlinTime(unixMs: number): string {
-  return BERLIN_TIME_FORMATTER.format(unixMs);
-}
-
-function formatRelativeBerlinDay(unixMs: number): string | null {
-  const target = berlinDayKey(unixMs);
-  const today = berlinDayKey(Date.now());
-  if (target === today) return "heute";
-  const oneDay = 24 * 60 * 60 * 1000;
-  if (target === berlinDayKey(Date.now() + oneDay)) return "morgen";
-  if (target === berlinDayKey(Date.now() + 2 * oneDay)) return "übermorgen";
-  return null;
-}
-
+// Re-export `buildGroupCardText` so any external caller still pointed
+// at this module's old export keeps working. The implementation moved
+// to `lib/reception-request.ts`.
+export { buildGroupCardText } from "../../lib/reception-request.js";
