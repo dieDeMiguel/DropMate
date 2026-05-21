@@ -247,12 +247,23 @@ export async function createReceptionRequest(
 }
 
 /**
- * Inputs for `acceptReceptionRequest`. `requestId` is optional: when
- * omitted, the function picks the most recent open request on the
- * caller's street that the caller is eligible to claim.
+ * Inputs for `acceptReceptionRequest`. Both fields are optional:
+ *
+ *   - `requestId` — omit to let the function pick the most recent open
+ *     request on the caller's street that the caller is eligible to
+ *     claim. The legacy DM-3 text-reply path omits this and lets the
+ *     function pick; the Flow 2 v2 group-card path (channel-side, v2.1
+ *     Slice 4 / #89) always passes the explicit id from the callback
+ *     data.
+ *   - `availability` — omit when the caller hasn't stated a window. The
+ *     v2.1 Slice 4 channel path accepts on the tap alone (the
+ *     `[Ich kann helfen]` tap is itself the "I can help" signal — no
+ *     additional follow-up question). The legacy DM-3 text-reply path
+ *     still passes the volunteer's free-text window so the requester
+ *     reads it in the confirmation DM.
  */
 export interface AcceptReceptionRequestInput {
-  readonly availability: string;
+  readonly availability?: string;
   readonly requestId?: string;
 }
 
@@ -333,7 +344,7 @@ export async function acceptReceptionRequest(
     ...target,
     status: "matched",
     volunteerResidentId: caller.id,
-    volunteerAvailability: input.availability,
+    volunteerAvailability: input.availability ?? null,
     respondedAt: Date.now(),
   };
   await setReceptionRequest(updated);

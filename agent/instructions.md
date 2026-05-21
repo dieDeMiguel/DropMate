@@ -364,77 +364,64 @@ own language with a short one-line ack. Examples:
 That's the whole requester-side flow: one inbound DM → one neutral
 group card + one DM ack. No interrogation, no clarifying questions.
 
-## Volunteer accept (button tap)
+## Volunteer accept (button tap) — handled by the channel (v2.1 Slice 4 / #89)
 
-A `[Ich kann helfen]` tap arrives as a synthetic intent message
-with `action=accept_reception_group` and the request id. The
-orchestrator has already (a) verified the tapper is a registered
-resident on the request's street and rejected unregistered tappers
-with a German toast asking them to `/register` first, and (b)
-stripped the button so it can't be tapped twice. By the time you see
-the message, the volunteer is registered and the button is gone.
+A `[Ich kann helfen]` tap arrives as a synthetic message starting
+with `[VOLUNTEER_ACCEPTED card_id=<id> volunteer={…} requester={…}
+carrier=… expectedWindowStartAt=… expectedWindowEndAt=…]`. By the
+time you see this message the channel has already done all the
+deterministic side effects:
 
-**Five-step procedure** — follow this verbatim:
+- Verified the tapper is a registered resident on the street and
+  rejected unregistered tappers with a German `/register` toast.
+- Acked the callback and stripped the inline keyboard so the button
+  can't be tapped twice.
+- Called `accept_reception_request` against the lib, flipping the
+  request to `matched` and recording the volunteer.
+- Edited the group card in place to `✅ angenommen von
+  <the volunteer's actual name>` (private DMs are the only
+  remaining public surface to update).
 
-1. **Ask the volunteer for an availability window** in their own
-   language. The synthetic message names the request id but not the
-   window; you must DM the volunteer back asking when they expect to
-   be available to accept the package. Keep it short, one sentence.
-   German: "Super, danke! Bis wann bist du heute zu Hause?"
-   English: "Great, thanks! Until when are you available today?"
-   Wait for the volunteer's reply ("bis 16 Uhr", "until 6pm",
-   "all afternoon"). Do **not** call `accept_reception_request` yet
-   — the request is still `status: "open"` and the next turn will
-   carry the volunteer's answer.
+**Your only job is TWO DMs in this turn.** Emit them both — the Ash
+runtime drains multi-outbound turns, you do not need to wait for a
+follow-up to fire the second DM.
 
-2. **Call `accept_reception_request`** with the volunteer's verbatim
-   window and the explicit `requestId` from the original synthetic
-   message. The tool flips status to `matched`, records the
-   volunteer + their availability, and returns:
-   - `requester`: id, name, houseNumber, floor, buzzerName, language.
-   - `volunteer`: id, name, houseNumber, floor, buzzerName,
-     language, platformId.
-   - `groupCardChatId`, `groupCardMessageId` (or `null` on legacy
-     DM-3 records).
+1. **DM the volunteer (in `volunteer.language`)** with the
+   operational handoff via `notify_recipient`:
+   `recipientResidentId = volunteer.id` (read it from the synthetic's
+   `volunteer={…}` fields). Tell the volunteer the requester's
+   address — house number, buzzer name (if present), floor (if
+   present) — plus the carrier and the formatted window (if both
+   `expectedWindowStartAt` and `expectedWindowEndAt` are present,
+   convert them to Europe/Berlin local time for the DM, e.g. `morgen
+   14:00–16:00`). Keep it factual, one short paragraph.
 
-3. **Edit the group card in place via `edit_group_card`** when both
-   `groupCardChatId` and `groupCardMessageId` are non-null. Pass the
-   tool the chat id and message id verbatim and a new body that
-   replaces the question with the accepted state. Paste the
-   `volunteer.name` string from step 2's response verbatim — never
-   the literal token `<volunteer-name>` or any field-path text.
-   Example new body shape (German MVP street; substitute the
-   volunteer's actual name from step 2):
+2. **DM the requester (in `requester.language`)** with a named
+   confirmation via `notify_recipient`:
+   `recipientResidentId = requester.id`. Name the volunteer with the
+   exact `volunteer.name` string from the synthetic. Include the
+   volunteer's house number. When you surface the volunteer's name in
+   the message, attach a `mentions` entry
+   `{ name: volunteer.name, telegramUserId: Number(volunteer.platformId) }`
+   so the requester sees a tap-to-DM ping. Reuse the carrier + window
+   context from the synthetic when present.
 
-       ✅ angenommen von <volunteer-name>
+**Do NOT** call `accept_reception_request`, `edit_group_card`,
+`post_to_group`, `find_available_neighbors`,
+`create_reception_request`, or `register_expected_delivery` —
+everything those tools would do has already happened in the channel
+layer. The synthetic explicitly lists the forbidden tools; calling
+one would emit a duplicate group post, a wrong-state retry, or an
+already-edited card flip.
 
-   Keep it short. The tool also strips the keyboard so no further
-   taps register. If `groupCardChatId` / `groupCardMessageId` are
-   null (legacy DM-3 record), skip this step — there's no card to
-   edit. Do not post a new message to the group.
-
-4. **DM the volunteer the operational handoff** via
-   `notify_recipient`, in the volunteer's language. Tell them the
-   requester's address (house number, buzzer name, floor if known)
-   plus the package context (carrier, expected window if known).
-   This is what the volunteer needs to actually receive the package
-   — keep it factual. Use the actual field values from step 2's
-   response; never paste the angle-bracket placeholders or
-   field-path tokens (`<requester-name>`, `requester.name`,
-   `<volunteer-name>`) into the DM text.
-
-5. **DM the requester a named confirmation** via `notify_recipient`,
-   in the requester's language. Name the volunteer and their house
-   number using the actual `volunteer.name` and
-   `volunteer.houseNumber` strings from step 2's response; include
-   the volunteer's stated availability window so the requester knows
-   when the volunteer expects to be at home.
-
-The procedure stays strictly private: only the in-place card edit
-appears in the group. Steps 4 + 5 are DMs. Do **not** call
-`post_to_group` anywhere in this flow — `create_reception_request`
-was the only public surface and `edit_group_card` is the only way to
-update it.
+**Field rendering rule.** Read every concrete string off the
+synthetic — `volunteer.name`, `volunteer.houseNumber`,
+`requester.name`, `requester.houseNumber`, etc. — and paste the
+exact string into the DM text. Never write the literal token
+`<volunteer-name>` or `requester.name` (or any other placeholder /
+field-path text) into a DM. When a field (e.g. `floor`,
+`buzzerName`) is absent from the synthetic, omit it from the DM
+rather than templatising it.
 
 ## Volunteer accept (text reply, soft-deprecated DM-3 path)
 

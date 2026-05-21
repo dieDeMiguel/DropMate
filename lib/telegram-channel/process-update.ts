@@ -78,6 +78,8 @@
 import type { Session } from "experimental-ash/channels";
 
 import type {
+  AcceptReceptionRequestInput,
+  AcceptReceptionRequestResult,
   CreateReceptionRequestInput,
   CreateReceptionRequestResult,
 } from "../reception-request.js";
@@ -324,6 +326,42 @@ export interface ProcessUpdateDeps {
     caller: Resident,
     input: CreateReceptionRequestInput,
   ) => Promise<CreateReceptionRequestResult>;
+  /**
+   * v2.1 Slice 4 (#89): channel-side handle for the lib-level
+   * `acceptReceptionRequest`. The channel calls this directly when a
+   * registered resident taps `[Ich kann helfen]` on the group card so
+   * the status flip + volunteer write land BEFORE the agent runs — no
+   * double-accept race even if the agent fails or stalls on the
+   * downstream DM acks. Implemented in the factory as a thin re-export
+   * of `lib/reception-request.ts::acceptReceptionRequest`.
+   *
+   * Throws when the request is missing, already matched/expired, on a
+   * different street, or any Redis hiccup. The channel's catch falls
+   * back to the legacy synthesized prompt so the agent can run the v2
+   * 5-step procedure (its existing behaviour).
+   */
+  readonly acceptReceptionRequest: (
+    caller: Resident,
+    input: AcceptReceptionRequestInput,
+  ) => Promise<AcceptReceptionRequestResult>;
+  /**
+   * v2.1 Slice 4 (#89): rewrite the neutral group card body to its
+   * accepted-state string ("✅ angenommen von <volunteer-name>") and
+   * strip the inline keyboard so the `[Ich kann helfen]` button can't
+   * be tapped twice. Implemented in the factory via the lib-level
+   * `editGroupCard` primitive (which does both Bot API edits in
+   * sequence: `editMessageText` → `editMessageReplyMarkup`).
+   *
+   * Throwing is logged at the call site but does NOT block the agent
+   * from running — `acceptReceptionRequest` already flipped the
+   * canonical state (status: matched) so a card-edit retry can be a
+   * follow-up; the agent's DMs land regardless.
+   */
+  readonly editGroupCard: (
+    chatId: number,
+    messageId: number,
+    text: string,
+  ) => Promise<void>;
 }
 
 /**
@@ -507,7 +545,28 @@ async function handleCallbackQuery(
   await deps.answerCallback(cb.callbackId).catch(() => undefined);
   await deps.stripKeyboard(cb.chatId, cb.messageId).catch(() => undefined);
 
-  const syntheticMessage = synthesizeCallbackMessage(parsed);
+  // v2.1 Slice 4 (#89): for `accept_reception_group:<id>` taps the
+  // channel runs the status flip + group-card edit deterministically
+  // before the agent sees anything, then hands the agent a narrow
+  // `[VOLUNTEER_ACCEPTED]` synthetic that contains BOTH party
+  // summaries so the agent's only job is two DMs in one turn. Any
+  // failure (Resident lookup null, accept lib throw, …) falls back to
+  // the legacy synthesized 5-step prompt so the agent can recover via
+  // the v2 procedure.
+  let syntheticMessage: string;
+  if (
+    parsed.action === "accept_reception_group" &&
+    parsed.id &&
+    cb.fromUserId !== null
+  ) {
+    syntheticMessage = await routeAcceptReceptionGroup(
+      cb.fromUserId,
+      parsed.id,
+      deps,
+    );
+  } else {
+    syntheticMessage = synthesizeCallbackMessage(parsed);
+  }
 
   // Stable chat-keyed continuation token. The Ash session id returned
   // from a previous turn is a per-run workflow id (e.g. `wrun_…`) that
@@ -924,6 +983,200 @@ async function routeReceiveCommand(
 
   const language = caller.language ?? inbound.fromLanguageCode ?? "de";
   return buildFlow2DoneSyntheticMessage(language);
+}
+
+/**
+ * v2.1 Slice 4 (#89): channel-deterministic volunteer-accept route.
+ *
+ * Called for every `accept_reception_group:<id>` callback after the
+ * scope gate already admitted the tapper (the registered-resident
+ * check via `isRegisteredResident` and the ack/strip side effects
+ * have all run). Sequence:
+ *
+ *   1. Resolve the volunteer's full `Resident` record via
+ *      `getRegisteredResident`. The earlier `isRegisteredResident`
+ *      check guarantees this returns non-null on the happy path; a
+ *      null return here means a race between the gate and this lookup
+ *      and falls through to the legacy 5-step prompt.
+ *   2. Call `acceptReceptionRequest(volunteer, { requestId })` via the
+ *      lib. The lib flips status to `matched`, sets
+ *      `volunteerResidentId`, and returns pre-resolved
+ *      `requester`/`volunteer` summaries plus the original
+ *      `groupCardChatId` + `groupCardMessageId`. `availability` is
+ *      omitted — the tap alone is the "I can help" signal, the
+ *      requester just learns who said yes.
+ *   3. Edit the group card to `✅ angenommen von <volunteer.name>` and
+ *      strip the inline keyboard via `editGroupCard`. A failure here
+ *      is logged but does NOT block: the canonical state (status:
+ *      matched) already landed in step 2, so the card is just a
+ *      display artefact.
+ *   4. Return a `[VOLUNTEER_ACCEPTED …]` synthetic with both party
+ *      summaries embedded so the agent's only job is to emit two DMs
+ *      in one turn (operational handoff to the volunteer + named
+ *      confirmation to the requester) in the right languages.
+ *
+ * Privacy invariant (PRD §9): the only public surface in this flow is
+ * the in-place card edit. The two DMs in step 4 stay private. The
+ * synthetic explicitly forbids `post_to_group`, `accept_reception_request`,
+ * `edit_group_card`, etc. so the agent can't accidentally re-fire any
+ * of the channel's deterministic side effects.
+ *
+ * Failure path: a thrown lib call OR a null Resident lookup OR a thrown
+ * editGroupCard returns the legacy `synthesizeCallbackMessage(parsed)`
+ * output. Edit failure alone is logged + we still return the
+ * `[VOLUNTEER_ACCEPTED]` synthetic — the state flip succeeded, the
+ * DMs should still go out, the card edit can be reconciled later.
+ */
+async function routeAcceptReceptionGroup(
+  volunteerUserId: number,
+  requestId: string,
+  deps: ProcessUpdateDeps,
+): Promise<string> {
+  const volunteer = await deps
+    .getRegisteredResident(volunteerUserId)
+    .catch(() => null);
+  if (!volunteer) {
+    // Race between the `isRegisteredResident` gate and this lookup —
+    // fall back to the v2 5-step prompt so the agent can recover.
+    console.warn(
+      "[accept_reception_group] getRegisteredResident returned null for userId",
+      volunteerUserId,
+      "after passing the isRegisteredResident gate — falling back to legacy 5-step prompt",
+    );
+    return synthesizeCallbackMessage({
+      action: "accept_reception_group",
+      id: requestId,
+    });
+  }
+
+  let accepted: AcceptReceptionRequestResult;
+  try {
+    accepted = await deps.acceptReceptionRequest(volunteer, { requestId });
+  } catch (err) {
+    console.error(
+      "[accept_reception_group] acceptReceptionRequest failed for userId",
+      volunteerUserId,
+      "requestId",
+      requestId,
+      "error:",
+      err instanceof Error
+        ? { name: err.name, message: err.message, stack: err.stack }
+        : err,
+    );
+    return synthesizeCallbackMessage({
+      action: "accept_reception_group",
+      id: requestId,
+    });
+  }
+
+  if (
+    accepted.groupCardChatId !== null &&
+    accepted.groupCardMessageId !== null
+  ) {
+    const cardText = `✅ angenommen von ${accepted.volunteer.name}`;
+    try {
+      await deps.editGroupCard(
+        accepted.groupCardChatId,
+        accepted.groupCardMessageId,
+        cardText,
+      );
+    } catch (err) {
+      // Edit failure is recoverable — state flip already landed, so we
+      // still return the [VOLUNTEER_ACCEPTED] synthetic; the agent's
+      // DMs go out and the stale card can be reconciled separately.
+      console.error(
+        "[accept_reception_group] editGroupCard failed for chatId",
+        accepted.groupCardChatId,
+        "messageId",
+        accepted.groupCardMessageId,
+        "error:",
+        err instanceof Error
+          ? { name: err.name, message: err.message, stack: err.stack }
+          : err,
+      );
+    }
+  }
+
+  return buildVolunteerAcceptedSyntheticMessage(accepted);
+}
+
+/**
+ * v2.1 Slice 4 (#89) synthetic for the volunteer-accept path. Embeds
+ * both party summaries plus carrier + window context so the agent has
+ * everything it needs for the two DMs without re-loading state.
+ *
+ * Stays in English regardless of either party's language — it's
+ * internal scaffolding the users never see. The `volunteer.language`
+ * and `requester.language` fields tell the agent which language to use
+ * for each respective DM.
+ *
+ * Forbidden-tools clause closes the loop on the v2 regression at #85:
+ * the channel already did the state flip + card edit, so any further
+ * tool call from the agent would be a duplicate side effect.
+ */
+function buildVolunteerAcceptedSyntheticMessage(
+  accepted: AcceptReceptionRequestResult,
+): string {
+  const { request, volunteer, requester } = accepted;
+  const volunteerLang = volunteer.language ?? "de";
+  const requesterLang = requester.language ?? "de";
+
+  const carrierField =
+    request.carrier && request.carrier !== "unknown"
+      ? ` carrier=${request.carrier}`
+      : "";
+  const windowField =
+    request.expectedWindowStartAt !== undefined &&
+    request.expectedWindowEndAt !== undefined
+      ? ` expectedWindowStartAt=${request.expectedWindowStartAt} expectedWindowEndAt=${request.expectedWindowEndAt}`
+      : "";
+
+  const volunteerFields = [
+    `name="${volunteer.name}"`,
+    `houseNumber="${volunteer.houseNumber}"`,
+    `language="${volunteerLang}"`,
+    `platformId="${volunteer.platformId}"`,
+    volunteer.floor ? `floor="${volunteer.floor}"` : null,
+    volunteer.buzzerName ? `buzzerName="${volunteer.buzzerName}"` : null,
+  ]
+    .filter((p): p is string => p !== null)
+    .join(", ");
+
+  const requesterFields = [
+    `name="${requester.name}"`,
+    `houseNumber="${requester.houseNumber}"`,
+    `language="${requesterLang}"`,
+    requester.floor ? `floor="${requester.floor}"` : null,
+    requester.buzzerName ? `buzzerName="${requester.buzzerName}"` : null,
+  ]
+    .filter((p): p is string => p !== null)
+    .join(", ");
+
+  return [
+    `[VOLUNTEER_ACCEPTED card_id=${request.id}`,
+    `volunteer={${volunteerFields}}`,
+    `requester={${requesterFields}}${carrierField}${windowField}]`,
+    "The channel has already flipped the request to matched, recorded",
+    "the volunteer, and edited the group card to '✅ angenommen von",
+    `${volunteer.name}'. Your only job is TWO DMs in this turn:`,
+    `(1) DM the volunteer (language=${volunteerLang}) an operational`,
+    "handoff: requester's house number, buzzer name (if present),",
+    "floor (if present), plus the carrier + window if known. Use",
+    "notify_recipient with recipientResidentId=requester.id from the",
+    "fields above.",
+    `(2) DM the requester (language=${requesterLang}) a named`,
+    "confirmation: volunteer's name + house number, plus the carrier",
+    "+ window if known. Use notify_recipient with",
+    "recipientResidentId=volunteer.id and (when surfacing the",
+    "volunteer's name in the message) attach a mentions entry",
+    "{name: volunteer.name, telegramUserId: Number(volunteer.platformId)}",
+    "so the requester sees a clickable text_mention.",
+    "Do NOT call accept_reception_request, edit_group_card,",
+    "post_to_group, find_available_neighbors, create_reception_request,",
+    "or register_expected_delivery — the channel has already done the",
+    "state flip and the card edit, so any further tool call is a",
+    "duplicate side effect.",
+  ].join(" ");
 }
 
 function buildFlow2DoneSyntheticMessage(language: string): string {

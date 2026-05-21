@@ -38,7 +38,10 @@ import { defineChannel, GET, POST } from "experimental-ash/channels";
 import classifyDmIntentTool from "../../agent/tools/classify_dm_intent.js";
 import parseLabelTool from "../../agent/tools/parse_label.js";
 import parseTrackingPageTool from "../../agent/tools/parse_tracking_page.js";
-import { createReceptionRequest } from "../reception-request.js";
+import {
+  acceptReceptionRequest,
+  createReceptionRequest,
+} from "../reception-request.js";
 import {
   getPackage,
   getResident,
@@ -52,6 +55,7 @@ import {
   answerCallbackQuery,
   editMessageReplyMarkup,
 } from "./keyboards.js";
+import { editGroupCard } from "./notify.js";
 import { drainSessionToTelegram } from "./outbound.js";
 import {
   processInboundTelegramUpdate,
@@ -233,6 +237,10 @@ export function telegramChannel(config: TelegramChannelConfig) {
               getResident(String(userId)),
             createReceptionRequest: (caller, input) =>
               createReceptionRequest(caller, input),
+            acceptReceptionRequest: (caller, input) =>
+              acceptReceptionRequest(caller, input),
+            editGroupCard: (chatId, messageId, text) =>
+              editGroupCard(token, chatId, messageId, text),
           });
         },
       ),

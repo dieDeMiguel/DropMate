@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Session } from "experimental-ash/channels";
 
+import type { AcceptReceptionRequestResult } from "../reception-request.js";
+
 import {
   processInboundTelegramUpdate,
   type Flow2ClassificationResult,
@@ -9,7 +11,7 @@ import {
   type TelegramChannelState,
   type TelegramSessionAuth,
 } from "./process-update.js";
-import type { Resident } from "../redis.js";
+import type { ReceptionRequest, Resident } from "../redis.js";
 
 const SECRET = "expected-secret";
 
@@ -74,6 +76,8 @@ interface BuiltDeps {
   classifyDmIntent: ReturnType<typeof vi.fn>;
   getRegisteredResident: ReturnType<typeof vi.fn>;
   createReceptionRequest: ReturnType<typeof vi.fn>;
+  acceptReceptionRequest: ReturnType<typeof vi.fn>;
+  editGroupCard: ReturnType<typeof vi.fn>;
 }
 
 type ParsedLabel = NonNullable<
@@ -93,6 +97,7 @@ function buildDeps(overrides: {
   isRegisteredResident?: boolean;
   classification?: Flow2ClassificationResult;
   registeredResident?: Resident | null;
+  acceptResult?: AcceptReceptionRequestResult;
 } = {}): BuiltDeps {
   const session = overrides.session ?? makeSession("sess_new");
   const sendToAsh = vi.fn().mockResolvedValue(session);
@@ -183,6 +188,50 @@ function buildDeps(overrides: {
     },
     groupCard: { chatId: -100123, messageId: 42 },
   });
+  const defaultAcceptResult: AcceptReceptionRequestResult = {
+    request: {
+      id: "req_42",
+      streetId: "Methfesselstraße",
+      requesterResidentId: "200",
+      requesterName: "Patricia Höfer",
+      requesterHouseNumber: "90",
+      carrier: "DHL",
+      expectedAt: null,
+      candidateResidentIds: [],
+      volunteerResidentId: "300",
+      volunteerAvailability: null,
+      status: "matched",
+      createdAt: Date.now(),
+      respondedAt: Date.now(),
+      expectedWindowStartAt: 1716122400000,
+      expectedWindowEndAt: 1716133200000,
+      groupCardChatId: -100123,
+      groupCardMessageId: 555,
+    } satisfies ReceptionRequest,
+    requester: {
+      id: "200",
+      name: "Patricia Höfer",
+      houseNumber: "90",
+      language: "de",
+      floor: "II.",
+      buzzerName: "Höfer",
+    },
+    volunteer: {
+      id: "300",
+      name: "Marlene Hartmann",
+      houseNumber: "88",
+      language: "de",
+      floor: "V.",
+      buzzerName: "Hartmann",
+      platformId: "300",
+    },
+    groupCardChatId: -100123,
+    groupCardMessageId: 555,
+  };
+  const acceptReceptionRequest = vi
+    .fn()
+    .mockResolvedValue(overrides.acceptResult ?? defaultAcceptResult);
+  const editGroupCard = vi.fn().mockResolvedValue(undefined);
   return {
     sendToAsh,
     waitUntil,
@@ -198,6 +247,8 @@ function buildDeps(overrides: {
     classifyDmIntent,
     getRegisteredResident,
     createReceptionRequest,
+    acceptReceptionRequest,
+    editGroupCard,
     deps: {
       expectedSecret:
         "expectedSecret" in overrides ? overrides.expectedSecret : SECRET,
@@ -215,6 +266,8 @@ function buildDeps(overrides: {
       classifyDmIntent,
       getRegisteredResident,
       createReceptionRequest,
+      acceptReceptionRequest,
+      editGroupCard,
     },
   };
 }
@@ -1429,17 +1482,48 @@ describe("processInboundTelegramUpdate — callback_query", () => {
     expect(text).toMatch(/weird_action/);
   });
 
-  describe("accept_reception_group (Flow 2 v2)", () => {
-    it("synthesizes the full 5-step accept procedure when a registered resident taps the group card", async () => {
-      const { deps, sendToAsh, stripKeyboard, isRegisteredResident } =
-        buildDeps({ isRegisteredResident: true });
+  describe("accept_reception_group (v2.1 Slice 4, #89 — channel-deterministic)", () => {
+    /** Reusable volunteer Resident shape for the channel's `getRegisteredResident` dep. */
+    function makeVolunteer(overrides: Partial<Resident> = {}): Resident {
+      return {
+        id: "300",
+        name: "Marlene Hartmann",
+        street: "Methfesselstraße",
+        houseNumber: "88",
+        floor: "V.",
+        buzzerName: "Hartmann",
+        platformId: "300",
+        platform: "telegram",
+        language: "de",
+        availabilityPatterns: [],
+        registeredAt: Date.now(),
+        source: "explicit",
+        confirmed: true,
+        ...overrides,
+      };
+    }
+
+    it("flips the request via acceptReceptionRequest + edits the group card BEFORE handing the agent the [VOLUNTEER_ACCEPTED] synthetic", async () => {
+      const volunteer = makeVolunteer();
+      const {
+        deps,
+        sendToAsh,
+        stripKeyboard,
+        isRegisteredResident,
+        getRegisteredResident,
+        acceptReceptionRequest,
+        editGroupCard,
+      } = buildDeps({
+        isRegisteredResident: true,
+        registeredResident: volunteer,
+      });
 
       await processInboundTelegramUpdate(
         makeRequest(
           cbUpdate({
             chatId: -100123,
             messageId: 555,
-            fromUserId: 99,
+            fromUserId: 300,
             data: "accept_reception_group:req_42",
             chatType: "supergroup",
           }),
@@ -1447,15 +1531,278 @@ describe("processInboundTelegramUpdate — callback_query", () => {
         deps,
       );
 
-      expect(isRegisteredResident).toHaveBeenCalledWith(99);
+      expect(isRegisteredResident).toHaveBeenCalledWith(300);
       expect(stripKeyboard).toHaveBeenCalledWith(-100123, 555);
+      expect(getRegisteredResident).toHaveBeenCalledWith(300);
+      expect(acceptReceptionRequest).toHaveBeenCalledTimes(1);
+      expect(acceptReceptionRequest).toHaveBeenCalledWith(volunteer, {
+        requestId: "req_42",
+      });
+      // Availability is intentionally omitted — the tap alone is the
+      // "I can help" signal; the agent's DMs land without a window.
+      const acceptInput = acceptReceptionRequest.mock.calls[0]![1] as {
+        availability?: string;
+      };
+      expect(acceptInput.availability).toBeUndefined();
+
+      expect(editGroupCard).toHaveBeenCalledTimes(1);
+      expect(editGroupCard).toHaveBeenCalledWith(
+        -100123,
+        555,
+        "✅ angenommen von Marlene Hartmann",
+      );
+
+      // Card edit + state flip both happen BEFORE the agent runs.
+      expect(acceptReceptionRequest.mock.invocationCallOrder[0]).toBeLessThan(
+        editGroupCard.mock.invocationCallOrder[0]!,
+      );
+      expect(editGroupCard.mock.invocationCallOrder[0]).toBeLessThan(
+        sendToAsh.mock.invocationCallOrder[0]!,
+      );
+
       expect(sendToAsh).toHaveBeenCalledTimes(1);
       const [text] = sendToAsh.mock.calls[0]!;
-      expect(text).toMatch(/accept_reception_request/);
-      expect(text).toMatch(/requestId=req_42/);
+      expect(text).toMatch(/^\[VOLUNTEER_ACCEPTED card_id=req_42/);
+      expect(text).toContain('volunteer={name="Marlene Hartmann"');
+      expect(text).toContain('houseNumber="88"');
+      expect(text).toContain('platformId="300"');
+      expect(text).toContain('language="de"');
+      expect(text).toContain('floor="V."');
+      expect(text).toContain('buzzerName="Hartmann"');
+      expect(text).toContain('requester={name="Patricia Höfer"');
+      expect(text).toContain("carrier=DHL");
+      expect(text).toContain("expectedWindowStartAt=1716122400000");
+      expect(text).toContain("expectedWindowEndAt=1716133200000");
+      expect(text).toMatch(/Do NOT call accept_reception_request/);
       expect(text).toMatch(/edit_group_card/);
-      expect(text).toMatch(/groupCardChatId/);
+      expect(text).toMatch(/post_to_group/);
+      // The v2 5-step prompt phrase MUST NOT leak — that was the old
+      // synthesizeCallbackMessage output we replaced.
+      expect(text).not.toMatch(/Procedure: \(1\) DM me back/);
+    });
+
+    it("omits carrier and window from the synthetic when the request has neither", async () => {
+      const volunteer = makeVolunteer();
+      const sparse: AcceptReceptionRequestResult = {
+        request: {
+          id: "req_99",
+          streetId: "Methfesselstraße",
+          requesterResidentId: "200",
+          requesterName: "Patricia",
+          requesterHouseNumber: "90",
+          carrier: "unknown",
+          expectedAt: null,
+          candidateResidentIds: [],
+          volunteerResidentId: "300",
+          volunteerAvailability: null,
+          status: "matched",
+          createdAt: Date.now(),
+          respondedAt: Date.now(),
+          groupCardChatId: -100123,
+          groupCardMessageId: 555,
+        } satisfies ReceptionRequest,
+        requester: {
+          id: "200",
+          name: "Patricia",
+          houseNumber: "90",
+          language: "de",
+          floor: null,
+          buzzerName: null,
+        },
+        volunteer: {
+          id: "300",
+          name: "Marlene",
+          houseNumber: "88",
+          language: "de",
+          floor: null,
+          buzzerName: null,
+          platformId: "300",
+        },
+        groupCardChatId: -100123,
+        groupCardMessageId: 555,
+      };
+      const { deps, sendToAsh } = buildDeps({
+        isRegisteredResident: true,
+        registeredResident: volunteer,
+        acceptResult: sparse,
+      });
+
+      await processInboundTelegramUpdate(
+        makeRequest(
+          cbUpdate({
+            chatId: -100123,
+            messageId: 555,
+            fromUserId: 300,
+            data: "accept_reception_group:req_99",
+            chatType: "supergroup",
+          }),
+        ),
+        deps,
+      );
+
+      const [text] = sendToAsh.mock.calls[0]!;
+      expect(text).not.toContain("carrier=");
+      expect(text).not.toContain("expectedWindowStartAt=");
+      expect(text).not.toContain("expectedWindowEndAt=");
+      // Optional fields collapse cleanly when null.
+      expect(text).not.toContain("floor=");
+      expect(text).not.toContain("buzzerName=");
+    });
+
+    it("falls back to the legacy 5-step prompt when getRegisteredResident returns null (gate/lookup race)", async () => {
+      const {
+        deps,
+        sendToAsh,
+        acceptReceptionRequest,
+        editGroupCard,
+      } = buildDeps({
+        isRegisteredResident: true, // gate admits
+        registeredResident: null, // race: lookup returns null
+      });
+
+      await processInboundTelegramUpdate(
+        makeRequest(
+          cbUpdate({
+            chatId: -100123,
+            messageId: 555,
+            fromUserId: 300,
+            data: "accept_reception_group:req_42",
+            chatType: "supergroup",
+          }),
+        ),
+        deps,
+      );
+
+      expect(acceptReceptionRequest).not.toHaveBeenCalled();
+      expect(editGroupCard).not.toHaveBeenCalled();
+      // Fallback is the v2 5-step synthesized prompt — the agent will
+      // run accept_reception_request and edit_group_card itself.
+      const [text] = sendToAsh.mock.calls[0]!;
+      expect(text).toMatch(/Procedure: \(1\) DM me back/);
+      expect(text).toMatch(/requestId=req_42/);
+    });
+
+    it("falls back to the legacy 5-step prompt when acceptReceptionRequest throws", async () => {
+      const volunteer = makeVolunteer();
+      const { deps, sendToAsh, acceptReceptionRequest, editGroupCard } =
+        buildDeps({
+          isRegisteredResident: true,
+          registeredResident: volunteer,
+        });
+      acceptReceptionRequest.mockRejectedValueOnce(
+        new Error("request already matched"),
+      );
+
+      await processInboundTelegramUpdate(
+        makeRequest(
+          cbUpdate({
+            chatId: -100123,
+            messageId: 555,
+            fromUserId: 300,
+            data: "accept_reception_group:req_42",
+            chatType: "supergroup",
+          }),
+        ),
+        deps,
+      );
+
+      expect(editGroupCard).not.toHaveBeenCalled();
+      const [text] = sendToAsh.mock.calls[0]!;
+      // Legacy fallback prompt — agent retries.
+      expect(text).toMatch(/Procedure: \(1\) DM me back/);
       expect(text).toMatch(/req_42/);
+    });
+
+    it("still hands the agent [VOLUNTEER_ACCEPTED] when editGroupCard throws (state flip already landed)", async () => {
+      const volunteer = makeVolunteer();
+      const { deps, sendToAsh, editGroupCard } = buildDeps({
+        isRegisteredResident: true,
+        registeredResident: volunteer,
+      });
+      editGroupCard.mockRejectedValueOnce(new Error("Bot API hiccup"));
+
+      await processInboundTelegramUpdate(
+        makeRequest(
+          cbUpdate({
+            chatId: -100123,
+            messageId: 555,
+            fromUserId: 300,
+            data: "accept_reception_group:req_42",
+            chatType: "supergroup",
+          }),
+        ),
+        deps,
+      );
+
+      expect(editGroupCard).toHaveBeenCalledTimes(1);
+      const [text] = sendToAsh.mock.calls[0]!;
+      // Agent still gets the [VOLUNTEER_ACCEPTED] synthetic — DMs go out;
+      // the stale card can be reconciled separately.
+      expect(text).toMatch(/^\[VOLUNTEER_ACCEPTED/);
+    });
+
+    it("skips editGroupCard when the request has no card (legacy DM-3 record)", async () => {
+      const volunteer = makeVolunteer();
+      const noCardResult: AcceptReceptionRequestResult = {
+        request: {
+          id: "req_legacy",
+          streetId: "Methfesselstraße",
+          requesterResidentId: "200",
+          requesterName: "Patricia",
+          requesterHouseNumber: "90",
+          carrier: "DHL",
+          expectedAt: null,
+          candidateResidentIds: ["300"],
+          volunteerResidentId: "300",
+          volunteerAvailability: null,
+          status: "matched",
+          createdAt: Date.now(),
+          respondedAt: Date.now(),
+          // No groupCardChatId / groupCardMessageId — legacy DM-3 path.
+        } satisfies ReceptionRequest,
+        requester: {
+          id: "200",
+          name: "Patricia",
+          houseNumber: "90",
+          language: "de",
+          floor: null,
+          buzzerName: null,
+        },
+        volunteer: {
+          id: "300",
+          name: "Marlene",
+          houseNumber: "88",
+          language: "de",
+          floor: null,
+          buzzerName: null,
+          platformId: "300",
+        },
+        groupCardChatId: null,
+        groupCardMessageId: null,
+      };
+      const { deps, sendToAsh, editGroupCard } = buildDeps({
+        isRegisteredResident: true,
+        registeredResident: volunteer,
+        acceptResult: noCardResult,
+      });
+
+      await processInboundTelegramUpdate(
+        makeRequest(
+          cbUpdate({
+            chatId: -100123,
+            messageId: 555,
+            fromUserId: 300,
+            data: "accept_reception_group:req_legacy",
+            chatType: "supergroup",
+          }),
+        ),
+        deps,
+      );
+
+      expect(editGroupCard).not.toHaveBeenCalled();
+      // Synthetic still lands so the agent emits the two DMs.
+      const [text] = sendToAsh.mock.calls[0]!;
+      expect(text).toMatch(/^\[VOLUNTEER_ACCEPTED card_id=req_legacy/);
     });
 
     it("rejects unregistered tappers with a German toast and leaves the keyboard intact", async () => {
