@@ -54,9 +54,9 @@ export async function postToGroup(
 }
 
 /**
- * Rewrite the neutral group card posted by `create_reception_request`
- * in place, and strip its inline keyboard so the `[Ich kann helfen]`
- * button can't be tapped twice.
+ * Rewrite a neutral Flow 2 reception-request group card in place and
+ * strip its inline keyboard so the `[Ich kann helfen]` button can't
+ * be tapped twice.
  *
  * Two Bot API calls because Telegram exposes text + reply-markup edits
  * on separate endpoints — `editMessageText` rewrites the visible body

@@ -205,7 +205,6 @@ function seedReceptionRequest(
     carrier: overrides.carrier ?? "unknown",
     expectedAt: overrides.expectedAt ?? null,
     notes: overrides.notes,
-    candidateResidentIds: overrides.candidateResidentIds ?? [],
     volunteerResidentId: overrides.volunteerResidentId ?? null,
     volunteerAvailability: overrides.volunteerAvailability ?? null,
     status: overrides.status ?? "open",
@@ -472,7 +471,6 @@ describe("register_package", () => {
         requesterName: "Patricia Höfer",
         requesterHouseNumber: "90",
         carrier: "DHL",
-        candidateResidentIds: ["holder-1"],
         status: "open",
         createdAt: new Date("2026-05-16T09:00:00Z").getTime(),
       });
@@ -536,7 +534,6 @@ describe("register_package", () => {
         requesterResidentId: "requester-1",
         requesterName: "Patricia",
         requesterHouseNumber: "90",
-        candidateResidentIds: ["holder-1"],
         status: "matched",
         volunteerResidentId: "holder-1",
         volunteerAvailability: "bis 15 Uhr",

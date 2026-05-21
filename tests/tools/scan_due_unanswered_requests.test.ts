@@ -59,7 +59,6 @@ function seedRequest(
     carrier: overrides.carrier ?? "DHL",
     expectedAt: overrides.expectedAt ?? null,
     notes: overrides.notes,
-    candidateResidentIds: overrides.candidateResidentIds ?? ["marlene"],
     volunteerResidentId: overrides.volunteerResidentId ?? null,
     volunteerAvailability: overrides.volunteerAvailability ?? null,
     status: overrides.status ?? "open",
@@ -100,7 +99,6 @@ describe("scan_due_unanswered_requests", () => {
       createdAt: NOW - H4 - 1000,
       carrier: "DHL",
       notes: "Geburtstag",
-      candidateResidentIds: ["marlene", "bremer"],
     });
 
     const result = (await runExecute()) as {
@@ -110,7 +108,6 @@ describe("scan_due_unanswered_requests", () => {
         carrier: string;
         createdAt: number;
         notes: string | null;
-        candidateResidentIds: readonly string[];
         requester: { id: string; name: string; houseNumber: string; language: string | null } | null;
       }>;
       now: number;
@@ -122,7 +119,6 @@ describe("scan_due_unanswered_requests", () => {
     expect(result.entries[0].streetId).toBe("Methfesselstraße");
     expect(result.entries[0].carrier).toBe("DHL");
     expect(result.entries[0].notes).toBe("Geburtstag");
-    expect(result.entries[0].candidateResidentIds).toEqual(["marlene", "bremer"]);
     expect(result.entries[0].requester).toEqual({
       id: "patricia",
       name: "Patricia Höfer",

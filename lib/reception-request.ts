@@ -16,21 +16,16 @@
  *   v2.1 Slice 1 (#86) is the structural fix for the v2 regression
  *   (#85). The card-posting decision must run BEFORE the agent — driven
  *   by the channel layer's deterministic free-text classifier
- *   (`classify_dm_intent`) — so the agent can't accidentally fire
- *   `create_reception_request` from inside a confused multi-turn
- *   reasoning loop. Lifting the logic into a plain function lets the
- *   channel call it directly, without staging an Ash session, while the
- *   existing agent tools (slices 2 & 3 leave them in place as thin
- *   wrappers) continue to work for legacy DM-3 callers.
+ *   (`classify_dm_intent`) — so the agent cannot accidentally fire
+ *   the request from inside a confused multi-turn reasoning loop.
+ *   Slice 5 (#90) hard-deleted the legacy agent-tool wrappers so the
+ *   channel layer is the only call site.
  *
  *   No `getSession()` / Ash context dependency: every input is supplied
  *   by the caller, so the same functions are trivially testable and
- *   trivially callable from any context (channel handler, agent tool,
- *   schedule).
+ *   trivially callable from any context (channel handler, schedule).
  *
- * @see agent/tools/create_reception_request.ts — thin wrapper around `createReceptionRequest`
- * @see agent/tools/accept_reception_request.ts — thin wrapper around `acceptReceptionRequest`
- * @see lib/telegram-channel/process-update.ts  — channel-side call site (v2.1 Slice 1)
+ * @see lib/telegram-channel/process-update.ts  — channel-side call site
  */
 
 import { postToGroup } from "./telegram-channel/notify.js";
@@ -76,15 +71,14 @@ export interface VolunteerSummary {
 }
 
 /**
- * Inputs for `createReceptionRequest`. Mirrors the agent tool's input
- * schema verbatim so the thin wrapper can pass its parsed input
- * straight through.
+ * Inputs for `createReceptionRequest`. Consumed by the channel-side
+ * Flow 2 path in `lib/telegram-channel/process-update.ts` for free-text
+ * DMs, `/receive` slash commands, and tracking-page screenshots.
  */
 export interface CreateReceptionRequestInput {
   readonly expectedDate?: string;
   readonly carrier?: PackageCarrier;
   readonly notes?: string;
-  readonly candidateResidentIds?: ReadonlyArray<string>;
   readonly expectedWindowStartAt?: number;
   readonly expectedWindowEndAt?: number;
 }
@@ -136,37 +130,25 @@ export function buildGroupCardText(input: {
 }
 
 /**
- * Write a `ReceptionRequest` for the calling resident.
+ * Write a `ReceptionRequest` for the calling resident and post the
+ * neutral group card with `[Ich kann helfen]`.
  *
- * Two modes, switched by `candidateResidentIds`:
+ * The function writes the record, posts the card, and patches the
+ * record with `groupCardChatId` / `groupCardMessageId` so later edits
+ * (volunteer accept, 4h / 48h timeouts) can target the same message.
+ * The card NEVER names the requester or states their absence (PRD §9).
+ * Missing optional fields just drop their line from the card.
  *
- *   1. **One-shot Flow 2 v2 (default)** — omit `candidateResidentIds`
- *      (or pass `[]`). The function writes the record, posts a neutral
- *      group card with `[Ich kann helfen]`, and patches the record
- *      with `groupCardChatId` / `groupCardMessageId` so later edits
- *      (volunteer accept, 4h / 48h timeouts) can target the same
- *      message. The card NEVER names the requester or states their
- *      absence (PRD §9). Missing optional fields just drop their line
- *      from the card.
- *   2. **Soft-deprecated DM-3 flow** — pass non-empty
- *      `candidateResidentIds`. The function stores the snapshot and
- *      skips the group card. v2.1 Slice 5 removes this path entirely;
- *      preserved here so the existing agent-tool wrapper's test suite
- *      passes without behaviour change.
- *
- * Throws when the group-card path needs to post but
- * `TELEGRAM_BOT_TOKEN` / `TELEGRAM_GROUP_CHAT_ID` are missing — the
- * lib intentionally surfaces this rather than silently dropping the
- * card; the orchestrator's catch logs the failure and the agent /
- * channel can decide whether to recover.
+ * Throws when the group-card post needs `TELEGRAM_BOT_TOKEN` /
+ * `TELEGRAM_GROUP_CHAT_ID` and they are missing — the lib intentionally
+ * surfaces this rather than silently dropping the card; the
+ * orchestrator's catch logs the failure and the channel can decide
+ * whether to recover.
  */
 export async function createReceptionRequest(
   caller: Resident,
   input: CreateReceptionRequestInput,
 ): Promise<CreateReceptionRequestResult> {
-  const candidates = input.candidateResidentIds ?? [];
-  const useGroupCard = candidates.length === 0;
-
   const base: ReceptionRequest = {
     id: newReceptionRequestId(),
     streetId: caller.street,
@@ -176,7 +158,6 @@ export async function createReceptionRequest(
     carrier: input.carrier ?? "unknown",
     expectedAt: input.expectedDate ? Date.parse(input.expectedDate) : null,
     notes: input.notes,
-    candidateResidentIds: candidates,
     volunteerResidentId: null,
     volunteerAvailability: null,
     status: "open",
@@ -187,10 +168,6 @@ export async function createReceptionRequest(
   };
 
   await setReceptionRequest(base);
-
-  if (!useGroupCard) {
-    return { request: base };
-  }
 
   const cardText = buildGroupCardText({
     carrier: base.carrier,
@@ -249,18 +226,15 @@ export async function createReceptionRequest(
 /**
  * Inputs for `acceptReceptionRequest`. Both fields are optional:
  *
- *   - `requestId` — omit to let the function pick the most recent open
- *     request on the caller's street that the caller is eligible to
- *     claim. The legacy DM-3 text-reply path omits this and lets the
- *     function pick; the Flow 2 v2 group-card path (channel-side, v2.1
+ *   - `requestId` — the channel-side Flow 2 v2 group-card path (v2.1
  *     Slice 4 / #89) always passes the explicit id from the callback
- *     data.
- *   - `availability` — omit when the caller hasn't stated a window. The
- *     v2.1 Slice 4 channel path accepts on the tap alone (the
+ *     data. Omit to let the function pick the most recent open request
+ *     on the caller's street.
+ *   - `availability` — the channel path accepts on the tap alone (the
  *     `[Ich kann helfen]` tap is itself the "I can help" signal — no
- *     additional follow-up question). The legacy DM-3 text-reply path
- *     still passes the volunteer's free-text window so the requester
- *     reads it in the confirmation DM.
+ *     additional follow-up question), so this field is currently
+ *     unused in practice. Kept on the type so a future schedule or
+ *     external caller can pass a stated window if needed.
  */
 export interface AcceptReceptionRequestInput {
   readonly availability?: string;
@@ -277,17 +251,10 @@ export interface AcceptReceptionRequestResult {
 
 /**
  * Flip an open `ReceptionRequest` to `"matched"`, recording the
- * caller as the volunteer with the supplied availability string.
+ * caller as the volunteer.
  *
- * Two acceptance rules apply to the request being claimed:
- *
- *   1. **Legacy DM-3 records** (`candidateResidentIds` non-empty):
- *      the caller MUST be in the snapshot list — the bot DM'd them
- *      individually.
- *   2. **Flow 2 v2 group-card records** (`candidateResidentIds === []`):
- *      any registered resident on the request's street can claim.
- *
- * A `streetId` mismatch is always rejected (defensive backstop — the
+ * Acceptance rule: any registered resident on the request's street can
+ * claim. A `streetId` mismatch is rejected (defensive backstop — the
  * channel-side scope check already gates the tapper, but a lib-level
  * guard prevents a cross-street accept if the caller is ever pointed
  * at a stale request id from a different street).
@@ -314,23 +281,10 @@ export async function acceptReceptionRequest(
         `acceptReceptionRequest: reception request ${input.requestId} is on a different street — only residents on the same street can claim.`,
       );
     }
-    if (
-      target.candidateResidentIds.length > 0 &&
-      !target.candidateResidentIds.includes(caller.id)
-    ) {
-      throw new Error(
-        `acceptReceptionRequest: caller ${caller.id} is not in the candidate list for reception request ${input.requestId}.`,
-      );
-    }
   } else {
     const all = await listReceptionRequestsForStreet(caller.street);
     const eligible = all
       .filter((r) => r.status === "open")
-      .filter(
-        (r) =>
-          r.candidateResidentIds.length === 0 ||
-          r.candidateResidentIds.includes(caller.id),
-      )
       .sort((a, b) => b.createdAt - a.createdAt);
     if (eligible.length === 0) {
       throw new Error(

@@ -21,19 +21,14 @@
  *     pre-announcing a package they expect by uploading the carrier's
  *     tracking page).
  *
- * The orchestrator emits a synthetic text message the conversational
- * agent reads as if the user typed it:
- *
- *     [tracking page parsed] carrier=DHL trackingNumber=…
- *     windowStart=2026-05-19T13:00:00Z windowEnd=2026-05-19T16:00:00Z
- *     confidence=high caption='kann jemand annehmen?'
- *
- * The agent then runs Flow 2 v2 (`create_reception_request`) with no
- * follow-up question to the requester — the screenshot itself is the
- * absence signal (you don't upload a tracking page in DM unless you
- * want help). When `confidence === "low"`, the orchestrator appends a
- * "please confirm with the requester before posting" suffix so the
- * agent asks rather than auto-posting the card.
+ * The channel layer consumes the tool's result directly (v2.1 Slice
+ * 3 / #88): when `confidence === "high"` AND the caller is a
+ * registered resident, the channel writes the `ReceptionRequest` via
+ * `lib/reception-request.ts::createReceptionRequest` and hands the
+ * agent a `[FLOW_2 DONE language=<lang>]` synthetic so it emits one
+ * DM ack. On low/medium confidence (or any other failure) the
+ * channel hands the agent `[VISION_LOW_CONFIDENCE …]` so it asks the
+ * requester to retry via `/receive`.
  *
  * Inputs:
  *   - `imageUrl`: HTTPS URL, NOT inline bytes — the Vercel AI Gateway
@@ -50,10 +45,10 @@
  * tracking number visible (some carriers hide it behind a click) the
  * tool omits it rather than guesses.
  *
- * Times are returned as ISO 8601 datetimes; the conversational agent
- * converts to Unix ms via `Date.parse()` before passing to
- * `create_reception_request`'s `expectedWindowStartAt` /
- * `expectedWindowEndAt` inputs (per Flow 2 v2 instructions).
+ * Times are returned as ISO 8601 datetimes; the channel converts to
+ * Unix ms via `Date.parse()` before passing to
+ * `createReceptionRequest`'s `expectedWindowStartAt` /
+ * `expectedWindowEndAt` inputs.
  */
 
 import { defineTool } from "experimental-ash/tools";
@@ -115,8 +110,8 @@ const outputSchema = z.object({
         "string (e.g. '2026-05-19T13:00:00Z'). If the page shows a " +
         "single time point ('14:00'), set this to that point. If the " +
         "page shows only a date with no time, omit BOTH this and the " +
-        "end field. The conversational agent converts ISO → Unix ms " +
-        "before passing to `create_reception_request`.",
+        "end field. The channel converts ISO → Unix ms before passing " +
+        "to `createReceptionRequest`.",
     ),
   expectedWindowEndAt: z
     .string()

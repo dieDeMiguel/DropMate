@@ -59,7 +59,6 @@ function seedRequest(
     carrier: overrides.carrier ?? "DHL",
     expectedAt: overrides.expectedAt ?? null,
     notes: overrides.notes,
-    candidateResidentIds: overrides.candidateResidentIds ?? ["marlene"],
     volunteerResidentId: overrides.volunteerResidentId ?? null,
     volunteerAvailability: overrides.volunteerAvailability ?? null,
     status: overrides.status ?? "matched",

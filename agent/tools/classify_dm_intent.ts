@@ -4,13 +4,14 @@
  * pre-announcing a package and wants help receiving it).
  *
  * v2.1 Slice 1 (#86): in v2, the conversational agent decided whether
- * an inbound free-text DM should trigger `create_reception_request`,
- * `register_expected_delivery`, `find_available_neighbors`, etc. The
- * v2 regression (#85) showed this can't be left to the model — a
- * single DM "Ich erwarte morgen 14-16 Uhr DHL und bin nicht zu Hause"
- * fired nine tools across mutually-exclusive branches. v2.1 moves the
+ * an inbound free-text DM should write a reception request,
+ * `register_expected_delivery`, look up neighbours, etc. The v2
+ * regression (#85) showed this can't be left to the model — a single
+ * DM "Ich erwarte morgen 14-16 Uhr DHL und bin nicht zu Hause" fired
+ * nine tools across mutually-exclusive branches. v2.1 moves the
  * routing decision OUT of the model by calling this classifier from
- * `process-update.ts` BEFORE the agent runs.
+ * `process-update.ts` BEFORE the agent runs. Slice 5 (#90) then hard-
+ * deleted the legacy tools so the model literally cannot relapse.
  *
  * v2.1 Bug 1 fix (#93 / #92 Trace A): the v2.1 ship attempt produced a
  * card reading `heute 06:00–08:00` for the input `Ich erwarte morgen

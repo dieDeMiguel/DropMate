@@ -27,13 +27,12 @@
  * + drain pipeline as a regular message — the orchestrator
  * synthesizes a short text describing the tap ("[button-tap] confirm
  * pickup of package pkg_42") and routes it as the user message. The
- * model then runs the matching tool (`confirm_pickup`,
- * `accept_reception_request`, …) the same way it would for a typed
- * reply. Three callback-only side effects happen before the agent
- * sees anything: ack the callback (clear the tap spinner), strip the
- * originating message's keyboard (no double-taps), and — for group
- * confirm_pickup taps — gate on the tapper actually being the
- * package's recipient.
+ * model then runs the matching tool (`confirm_pickup`, …) the same
+ * way it would for a typed reply. Three callback-only side effects
+ * happen before the agent sees anything: ack the callback (clear the
+ * tap spinner), strip the originating message's keyboard (no
+ * double-taps), and — for group confirm_pickup taps — gate on the
+ * tapper actually being the package's recipient.
  *
  * Photo path (#43 item 1, #88 for the DM branch): when an inbound
  * update contains a photo, the orchestrator calls one of two vision
@@ -419,20 +418,20 @@ function synthesizeCallbackMessage(parsed: ParsedCallbackData): string {
         ? `[button-tap] I'm confirming pickup of package ${parsed.id}. Please run confirm_pickup with that id and post the usual short group announcement.`
         : "[button-tap] I'm confirming pickup but no package id was attached to the button — ignore.";
     case "accept_reception_request":
-      return parsed.id
-        ? `[button-tap] I'm accepting the reception request ${parsed.id}. Treat this as 'yes, I can receive'; if I haven't said when, ask for the availability window.`
-        : "[button-tap] I'm accepting a reception request but no id was attached — ignore.";
+      // Legacy DM-3 button callback. The agent tool that used to back
+      // this branch was hard-deleted by v2.1 Slice 5 (#90); the channel
+      // never wires this callback anymore. Apologise briefly in the
+      // tapper's language if it ever arrives via a stale message.
+      return "[button-tap] An old 'I can help' button was tapped, but the channel-side flow has changed. Apologise briefly in the tapper's language and ask them to wait for the next group card.";
     case "accept_reception_group":
-      // Flow 2 v2 (#68): the volunteer tapped `[Ich kann helfen]` on
-      // the neutral group card. The orchestrator has already verified
-      // the tapper is a registered resident (see scope check below);
-      // this message tells the agent the full five-step procedure so
-      // it doesn't have to consult instructions.md to remember the
-      // shape. Stays in English regardless of the volunteer's
-      // language — the *reply* localisation comes from
-      // `language_detection` + `Resident.language`.
+      // Reached only as the failure fallback for `routeAcceptReceptionGroup`
+      // — the deterministic channel-side path either succeeded (in which
+      // case the agent sees `[VOLUNTEER_ACCEPTED …]`) or threw. The
+      // backing tool (`accept_reception_request`) was hard-deleted by
+      // Slice 5 (#90), so the agent cannot recover by re-running the
+      // procedure. Apologise and tell the volunteer to retry.
       return parsed.id
-        ? `[button-tap] I tapped "Ich kann helfen" on the group card for reception request ${parsed.id}. Procedure: (1) DM me back in my language asking when I'm available (a short window like "bis 16 Uhr"); (2) once I answer, call accept_reception_request with requestId=${parsed.id} and my availability; (3) use the response's groupCardChatId + groupCardMessageId to call edit_group_card so the public card now reads "✅ angenommen von <volunteer.name>" (paste the volunteer.name string verbatim — never the literal token); (4) DM me (the volunteer) the requester's house number, buzzer name, floor, plus the package context (carrier, tracking, window) so I know what to expect; (5) DM the requester a confirmation naming me as the volunteer with my house number and availability. Do not post anything new to the group — the card edit is the only public surface.`
+        ? `[button-tap] A volunteer tap on group-card reception request ${parsed.id} could not be processed by the channel. Apologise briefly in the volunteer's language and ask them to try again in a moment. Do NOT call any tools.`
         : "[button-tap] I tapped accept-reception-group but no request id was attached — ignore.";
     case "decline_reception_request":
       return parsed.id
@@ -1017,13 +1016,15 @@ async function routeReceiveCommand(
  *
  * Privacy invariant (PRD §9): the only public surface in this flow is
  * the in-place card edit. The two DMs in step 4 stay private. The
- * synthetic explicitly forbids `post_to_group`, `accept_reception_request`,
- * `edit_group_card`, etc. so the agent can't accidentally re-fire any
- * of the channel's deterministic side effects.
+ * synthetic explicitly forbids `post_to_group`, `edit_group_card`, etc.
+ * so the agent can't accidentally re-fire any of the channel's
+ * deterministic side effects.
  *
  * Failure path: a thrown lib call OR a null Resident lookup OR a thrown
- * editGroupCard returns the legacy `synthesizeCallbackMessage(parsed)`
- * output. Edit failure alone is logged + we still return the
+ * editGroupCard returns the `synthesizeCallbackMessage(parsed)` output
+ * — which after Slice 5 (#90) is a soft apology synthetic, NOT the v2
+ * 5-step recovery procedure (the tools that procedure relied on were
+ * hard-deleted). Edit failure alone is logged + we still return the
  * `[VOLUNTEER_ACCEPTED]` synthetic — the state flip succeeded, the
  * DMs should still go out, the card edit can be reconciled later.
  */
@@ -1171,9 +1172,8 @@ function buildVolunteerAcceptedSyntheticMessage(
     "volunteer's name in the message) attach a mentions entry",
     "{name: volunteer.name, telegramUserId: Number(volunteer.platformId)}",
     "so the requester sees a clickable text_mention.",
-    "Do NOT call accept_reception_request, edit_group_card,",
-    "post_to_group, find_available_neighbors, create_reception_request,",
-    "or register_expected_delivery — the channel has already done the",
+    "Do NOT call edit_group_card, post_to_group, or",
+    "register_expected_delivery — the channel has already done the",
     "state flip and the card edit, so any further tool call is a",
     "duplicate side effect.",
   ].join(" ");
@@ -1185,9 +1185,8 @@ function buildFlow2DoneSyntheticMessage(language: string): string {
     "The channel just wrote a ReceptionRequest and posted a neutral",
     "group card with [Ich kann helfen]. Reply to the requester in",
     `${language} with ONE short sentence confirming the group was`,
-    "asked. Do NOT call create_reception_request, post_to_group,",
-    "find_available_neighbors, register_expected_delivery, or any",
-    "other tool — the card is already up.",
+    "asked. Do NOT call post_to_group, register_expected_delivery, or",
+    "any other tool — the card is already up.",
   ].join(" ");
 }
 
@@ -1240,9 +1239,9 @@ function buildVisionLowConfidenceMessage(args: {
     "channel could not confidently extract enough fields to post the group",
     `card on their behalf.${partials} Reply to the requester in ${args.language}`,
     "with ONE short sentence asking them to retry with the /receive command",
-    "(e.g. /receive DHL morgen 14-16). Do NOT call create_reception_request,",
-    "post_to_group, find_available_neighbors, register_expected_delivery, or",
-    "any other tool — wait for the user to send /receive.",
+    "(e.g. /receive DHL morgen 14-16). Do NOT call post_to_group,",
+    "register_expected_delivery, or any other tool — wait for the user to",
+    "send /receive.",
   ].join(" ");
 }
 

@@ -350,10 +350,8 @@ export async function listAllPackages(): Promise<readonly Package[]> {
 
 /**
  * Scan every resident on the given street. Excludes nothing; callers
- * filter (e.g. `find_available_neighbors` removes the requester
- * themselves). Used only by the reception-request flow today; resident
- * directory lookups elsewhere either go by `platformId` or by
- * `name + houseNumber`.
+ * filter as needed. Resident directory lookups elsewhere either go by
+ * `platformId` or by `name + houseNumber`.
  *
  * Phase 1 spike scale (≤ a few dozen residents per street) makes a
  * SCAN acceptable. V2 should add a `street:<id>:residents` set keyed
@@ -540,10 +538,6 @@ export async function findKnownTelegramUserByName(
  * `volunteerAvailability` is the volunteer's own free-form window
  * (e.g. "bis 15 Uhr", "until 6pm") — kept as a string because the
  * resident's own phrasing is what the requester needs to read.
- *
- * `candidateResidentIds` snapshots who the bot asked, so the slice
- * #25 timeout schedule can DM "no one was available" to the
- * requester without re-running the candidate scan.
  */
 export type ReceptionRequestStatus =
   | "open"
@@ -560,18 +554,6 @@ export interface ReceptionRequest {
   readonly carrier: PackageCarrier;
   readonly expectedAt: number | null;
   readonly notes?: string;
-  /**
-   * Snapshot of the candidate resident ids the bot DM'd in the
-   * soft-deprecated DM-3-candidates flow (#42). Empty array when the
-   * request was created via the one-shot Flow 2 v2 group-card path
-   * (#66) — that path asks the whole group instead of pre-selecting
-   * neighbours, so there's nobody to snapshot. The legacy
-   * `accept_reception_request` gate that requires the caller to be
-   * in this list is bypassed when the array is empty (the new
-   * `accept_reception_group:<id>` callback path falls back to
-   * "any registered resident on the same street can claim").
-   */
-  readonly candidateResidentIds: readonly string[];
   readonly volunteerResidentId: string | null;
   readonly volunteerAvailability: string | null;
   readonly status: ReceptionRequestStatus;

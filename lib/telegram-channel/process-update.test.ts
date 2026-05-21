@@ -179,7 +179,6 @@ function buildDeps(overrides: {
       requesterHouseNumber: "90",
       carrier: "unknown",
       expectedAt: null,
-      candidateResidentIds: [],
       volunteerResidentId: null,
       volunteerAvailability: null,
       status: "open",
@@ -197,7 +196,6 @@ function buildDeps(overrides: {
       requesterHouseNumber: "90",
       carrier: "DHL",
       expectedAt: null,
-      candidateResidentIds: [],
       volunteerResidentId: "300",
       volunteerAvailability: null,
       status: "matched",
@@ -740,7 +738,10 @@ describe("processInboundTelegramUpdate", () => {
       // The synthetic must close down further tool calls — same shape
       // Slice 1 ships from the classifier path.
       expect(message).toMatch(/do not call/i);
-      expect(message).toContain("create_reception_request");
+      expect(message).toContain("post_to_group");
+      // Slice 5 (#90) hard-deleted create_reception_request, so the
+      // synthetic must NOT name it (the model has no such tool now).
+      expect(message).not.toContain("create_reception_request");
       // No remnants of the v2 [tracking page parsed] synthetic.
       expect(message).not.toContain("[tracking page parsed]");
 
@@ -1271,7 +1272,14 @@ describe("processInboundTelegramUpdate — callback_query", () => {
     expect(options.continuationToken).not.toMatch(/^wrun_/);
   });
 
-  it("synthesizes an accept_reception_request message when 'accept_reception_request:req_99' is tapped", async () => {
+  it("synthesizes an apology message when a stale 'accept_reception_request:req_99' callback arrives (Slice 5 #90 — tool deleted)", async () => {
+    // The v2.1 group-card flow uses `accept_reception_group:<id>` — the
+    // legacy `accept_reception_request:<id>` callback is no longer wired
+    // anywhere, but Telegram can still deliver it from an old keyboard
+    // sitting in a stale chat. With the backing tool deleted, the
+    // synthetic must NOT prompt the agent to re-run a procedure that
+    // would call accept_reception_request; it should produce a soft
+    // apology instead.
     const { deps, sendToAsh } = buildDeps();
     await processInboundTelegramUpdate(
       makeRequest(
@@ -1285,7 +1293,8 @@ describe("processInboundTelegramUpdate — callback_query", () => {
       deps,
     );
     const [text] = sendToAsh.mock.calls[0]!;
-    expect(text).toMatch(/accept.*reception.*req_99/i);
+    expect(text).toMatch(/old 'I can help' button/i);
+    expect(text).not.toContain("accept_reception_request");
   });
 
   it("synthesizes a decline message that tells the agent to acknowledge briefly", async () => {
@@ -1573,9 +1582,12 @@ describe("processInboundTelegramUpdate — callback_query", () => {
       expect(text).toContain("carrier=DHL");
       expect(text).toContain("expectedWindowStartAt=1716122400000");
       expect(text).toContain("expectedWindowEndAt=1716133200000");
-      expect(text).toMatch(/Do NOT call accept_reception_request/);
       expect(text).toMatch(/edit_group_card/);
       expect(text).toMatch(/post_to_group/);
+      // Slice 5 (#90) hard-deleted accept_reception_request from the
+      // tool surface, so the synthetic must NOT name it (the model has
+      // no such tool now).
+      expect(text).not.toContain("accept_reception_request");
       // The v2 5-step prompt phrase MUST NOT leak — that was the old
       // synthesizeCallbackMessage output we replaced.
       expect(text).not.toMatch(/Procedure: \(1\) DM me back/);
@@ -1592,7 +1604,6 @@ describe("processInboundTelegramUpdate — callback_query", () => {
           requesterHouseNumber: "90",
           carrier: "unknown",
           expectedAt: null,
-          candidateResidentIds: [],
           volunteerResidentId: "300",
           volunteerAvailability: null,
           status: "matched",
@@ -1649,7 +1660,7 @@ describe("processInboundTelegramUpdate — callback_query", () => {
       expect(text).not.toContain("buzzerName=");
     });
 
-    it("falls back to the legacy 5-step prompt when getRegisteredResident returns null (gate/lookup race)", async () => {
+    it("falls back to an apology synthetic when getRegisteredResident returns null (gate/lookup race)", async () => {
       const {
         deps,
         sendToAsh,
@@ -1675,14 +1686,18 @@ describe("processInboundTelegramUpdate — callback_query", () => {
 
       expect(acceptReceptionRequest).not.toHaveBeenCalled();
       expect(editGroupCard).not.toHaveBeenCalled();
-      // Fallback is the v2 5-step synthesized prompt — the agent will
-      // run accept_reception_request and edit_group_card itself.
+      // Fallback after Slice 5 (#90): the backing tool is gone, so the
+      // synthetic just tells the agent to apologise in the volunteer's
+      // language and ask them to retry. It does NOT re-run the legacy
+      // 5-step procedure (that procedure relied on tools that no longer
+      // exist).
       const [text] = sendToAsh.mock.calls[0]!;
-      expect(text).toMatch(/Procedure: \(1\) DM me back/);
-      expect(text).toMatch(/requestId=req_42/);
+      expect(text).toMatch(/could not be processed/);
+      expect(text).toContain("req_42");
+      expect(text).toMatch(/Do NOT call any tools/);
     });
 
-    it("falls back to the legacy 5-step prompt when acceptReceptionRequest throws", async () => {
+    it("falls back to an apology synthetic when acceptReceptionRequest throws", async () => {
       const volunteer = makeVolunteer();
       const { deps, sendToAsh, acceptReceptionRequest, editGroupCard } =
         buildDeps({
@@ -1708,9 +1723,9 @@ describe("processInboundTelegramUpdate — callback_query", () => {
 
       expect(editGroupCard).not.toHaveBeenCalled();
       const [text] = sendToAsh.mock.calls[0]!;
-      // Legacy fallback prompt — agent retries.
-      expect(text).toMatch(/Procedure: \(1\) DM me back/);
-      expect(text).toMatch(/req_42/);
+      expect(text).toMatch(/could not be processed/);
+      expect(text).toContain("req_42");
+      expect(text).toMatch(/Do NOT call any tools/);
     });
 
     it("still hands the agent [VOLUNTEER_ACCEPTED] when editGroupCard throws (state flip already landed)", async () => {
@@ -1741,7 +1756,7 @@ describe("processInboundTelegramUpdate — callback_query", () => {
       expect(text).toMatch(/^\[VOLUNTEER_ACCEPTED/);
     });
 
-    it("skips editGroupCard when the request has no card (legacy DM-3 record)", async () => {
+    it("skips editGroupCard when the request has no card on record", async () => {
       const volunteer = makeVolunteer();
       const noCardResult: AcceptReceptionRequestResult = {
         request: {
@@ -1752,13 +1767,13 @@ describe("processInboundTelegramUpdate — callback_query", () => {
           requesterHouseNumber: "90",
           carrier: "DHL",
           expectedAt: null,
-          candidateResidentIds: ["300"],
           volunteerResidentId: "300",
           volunteerAvailability: null,
           status: "matched",
           createdAt: Date.now(),
           respondedAt: Date.now(),
-          // No groupCardChatId / groupCardMessageId — legacy DM-3 path.
+          // No groupCardChatId / groupCardMessageId — defensive case where
+          // the request was created but the card post failed.
         } satisfies ReceptionRequest,
         requester: {
           id: "200",
@@ -2043,10 +2058,13 @@ describe("processInboundTelegramUpdate — DM text → classify_dm_intent (v2.1 
     expect(message).toContain("[FLOW_2 DONE language=de]");
     // The synthetic must explicitly tell the agent NOT to fire any tools.
     expect(message).toMatch(/do not call/i);
-    // And explicitly tell it not to call create_reception_request etc. so
-    // we close the v2 regression (#85) where the agent fired tools across
-    // multiple flows.
-    expect(message).toContain("create_reception_request");
+    // It still names post_to_group + register_expected_delivery (those
+    // tools still exist on the agent surface and the v2 regression at
+    // #85 had the agent firing them mid-flow). create_reception_request
+    // is gone after Slice 5 (#90) — the agent has no such tool, so the
+    // synthetic must NOT mention it.
+    expect(message).toContain("post_to_group");
+    expect(message).not.toContain("create_reception_request");
   });
 
   it("uses the resident's stored language for the FLOW_2 DONE synthetic when present", async () => {

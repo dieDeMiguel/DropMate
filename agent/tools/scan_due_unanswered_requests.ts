@@ -14,11 +14,9 @@
  *
  * Returns enough requester context per entry so the schedule's agent
  * can DM without an extra `getResident` round-trip per request:
- * requester summary (id, name, houseNumber, language). The requester
- * resident is guaranteed to exist because `create_reception_request`
- * uses the session caller as the requester — but resolution still
- * tolerates a missing record (returns `requester: null`) so a deleted
- * resident can't poison the entire scan.
+ * requester summary (id, name, houseNumber, language). Resolution
+ * tolerates a missing requester record (returns `requester: null`) so
+ * a deleted resident can't poison the entire scan.
  *
  * No session auth — schedules run from cron, not a user message. The
  * tool is harmless to call (read-only).
@@ -49,7 +47,6 @@ export interface DueUnansweredEntry {
   readonly createdAt: number;
   readonly expectedAt: number | null;
   readonly notes: string | null;
-  readonly candidateResidentIds: readonly string[];
   readonly requester: DueUnansweredRequesterSummary | null;
 }
 
@@ -92,7 +89,6 @@ export default defineTool({
         createdAt: r.createdAt,
         expectedAt: r.expectedAt,
         notes: r.notes ?? null,
-        candidateResidentIds: r.candidateResidentIds,
         requester: summariseRequester(requester),
       });
     }
