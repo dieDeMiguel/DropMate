@@ -163,9 +163,9 @@ export function telegramChannel(config: TelegramChannelConfig) {
             parseTrackingPage: async (input) => {
               // Same no-silent-catch policy as parseLabel above: errors
               // propagate to process-update.ts's catch which logs with
-              // stack + chatId, and the channel hands the agent a
-              // `[VISION_LOW_CONFIDENCE]` synthetic to prompt the user to
-              // retry via /receive.
+              // stack + chatId, and the channel sends the deterministic
+              // recovery prompt DM (per #100 — no agent involvement on
+              // the DM photo path).
               const execute = parseTrackingPageTool.execute as (
                 input: unknown,
                 options: unknown,

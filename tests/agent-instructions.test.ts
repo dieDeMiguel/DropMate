@@ -124,21 +124,18 @@ describe("model-facing surfaces (tools, skills, schedules, lib/redis.ts)", () =>
   });
 });
 
-// Regression for v2.1 Bug 2 (#94) — observed live 2026-05-21: on the
-// `[FLOW_2 DONE]` synthetic the model emitted the card text verbatim
-// ("📦 DHL-Paket erwartet heute 06:00–08:00. Kann jemand annehmen?") as
-// the DM ack instead of the one-sentence "Habe in der Gruppe gefragt …"
-// confirmation. The fix has two layers: (1) the synthetic itself is now
-// directive (asserted in `lib/telegram-channel/process-update.test.ts`),
-// and (2) the Flow 2 stanza in `instructions.md` calls out every
-// card-shaped pattern the ack must NOT take. This block pins the
-// instructions.md side of (2) so a future doc tweak can't silently
-// delete the load-bearing prohibitions.
-describe("agent/instructions.md Flow 2 ack format rules (v2.1 Bug 2, #94)", () => {
-  let flow2Stanza: string;
-
+// v2.1 #100: the prior `[FLOW_2 DONE]` ack-shape stanza (and its
+// per-language examples + card-shape prohibitions) was deleted because
+// the agent no longer sees a Flow 2 synthetic — the channel sends the
+// requester ack DM deterministically from `flow-2-dms.ts`. The new
+// Flow 2 stanza in `instructions.md` is shorter and has a different
+// load-bearing constraint: the agent must NOT post to the group or
+// call Flow 2 tools even when a raw text inbound looks like a Flow 2
+// trigger (e.g. an unregistered user's free-text that slipped past the
+// channel classifier). This block pins that constraint.
+describe("agent/instructions.md Flow 2 channel-driven contract (v2.1 #100)", () => {
   function extractFlow2Stanza(contents: string): string {
-    const start = contents.indexOf("# Flow 2 — \"I won't be home\"");
+    const start = contents.indexOf('# Flow 2 — "I won\'t be home"');
     if (start === -1) {
       throw new Error(
         'could not locate the Flow 2 stanza header in instructions.md; if it was renamed, update this test',
@@ -148,46 +145,31 @@ describe("agent/instructions.md Flow 2 ack format rules (v2.1 Bug 2, #94)", () =
     return after === -1 ? contents.slice(start) : contents.slice(start, after);
   }
 
-  it("contains explicit hard prohibitions on the card-shaped ack patterns from the bug trace", async () => {
+  it("states Flow 2 is fully channel-driven and the agent does not see synthetics for it", async () => {
     const contents = await readFile(instructionsPath, "utf8");
-    flow2Stanza = extractFlow2Stanza(contents);
+    const stanza = extractFlow2Stanza(contents);
 
-    // Each clause names a specific pattern observed in the buggy live
-    // ack — collectively they tell the model "the card is not the
-    // template for your reply."
-    expect(flow2Stanza).toMatch(/do not mention the carrier/i);
-    expect(flow2Stanza).toMatch(/do not mention the date/i);
-    expect(flow2Stanza).toMatch(/package emoji \(📦\)/i);
-    expect(flow2Stanza).toMatch(/do not repeat.+card text/i);
-    expect(flow2Stanza).toMatch(/do not ask "kann jemand annehmen\?"/i);
+    // The stanza must explicitly tell the model the channel owns Flow 2
+    // end-to-end — no synthetics, no DM ack, no card posting.
+    expect(stanza).toMatch(/channel-driven/i);
+    // Names every synthetic that was deleted in #100 so a future
+    // re-introduction is flagged.
+    expect(stanza).toMatch(/\[FLOW_2 DONE\]/);
+    expect(stanza).toMatch(/\[VISION_LOW_CONFIDENCE\]/);
+    expect(stanza).toMatch(/\[VOLUNTEER_ACCEPTED\]/);
   });
 
-  it("keeps the four per-language ack examples in sync with the synthetic's embedded examples", async () => {
+  it("hard-prohibits the slip-past-classifier failure mode (raw text that looks like Flow 2)", async () => {
     const contents = await readFile(instructionsPath, "utf8");
-    flow2Stanza = extractFlow2Stanza(contents);
-    // The markdown source wraps long example sentences across multiple
-    // lines with leading indentation. Normalise whitespace before
-    // comparing so the assertions match the reader's mental model of
-    // the sentence rather than the literal wrap.
-    const normalised = flow2Stanza.replace(/\s+/g, " ");
+    const stanza = extractFlow2Stanza(contents);
 
-    // The synthetic embeds these examples in `process-update.ts`'s
-    // `FLOW_2_DONE_ACK_EXAMPLES` map. The stanza below MUST list the
-    // same four examples verbatim — they are the canonical fallback
-    // the model leans on for unknown-language requesters who fall
-    // outside the synthetic's per-language example block.
-    expect(normalised).toContain(
-      "Habe in der Gruppe gefragt — ich melde mich, sobald jemand zusagt.",
-    );
-    expect(normalised).toContain(
-      "Asked in the group — I'll let you know as soon as someone says yes.",
-    );
-    expect(normalised).toContain(
-      "Pregunté en el grupo — te aviso en cuanto alguien responda.",
-    );
-    expect(normalised).toContain(
-      "Gruba sordum — biri yanıt verince haber veririm.",
-    );
+    // If the channel's regex/classifier ever misses, the agent might
+    // see a raw text DM that LOOKS like Flow 2 ("Ich erwarte morgen
+    // DHL"). The stanza must forbid the agent from posting to the
+    // group or writing a request in that case — those side effects are
+    // channel-only.
+    expect(stanza).toMatch(/do not post to the group/i);
+    expect(stanza).toMatch(/do not call any flow 2 tools/i);
   });
 });
 

@@ -16,9 +16,9 @@
  * + correctness guarantee is structural rather than instruction-based.
  *
  * Both DMs are localised to the four languages the rest of the v2.1
- * channel-side surface covers (de/en/es/tr — same set as the FLOW_2 DONE
- * ack examples and the v2.1 Bug 3 retry toasts). Unknown languages fall
- * back to German.
+ * channel-side surface covers (de/en/es/tr — same set as `FLOW_2_ACK_DMS`
+ * in `flow-2-dms.ts` and the v2.1 Bug 3 retry toasts). Unknown languages
+ * fall back to German.
  *
  * @see lib/telegram-channel/process-update.ts — handleAcceptReceptionGroup
  */
@@ -28,8 +28,9 @@ import type { TelegramMessageEntity } from "./send.js";
 
 /**
  * The four languages we ship localised templates for. Mirrors
- * `FLOW_2_DONE_ACK_EXAMPLES` and `ACCEPT_RETRY_TOASTS` in process-update.ts
- * so a fifth language only has to be added in one place per file.
+ * `FLOW_2_ACK_DMS` in `flow-2-dms.ts` and `ACCEPT_RETRY_TOASTS` in
+ * process-update.ts so a fifth language only has to be added in one
+ * place per file.
  */
 type SupportedLanguage = "de" | "en" | "es" | "tr";
 
@@ -357,8 +358,8 @@ export function buildRequesterAcceptDm(
  * stripped at the same time so the volunteer doesn't keep re-tapping.
  *
  * Mirrors the language set covered by `ACCEPT_RETRY_TOASTS` and
- * `FLOW_2_DONE_ACK_EXAMPLES` so the channel's user-facing surface stays
- * consistent.
+ * `FLOW_2_ACK_DMS` (in `flow-2-dms.ts`) so the channel's user-facing
+ * surface stays consistent.
  */
 const CROSS_STREET_TOASTS: Readonly<Record<SupportedLanguage, string>> = {
   de: "Du und dieser Nachbar müsst auf derselben Straße wohnen.",
@@ -384,9 +385,9 @@ export function crossStreetToastForLanguage(
  * under the requester's finger.
  *
  * Mirrors the language set covered by `CROSS_STREET_TOASTS`,
- * `ACCEPT_RETRY_TOASTS`, and `FLOW_2_DONE_ACK_EXAMPLES` so the channel's
- * user-facing surface stays consistent. Adding a fifth language is a
- * one-line touch in each of those tables.
+ * `ACCEPT_RETRY_TOASTS`, and `FLOW_2_ACK_DMS` (in `flow-2-dms.ts`) so
+ * the channel's user-facing surface stays consistent. Adding a fifth
+ * language is a one-line touch in each of those tables.
  */
 const SELF_ACCEPT_TOASTS: Readonly<Record<SupportedLanguage, string>> = {
   de: "Du kannst dein eigenes Paket nicht selbst annehmen.",

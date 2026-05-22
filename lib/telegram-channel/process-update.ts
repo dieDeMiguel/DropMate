@@ -45,20 +45,17 @@
  *     and lets the agent decide what to do next (Flow 1 still routes
  *     through `register_package`).
  *   - DM photo    → `parse_tracking_page` + channel-side routing
- *     (Flow 2 v2.1 / #88; the requester is pre-announcing a package
- *     by uploading the carrier's "where is my package?" tracking
- *     screenshot). On `confidence === "high"` AND `absenceSignal` in
- *     {`true`, `undefined`}, the channel writes the `ReceptionRequest`
- *     directly via `createReceptionRequest` (no agent invocation for
- *     the card-posting decision) and hands the agent the same
- *     `[FLOW_2 DONE language=<lang>]` synthetic Slice 1 uses. On any
- *     other outcome (low/medium confidence, explicit `absenceSignal:
- *     false`, parse failure, unregistered caller, Redis hiccup), the
- *     channel hands the agent a `[VISION_LOW_CONFIDENCE language=<lang>]`
- *     synthetic with whatever partial fields the vision tool returned
- *     so the agent asks the requester to retry with `/receive` — the
- *     explicit, classifier-bypassing recovery path Slice 2 (#87)
- *     shipped exactly for this case.
+ *     (Flow 2 v2.1 / #88, fully agent-bypassed per #100). On
+ *     `confidence === "high"` AND `absenceSignal` in {`true`,
+ *     `undefined`}, the channel writes the `ReceptionRequest` directly
+ *     via `createReceptionRequest` and sends the requester ONE
+ *     localised ack DM via `sendDirectMessage` (no agent invocation).
+ *     On any other outcome (low/medium confidence, explicit
+ *     `absenceSignal: false`, parse failure, unregistered caller,
+ *     Redis hiccup), the channel sends a localised recovery prompt DM
+ *     pointing at `/receive` (Slice 2 / #87) and inline `/register`
+ *     for unregistered senders. The agent never runs on the DM photo
+ *     path under any condition.
  *
  * Vision happens once, in a dedicated tool routed through Vercel AI
  * Gateway with Gemini 3.1 Flash Lite as primary and Claude Sonnet 4.6
@@ -97,6 +94,10 @@ import {
 } from "../registration.js";
 import { isReceiveCommand, parseReceiveCommand } from "../slash-command.js";
 
+import {
+  buildFlow2AckDm,
+  buildFlow2VisionLowConfidenceDm,
+} from "./flow-2-dms.js";
 import {
   extractInboundCallback,
   extractInboundMessage,
@@ -213,24 +214,25 @@ export interface ProcessUpdateDeps {
   } | null>;
   /**
    * Vision parser for carrier tracking-page screenshots (Flow 2 v2 /
-   * #69; v2.1 Slice 3 / #88 rewired the consumption). Wired by the
-   * factory to `agent/tools/parse_tracking_page.ts`'s `execute({
-   * imageUrl, caption })`. The orchestrator calls this exactly once
-   * per inbound DM photo update; the result drives the channel-side
-   * routing decision in `routeDmPhoto`:
+   * #69; v2.1 Slice 3 / #88 rewired the consumption; #100 made the
+   * downstream DM channel-deterministic). Wired by the factory to
+   * `agent/tools/parse_tracking_page.ts`'s `execute({ imageUrl,
+   * caption })`. The orchestrator calls this exactly once per inbound
+   * DM photo update; the result drives the channel-side routing
+   * decision in `routeDmPhoto`:
    *
    *   - `confidence === "high"` AND `absenceSignal` in {`true`,
    *     `undefined`} AND registered caller → channel calls
-   *     `createReceptionRequest` directly + hands the agent
-   *     `[FLOW_2 DONE language=<lang>]`.
-   *   - anything else → channel hands the agent
-   *     `[VISION_LOW_CONFIDENCE language=<lang>]` with partial fields
-   *     and the agent prompts the user to retry via `/receive`.
+   *     `createReceptionRequest` directly + sends the deterministic
+   *     ack DM via `sendDirectMessage`. No agent invocation.
+   *   - anything else → channel sends the deterministic recovery
+   *     prompt DM ("retry with /receive, register first if you
+   *     haven't"). No agent invocation either way.
    *
    * Throws when the underlying model + fallback both fail — the
-   * orchestrator's catch logs the error and falls through to the
-   * `[VISION_LOW_CONFIDENCE]` path so the agent asks the requester
-   * to type the carrier + window manually via `/receive`.
+   * orchestrator's catch logs the error and sends the recovery prompt
+   * DM so the user gets an actionable next step without the agent
+   * running.
    *
    * Group photos go through `parseLabel` instead. The orchestrator
    * decides which one to call based on `inbound.isGroup`.
@@ -324,8 +326,8 @@ export interface ProcessUpdateDeps {
    * Resolves a Telegram `user_id` to the full `Resident` record (or
    * `null` if unregistered). Consumed by the Flow 2 v2 channel path:
    * when the classifier returns `confidence: "high"`, the channel
-   * needs the caller's stored language for the `[FLOW_2 DONE]`
-   * synthetic + the caller object to hand to `createReceptionRequest`.
+   * needs the caller's stored language to pick the right ack-DM
+   * template + the caller object to hand to `createReceptionRequest`.
    *
    * Implemented in the factory via `getResident(String(userId))`.
    */
@@ -418,6 +420,31 @@ export interface ProcessUpdateDeps {
     input: RegisterResidentInput,
   ) => Promise<RegisterResidentResult>;
 }
+
+/**
+ * v2.1 #100: Flow 2 entry routes return this discriminated union so the
+ * orchestrator can decide whether to skip the agent entirely (channel
+ * already sent the deterministic DM) or fall through to `sendToAsh`
+ * (the route couldn't handle the inbound — e.g. unregistered caller on
+ * the classifier/`/receive` paths). Same shape pattern as
+ * `handleAcceptReceptionGroup` returning `Response` directly.
+ *
+ *   - `kind: "handled"` → the route already sent the user-facing DM via
+ *     `sendDirectMessage`. The orchestrator returns 204 immediately.
+ *     `sendToAsh` is NEVER called on this branch. This closes the
+ *     #100-class agent text-leak structurally: the model has no output
+ *     channel on a successful Flow 2 entry path, so it cannot fire a
+ *     welcome wall, duplicate the registration confirmation, or repeat
+ *     the ack.
+ *   - `kind: "fallthrough"` → hand `toAgent` to `sendToAsh` as the user
+ *     message. Used when the route couldn't make a deterministic
+ *     decision (unregistered caller on the classifier path, classifier
+ *     low/medium confidence, etc.). The agent's existing instructions
+ *     handle these — typically by asking the user to `/register` first.
+ */
+export type Flow2RouteResult =
+  | { readonly kind: "handled" }
+  | { readonly kind: "fallthrough"; readonly toAgent: string };
 
 /**
  * Subset of the `classify_dm_intent` tool output the orchestrator
@@ -649,13 +676,12 @@ async function handleCallbackQuery(
 }
 
 /**
- * Photo path entry point: dispatches to the group-photo or DM-photo
- * branch by chat type. Both branches own their own URL resolution +
- * vision call + failure handling because the two paths now hand the
- * agent qualitatively different synthetics (group photos still take
- * the agent-decides route; DM photos route channel-side per #88).
+ * Group photo path entry point — DM photos route through `routeDmPhoto`
+ * (which returns a `Flow2RouteResult`) so the orchestrator can skip the
+ * agent when the channel already sent the deterministic DM. This helper
+ * is only consulted for group photos (Flow 1 / `parse_label`).
  */
-async function buildSyntheticPhotoMessage(
+async function buildSyntheticGroupPhotoMessage(
   inbound: TelegramInboundMessage,
   deps: ProcessUpdateDeps,
 ): Promise<string> {
@@ -664,10 +690,7 @@ async function buildSyntheticPhotoMessage(
     // Defensive — caller already narrowed.
     return inbound.text.length > 0 ? inbound.text : "(photo, no caption)";
   }
-  if (inbound.isGroup) {
-    return parseGroupPhotoToSynthetic(inbound, fileId, deps);
-  }
-  return routeDmPhoto(inbound, fileId, deps);
+  return parseGroupPhotoToSynthetic(inbound, fileId, deps);
 }
 
 /**
@@ -746,7 +769,7 @@ async function parseGroupPhotoToSynthetic(
 }
 
 /**
- * v2.1 Slice 3 (#88): DM photo route into Flow 2 v2.
+ * v2.1 Slice 3 (#88) + #100: DM photo route into Flow 2 v2.
  *
  * Same shape as `routeDmTextThroughClassifier` and `routeReceiveCommand`,
  * but with `parse_tracking_page`'s vision output standing in for the
@@ -755,14 +778,17 @@ async function parseGroupPhotoToSynthetic(
  *   - `confidence === "high"` AND `absenceSignal` in {`true`, `undefined`}
  *     (the latter = implicit absence — uploading a tracking page in DM
  *     IS itself a Flow 2 trigger per v2 design) AND a registered caller
- *     AND `createReceptionRequest` succeeds → return `[FLOW_2 DONE
- *     language=<lang>]`.
+ *     AND `createReceptionRequest` succeeds → send a deterministic
+ *     localised ack DM via `sendDirectMessage` and return
+ *     `{ kind: "handled" }` so the orchestrator skips `sendToAsh`.
  *   - Any other outcome (low/medium confidence, explicit
  *     `absenceSignal: false`, vision tool null/throw, getFileUrl throw,
  *     unregistered caller, Redis hiccup on `createReceptionRequest`) →
- *     return `[VISION_LOW_CONFIDENCE language=<lang>]` with whatever
- *     partial fields the vision tool returned. The agent then prompts
- *     the requester to retry with `/receive` (Slice 2, #87).
+ *     send a deterministic localised recovery prompt DM directing the
+ *     user at `/receive` (Slice 2 / #87) and `/register` if they're
+ *     unregistered, and return `{ kind: "handled" }`. The agent never
+ *     runs on the DM photo path — closing #100's text-leak surface
+ *     structurally.
  *
  * Privacy invariant: the card-posting decision lives entirely in this
  * function. Even if the agent's reasoning is wrong, no group card lands
@@ -776,9 +802,8 @@ async function routeDmPhoto(
   inbound: TelegramInboundMessage,
   fileId: string,
   deps: ProcessUpdateDeps,
-): Promise<string> {
+): Promise<Flow2RouteResult> {
   const captionText = inbound.text.length > 0 ? inbound.text : undefined;
-  const captionForAgent = captionText ?? "(no caption)";
   const languageHint = inbound.fromLanguageCode ?? "de";
 
   let imageUrl: string;
@@ -793,11 +818,7 @@ async function routeDmPhoto(
         ? { name: err.name, message: err.message, stack: err.stack }
         : err,
     );
-    return buildVisionLowConfidenceMessage({
-      language: languageHint,
-      captionForAgent,
-      parsed: null,
-    });
+    return sendFlow2VlcDm(inbound, languageHint, deps);
   }
 
   let parsed: Awaited<ReturnType<ProcessUpdateDeps["parseTrackingPage"]>> = null;
@@ -822,11 +843,7 @@ async function routeDmPhoto(
   }
 
   if (parsed === null) {
-    return buildVisionLowConfidenceMessage({
-      language: languageHint,
-      captionForAgent,
-      parsed: null,
-    });
+    return sendFlow2VlcDm(inbound, languageHint, deps);
   }
 
   const isHighConfidenceFlow2 =
@@ -834,22 +851,14 @@ async function routeDmPhoto(
     (parsed.absenceSignal === true || parsed.absenceSignal === undefined);
 
   if (!isHighConfidenceFlow2 || inbound.fromUserId === null) {
-    return buildVisionLowConfidenceMessage({
-      language: languageHint,
-      captionForAgent,
-      parsed,
-    });
+    return sendFlow2VlcDm(inbound, languageHint, deps);
   }
 
   const caller = await deps
     .getRegisteredResident(inbound.fromUserId)
     .catch(() => null);
   if (!caller) {
-    return buildVisionLowConfidenceMessage({
-      language: languageHint,
-      captionForAgent,
-      parsed,
-    });
+    return sendFlow2VlcDm(inbound, languageHint, deps);
   }
 
   const callerLanguage = caller.language ?? languageHint;
@@ -871,14 +880,68 @@ async function routeDmPhoto(
         ? { name: err.name, message: err.message, stack: err.stack }
         : err,
     );
-    return buildVisionLowConfidenceMessage({
-      language: callerLanguage,
-      captionForAgent,
-      parsed,
-    });
+    return sendFlow2VlcDm(inbound, callerLanguage, deps);
   }
 
-  return buildFlow2DoneSyntheticMessage(callerLanguage);
+  return sendFlow2AckDm(inbound, callerLanguage, deps);
+}
+
+/**
+ * #100: send the deterministic Flow 2 success ack DM via the channel's
+ * `sendDirectMessage` dep and signal to the orchestrator that the agent
+ * should NOT run. A send failure is logged but still returns "handled"
+ * because the canonical state (ReceptionRequest written + group card
+ * landed) is already correct — falling through to the agent would only
+ * surface a free-form duplicate ack on a card that's already posted.
+ */
+async function sendFlow2AckDm(
+  inbound: TelegramInboundMessage,
+  language: string,
+  deps: ProcessUpdateDeps,
+): Promise<Flow2RouteResult> {
+  const text = buildFlow2AckDm(language);
+  try {
+    await deps.sendDirectMessage(inbound.chatId, text);
+  } catch (err) {
+    console.error(
+      "[flow-2-dm-ack] failed for chatId",
+      inbound.chatId,
+      "error:",
+      err instanceof Error
+        ? { name: err.name, message: err.message, stack: err.stack }
+        : err,
+    );
+  }
+  return { kind: "handled" };
+}
+
+/**
+ * #100: send the deterministic Flow 2 recovery prompt DM ("retry via
+ * /receive, or /register first if you haven't"). Same fail-still-handled
+ * contract as `sendFlow2AckDm` — we structurally avoid handing the
+ * agent the DM photo turn even when the DM send fails, because the agent
+ * has nothing useful to add (it'd just say the same thing in worse
+ * shape, or fire a welcome wall).
+ */
+async function sendFlow2VlcDm(
+  inbound: TelegramInboundMessage,
+  language: string,
+  deps: ProcessUpdateDeps,
+): Promise<Flow2RouteResult> {
+  const text = buildFlow2VisionLowConfidenceDm(language);
+  try {
+    await deps.sendDirectMessage(inbound.chatId, text);
+  } catch (err) {
+    console.error(
+      "[flow-2-dm-vlc] failed for chatId",
+      inbound.chatId,
+      "error:",
+      err instanceof Error
+        ? { name: err.name, message: err.message, stack: err.stack }
+        : err,
+    );
+  }
+  return { kind: "handled" };
 }
 
 function parseIsoToUnixMs(iso: string | undefined): number | undefined {
@@ -888,30 +951,35 @@ function parseIsoToUnixMs(iso: string | undefined): number | undefined {
 }
 
 /**
- * v2.1 Slice 1 (#86): on every DM text inbound from a known sender,
- * call `classifyDmIntent` to decide whether this is a Flow 2 v2
+ * v2.1 Slice 1 (#86) + #100: on every DM text inbound from a known
+ * sender, call `classifyDmIntent` to decide whether this is a Flow 2 v2
  * trigger. If the classifier returns `confidence: "high"` AND the
  * sender is a registered resident, the channel deterministically:
  *
  *   1. Calls `createReceptionRequest(caller, fields)` (lib function)
  *      to write the request + post the neutral group card.
- *   2. Hands the agent a narrow `[FLOW_2 DONE language=<lang>]`
- *      synthetic so it emits ONE DM ack in the user's language and
- *      nothing else — closing the v2 regression's "agent runs nine
- *      tools in one turn" failure mode (#85).
+ *   2. Sends a deterministic localised ack DM via `sendDirectMessage`
+ *      and returns `{ kind: "handled" }` so the orchestrator skips
+ *      `sendToAsh` — closing #100's text-leak surface (welcome wall +
+ *      duplicate registration confirmation + tripled ack observed on
+ *      the live trace) structurally. The agent never runs on the
+ *      success path.
  *
  * Every step is tolerant of failure: a classifier outage, an
  * unregistered caller, or a Redis/Bot-API hiccup on
  * `createReceptionRequest` all fall through to the v2 behaviour of
- * handing the raw text to the agent. The card-posting decision is
- * the only place a privacy-violating side effect can land; if any
- * upstream step fails, we'd rather miss the routing than misroute.
+ * handing the raw text to the agent (`{ kind: "fallthrough" }`). The
+ * card-posting decision is the only place a privacy-violating side
+ * effect can land; if any upstream step fails, we'd rather miss the
+ * routing than misroute.
  */
 async function routeDmTextThroughClassifier(
   inbound: TelegramInboundMessage,
   deps: ProcessUpdateDeps,
-): Promise<string> {
-  if (inbound.fromUserId === null) return inbound.text;
+): Promise<Flow2RouteResult> {
+  if (inbound.fromUserId === null) {
+    return { kind: "fallthrough", toAgent: inbound.text };
+  }
 
   let classification: Flow2ClassificationResult;
   try {
@@ -928,11 +996,11 @@ async function routeDmTextThroughClassifier(
         ? { name: err.name, message: err.message, stack: err.stack }
         : err,
     );
-    return inbound.text;
+    return { kind: "fallthrough", toAgent: inbound.text };
   }
 
   if (!classification.isFlow2 || classification.confidence !== "high") {
-    return inbound.text;
+    return { kind: "fallthrough", toAgent: inbound.text };
   }
 
   const caller = await deps
@@ -942,7 +1010,7 @@ async function routeDmTextThroughClassifier(
     // Unregistered users can't have a ReceptionRequest written for
     // them. Fall through and let the agent handle (it'll typically
     // ask them to /register first).
-    return inbound.text;
+    return { kind: "fallthrough", toAgent: inbound.text };
   }
 
   try {
@@ -963,11 +1031,11 @@ async function routeDmTextThroughClassifier(
         ? { name: err.name, message: err.message, stack: err.stack }
         : err,
     );
-    return inbound.text;
+    return { kind: "fallthrough", toAgent: inbound.text };
   }
 
   const language = caller.language ?? inbound.fromLanguageCode ?? "de";
-  return buildFlow2DoneSyntheticMessage(language);
+  return sendFlow2AckDm(inbound, language, deps);
 }
 
 /**
@@ -995,14 +1063,16 @@ async function routeDmTextThroughClassifier(
 async function routeReceiveCommand(
   inbound: TelegramInboundMessage,
   deps: ProcessUpdateDeps,
-): Promise<string> {
-  if (inbound.fromUserId === null) return inbound.text;
+): Promise<Flow2RouteResult> {
+  if (inbound.fromUserId === null) {
+    return { kind: "fallthrough", toAgent: inbound.text };
+  }
 
   const caller = await deps
     .getRegisteredResident(inbound.fromUserId)
     .catch(() => null);
   if (!caller) {
-    return inbound.text;
+    return { kind: "fallthrough", toAgent: inbound.text };
   }
 
   const parsed = parseReceiveCommand(inbound.text);
@@ -1025,11 +1095,11 @@ async function routeReceiveCommand(
         ? { name: err.name, message: err.message, stack: err.stack }
         : err,
     );
-    return inbound.text;
+    return { kind: "fallthrough", toAgent: inbound.text };
   }
 
   const language = caller.language ?? inbound.fromLanguageCode ?? "de";
-  return buildFlow2DoneSyntheticMessage(language);
+  return sendFlow2AckDm(inbound, language, deps);
 }
 
 /**
@@ -1306,9 +1376,10 @@ async function handleAcceptReceptionGroup(
  * right language matters. Fallback chain: a normalised non-null
  * input → German → German.
  *
- * The four covered languages mirror `FLOW_2_DONE_ACK_EXAMPLES` (see
- * below) — keeping the two sets in lockstep means a future fifth
- * language only needs to be added once per file.
+ * The four covered languages mirror `FLOW_2_ACK_DMS` in `flow-2-dms.ts`
+ * and the toast/template tables in `volunteer-accept-dms.ts` — keeping
+ * the sets in lockstep means a future fifth language only needs to be
+ * added once per file.
  *
  * Telegram's callback `answerCallbackQuery` toast is capped at 200
  * bytes (with `show_alert=false` it's even shorter on-screen) so each
@@ -1330,101 +1401,19 @@ function retryToastForLanguage(raw: string | null | undefined): string {
 }
 
 /**
- * Per-language ack examples for the FLOW_2 DONE synthetic.
- *
- * v2.1 Bug 2 (#94) regression: live trace produced the DM ack
- * `📦 DHL-Paket erwartet heute 06:00–08:00. Kann jemand annehmen?` —
- * literally the card text, not an ack. Root cause: the previous
- * synthetic was informative ("the channel just wrote a request") but
- * not directive enough to stop the model from mimicking the card. The
- * fix is twofold: (1) the synthetic now explicitly prohibits the card
- * shape (no 📦, no carrier, no window, no `Kann jemand annehmen?`),
- * and (2) it embeds a known-good example in the requester's language
- * so the model has a concrete sentence to mirror instead of inventing
- * one. The four languages here mirror the four examples in
- * `agent/instructions.md`'s Flow 2 stanza — the same source of truth.
- *
- * For languages outside this set the synthetic omits the example
- * line and the model falls back to `agent/instructions.md`'s prose
- * rules; the prohibitions still apply.
+ * Generic Flow-1 fallback synthetic for group photos when `parse_label`
+ * returns null or `getFileUrl` throws. The agent's only contribution on
+ * this branch is to ask the holder (in their language) to type the
+ * recipient's name + house number, so the synthetic stays in English
+ * (the user's language is resolved off `Resident.language` at agent
+ * runtime). Group photo path only — DM photos are channel-deterministic
+ * (#100), no agent invocation.
  */
-const FLOW_2_DONE_ACK_EXAMPLES: Readonly<Record<string, string>> = {
-  de: "Habe in der Gruppe gefragt — ich melde mich, sobald jemand zusagt.",
-  en: "Asked in the group — I'll let you know as soon as someone says yes.",
-  es: "Pregunté en el grupo — te aviso en cuanto alguien responda.",
-  tr: "Gruba sordum — biri yanıt verince haber veririm.",
-};
-
-function buildFlow2DoneSyntheticMessage(language: string): string {
-  const example = FLOW_2_DONE_ACK_EXAMPLES[language];
-  const exampleLine = example
-    ? ` Example (${language}): "${example}".`
-    : "";
-  return [
-    `[FLOW_2 DONE language=${language}]`,
-    "The channel posted the neutral group card with [Ich kann helfen].",
-    `Your only job is ONE short ack sentence to the requester in ${language}`,
-    "confirming you asked the group and will notify them when someone",
-    "responds. Do NOT mention the carrier, date, or time window. Do NOT",
-    "include any package emoji (📦). Do NOT repeat the card text. Do NOT",
-    "ask whether anyone can help — that is the card's job, not yours.",
-    "Do NOT call post_to_group, register_expected_delivery, or any other",
-    `tool — the card is already up.${exampleLine}`,
-  ].join(" ");
-}
-
 function buildLabelParseFailureMessage(captionForAgent: string): string {
   return [
     "[photo received, label could not be parsed]",
     `caption: ${captionForAgent}`,
     "Please ask the holder (in their language) to type the recipient's name and house number so the package can be registered.",
-  ].join(" ");
-}
-
-/**
- * v2.1 Slice 3 (#88) synthetic for DM photo paths that did NOT meet the
- * channel's high-confidence Flow 2 bar. Embeds whatever partial fields
- * the vision tool returned so the agent has context, then directs the
- * agent to prompt the requester to retry with `/receive` (Slice 2 / #87).
- * Always pins the language for the reply so the agent uses the caller's
- * language even when only Telegram's `languageCode` is known.
- */
-function buildVisionLowConfidenceMessage(args: {
-  readonly language: string;
-  readonly captionForAgent: string;
-  readonly parsed: Awaited<ReturnType<ProcessUpdateDeps["parseTrackingPage"]>>;
-}): string {
-  const fieldParts: string[] = [];
-  if (args.parsed) {
-    fieldParts.push(`carrier=${args.parsed.carrier}`);
-    if (args.parsed.trackingNumber) {
-      fieldParts.push(`trackingNumber=${args.parsed.trackingNumber}`);
-    }
-    if (args.parsed.expectedWindowStartAt) {
-      fieldParts.push(`windowStart=${args.parsed.expectedWindowStartAt}`);
-    }
-    if (args.parsed.expectedWindowEndAt) {
-      fieldParts.push(`windowEnd=${args.parsed.expectedWindowEndAt}`);
-    }
-    if (args.parsed.absenceSignal !== undefined) {
-      fieldParts.push(`absenceSignal=${args.parsed.absenceSignal}`);
-    }
-    fieldParts.push(`confidence=${args.parsed.confidence}`);
-  }
-  const partials =
-    fieldParts.length > 0
-      ? ` Partial fields: ${fieldParts.join(" ")}.`
-      : " No fields were extracted.";
-
-  return [
-    `[VISION_LOW_CONFIDENCE language=${args.language}]`,
-    `The requester sent a DM photo (caption: ${args.captionForAgent}) but the`,
-    "channel could not confidently extract enough fields to post the group",
-    `card on their behalf.${partials} Reply to the requester in ${args.language}`,
-    "with ONE short sentence asking them to retry with the /receive command",
-    "(e.g. /receive DHL morgen 14-16). Do NOT call post_to_group,",
-    "register_expected_delivery, or any other tool — wait for the user to",
-    "send /receive.",
   ].join(" ");
 }
 
@@ -1653,19 +1642,40 @@ export async function processInboundTelegramUpdate(
     if (handled) return handled;
   }
 
+  // v2.1 #100: Flow 2 entry paths (DM photo, DM text → classifier,
+  // `/receive` slash) now own their own user-facing DM via
+  // `sendDirectMessage`. Each route returns `Flow2RouteResult`:
+  //
+  //   - `{ kind: "handled" }`     → channel already sent the DM; skip
+  //     `sendToAsh` entirely. Closes the agent text-leak surface that
+  //     produced the welcome wall + duplicate registration + tripled
+  //     ack on the live trace.
+  //   - `{ kind: "fallthrough" }` → hand `toAgent` to `sendToAsh` (the
+  //     route couldn't make a deterministic decision — typically an
+  //     unregistered caller or Redis hiccup; the agent's existing
+  //     instructions handle that).
+  //
+  // Group photos still go through the agent (Flow 1) and group text
+  // messages also go through the agent (no Flow 2 in groups).
   let message: string;
-  if (inbound.photoFileId !== null) {
-    message = await buildSyntheticPhotoMessage(inbound, deps);
+  if (inbound.photoFileId !== null && !inbound.isGroup) {
+    // DM photo path — fully channel-deterministic per #100.
+    const result = await routeDmPhoto(inbound, inbound.photoFileId, deps);
+    if (result.kind === "handled") return new Response(null, { status: 204 });
+    message = result.toAgent;
+  } else if (inbound.photoFileId !== null) {
+    // Group photo path — Flow 1 / parse_label.
+    message = await buildSyntheticGroupPhotoMessage(inbound, deps);
   } else if (!inbound.isGroup && inbound.fromUserId !== null) {
     // `/receive` is the explicit, classifier-bypassing entry point for
     // Flow 2 v2 (#87). It must run BEFORE `classify_dm_intent` because
     // the user invoking the slash is already a high-confidence signal
     // — there's no reason to ask Gemini Flash to second-guess them.
-    if (isReceiveCommand(inbound.text)) {
-      message = await routeReceiveCommand(inbound, deps);
-    } else {
-      message = await routeDmTextThroughClassifier(inbound, deps);
-    }
+    const result = isReceiveCommand(inbound.text)
+      ? await routeReceiveCommand(inbound, deps)
+      : await routeDmTextThroughClassifier(inbound, deps);
+    if (result.kind === "handled") return new Response(null, { status: 204 });
+    message = result.toAgent;
   } else {
     message = inbound.text;
   }

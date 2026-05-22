@@ -22,13 +22,14 @@
  *     tracking page).
  *
  * The channel layer consumes the tool's result directly (v2.1 Slice
- * 3 / #88): when `confidence === "high"` AND the caller is a
- * registered resident, the channel writes the `ReceptionRequest` via
- * `lib/reception-request.ts::createReceptionRequest` and hands the
- * agent a `[FLOW_2 DONE language=<lang>]` synthetic so it emits one
- * DM ack. On low/medium confidence (or any other failure) the
- * channel hands the agent `[VISION_LOW_CONFIDENCE …]` so it asks the
- * requester to retry via `/receive`.
+ * 3 / #88; v2.1 #100 removed the agent from this path entirely): when
+ * `confidence === "high"` AND the caller is a registered resident,
+ * the channel writes the `ReceptionRequest` via
+ * `lib/reception-request.ts::createReceptionRequest` and sends the
+ * deterministic ack DM from `lib/telegram-channel/flow-2-dms.ts`. On
+ * low/medium confidence (or any other failure) the channel sends the
+ * deterministic recovery prompt DM pointing at `/receive`. The agent
+ * is NOT invoked on the DM photo path under any condition.
  *
  * Inputs:
  *   - `imageUrl`: HTTPS URL, NOT inline bytes — the Vercel AI Gateway
