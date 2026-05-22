@@ -34,37 +34,49 @@
  * double-taps), and — for group confirm_pickup taps — gate on the
  * tapper actually being the package's recipient.
  *
- * Photo path: routing is by chat type.
+ * Photo path: routing is by chat type. Both branches are fully
+ * channel-deterministic — the agent never runs on a Flow 1 / Flow 2
+ * photo on the happy path.
  *
- *   - Group photo → Flow 1 (the holder is showing a shipping label they
- *     received on someone else's package). The channel resolves the
- *     Telegram `file_id` to a signed HTTPS URL via `getFileUrl` and
- *     hands the agent a `[photo received] file_url=… caption='…'`
- *     synthetic. The agent invokes `parse_label({ imageUrl, caption })`
- *     itself as the first tool call of the turn, so the vision call's
- *     input/output token spend lands inside `ash.turn` rather than as
- *     a sidecar. Pre-#79: the orchestrator pre-called `parseLabel` and
- *     folded the result into a `[label parsed] …` synthetic. The
- *     conversational model never sees image bytes either way — it
- *     reads the tool's structured return value.
+ *   - Group photo → Flow 1 (the holder is showing a shipping label
+ *     they received on someone else's package). The channel resolves
+ *     the Telegram `file_id` to a signed HTTPS URL via `getFileUrl`,
+ *     calls `parseLabel({ imageUrl, caption })` itself (v2.1 #107 /
+ *     Slice 2 of #106 — partial revert of #79 for parse_label), and
+ *     on `confidence === "high"` + a recipient that resolves to a
+ *     registered Resident calls `registerPackage` directly, posts the
+ *     deterministic group ack, and DMs the recipient with the
+ *     `[Abgeholt]` keyboard. `sendToAsh` is never called. Every other
+ *     branch (low/medium-conf parse, missing recipient,
+ *     known_telegram / unknown recipient, parse_label outage,
+ *     getFileUrl failure) stays silent in Slice 2; Slice 3 (#109)
+ *     introduces the `[FLOW_1 CLARIFICATION]` synthetic with hard
+ *     prohibitions on free-form output for the disambiguation cases.
+ *     Pre-#107: the orchestrator handed the agent a `[photo received]
+ *     file_url=…` synthetic and the agent invoked `parse_label`
+ *     itself — that closed the observability gap from pre-#79 but
+ *     left the agent on the inbound surface, which the live trace
+ *     2026-05-22 (#105) showed produces 20+ free-form German messages
+ *     on a single inbound. Pulling the decision OUT of the model
+ *     closes the text-leak surface structurally.
  *   - DM photo → `parse_tracking_page` + channel-side routing
  *     (Flow 2 v2.1 / #88, fully agent-bypassed per #100). On
  *     `confidence === "high"` AND `absenceSignal` in {`true`,
  *     `undefined`}, the channel writes the `ReceptionRequest` directly
  *     via `createReceptionRequest` and sends the requester ONE
- *     localised ack DM via `sendDirectMessage` (no agent invocation).
- *     On any other outcome (low/medium confidence, explicit
- *     `absenceSignal: false`, parse failure, unregistered caller,
- *     Redis hiccup), the channel sends a localised recovery prompt DM
- *     pointing at `/receive` (Slice 2 / #87) and inline `/register`
- *     for unregistered senders. The agent never runs on the DM photo
- *     path under any condition.
+ *     localised ack DM via `sendDirectMessage`. On any other outcome
+ *     (low/medium confidence, explicit `absenceSignal: false`, parse
+ *     failure, unregistered caller, Redis hiccup), the channel sends
+ *     a localised recovery prompt DM pointing at `/receive` (Slice 2 /
+ *     #87) and inline `/register` for unregistered senders. The agent
+ *     never runs on the DM photo path under any condition.
  *
  * Both vision tools route through Vercel AI Gateway with Gemini 3.1
  * Flash Lite as primary and Claude Sonnet 4.6 as fallback. The
- * conversational model (Gemini Flash) reads only structured tool
- * results — eliminating the previous failure mode where Flash received
- * a `FilePart` directly and hallucinated "I cannot read images."
+ * trade-off Slice 2 accepts (per #107's design call): `parse_label`'s
+ * token spend no longer lands inside `ash.turn` because the agent
+ * never runs on the channel-deterministic happy path. Observability
+ * lives on the custom OTel spans emitted by `lib/trace.ts`.
  *
  * @see lib/telegram-channel/verify.ts        — header check (same primitive)
  * @see lib/telegram-channel/inbound.ts       — payload → canonical message
@@ -228,9 +240,9 @@ export interface ProcessUpdateDeps {
    * DM so the user gets an actionable next step without the agent
    * running.
    *
-   * Group photos route through the agent (it calls `parse_label`
-   * itself, #79); the orchestrator picks the DM vs group branch off
-   * `inbound.isGroup`.
+   * Group photos route through the channel-side `parseLabel` (Slice 2
+   * of #106 / #107) — the orchestrator picks the DM vs group branch
+   * off `inbound.isGroup`.
    */
   readonly parseTrackingPage: (input: {
     imageUrl: string;
@@ -244,6 +256,51 @@ export interface ProcessUpdateDeps {
     confidence: "high" | "medium" | "low";
     reason: string;
   } | null>;
+  /**
+   * v2.1 #107 (Slice 2 of #106): vision parser for shipping-label
+   * photos. Wired by the factory to `agent/tools/parse_label.ts`'s
+   * `execute({ imageUrl, caption })`. The orchestrator calls this
+   * exactly once per inbound group photo update; the structured
+   * result drives the channel-side routing decision in
+   * `routeGroupPhoto`:
+   *
+   *   - `confidence === "high"` AND `recipientName` present AND the
+   *     resolved recipient is a registered Resident → channel calls
+   *     `registerPackage` directly + posts the deterministic group
+   *     ack + DMs the recipient via `sendDirectMessage`. No agent
+   *     invocation.
+   *   - anything else (low/medium confidence, missing recipientName,
+   *     parse_label throws, getFileUrl throws, recipient resolves to
+   *     known_telegram / unknown, unregistered holder) → channel
+   *     stays silent (no group leak). Slice 3 (#109) will introduce
+   *     the `[FLOW_1 CLARIFICATION]` synthetic for the disambiguation
+   *     cases.
+   *
+   * Throws when the underlying model + fallback both fail — the
+   * orchestrator's catch logs the error and stays silent (Slice 3
+   * deferral) so the group is never spammed by a vision outage.
+   *
+   * Pre-#107 the agent invoked this tool itself via a `[photo
+   * received] file_url=…` synthetic (#79 promotion). Slice 2 partially
+   * reverts that for `parse_label` specifically — the structural fix
+   * for Flow 1's text-leak surface needs the registration decision OUT
+   * of the model entirely. The trade-off is that the `parse_label`
+   * call no longer lands inside `ash.turn`; on a channel-deterministic
+   * happy path the agent never runs, so there's no `ash.turn` to
+   * attribute the spend to anyway. Observability for the vision call
+   * lands on the custom OTel span this module emits via `emitTrace`.
+   */
+  readonly parseLabel: (input: {
+    imageUrl: string;
+    caption?: string;
+  }) => Promise<{
+    carrier: PackageCarrier;
+    trackingNumber?: string;
+    recipientName?: string;
+    recipientHouseNumber?: string;
+    confidence: "high" | "medium" | "low";
+    reason: string;
+  }>;
   /**
    * Acks a `callback_query` so the Telegram client clears the tap
    * spinner. Optional `text` shows a brief toast to the tapper —
@@ -830,48 +887,44 @@ async function handleCallbackQuery(
 }
 
 /**
- * Group photo path entry point — DM photos route through `routeDmPhoto`
- * (which returns a `Flow2RouteResult`) so the orchestrator can skip the
- * agent when the channel already sent the deterministic DM. This helper
- * is only consulted for group photos (Flow 1).
- */
-async function buildSyntheticGroupPhotoMessage(
-  inbound: TelegramInboundMessage,
-  deps: ProcessUpdateDeps,
-): Promise<string> {
-  const fileId = inbound.photoFileId;
-  if (fileId === null) {
-    // Defensive — caller already narrowed.
-    return inbound.text.length > 0 ? inbound.text : "(photo, no caption)";
-  }
-  return buildGroupPhotoSynthetic(inbound, fileId, deps);
-}
-
-/**
- * #79: hand the agent a `[photo received] file_url=… caption='…'`
- * synthetic so it can invoke `parse_label({ imageUrl, caption })`
- * itself. The conversational model never sees the photo bytes — only
- * the structured tool return value — but the vision call's token spend
- * now lands inside `ash.turn` instead of as a sidecar in the channel
- * handler.
+ * v2.1 #107 (Slice 2 of #106): channel-deterministic group photo route.
  *
- * Caption quoting: single-quotes inside the caption are doubled
- * (`'` → `''`) so the wrapping `'…'` parses as one field. The agent's
- * Flow 1 photo stanza tells it to read `file_url=…` and pass that URL
- * straight into `parse_label`.
+ * Same architectural shape as `routeGroupTextThroughClassifier` — the
+ * channel resolves the photo URL, calls `parse_label` itself (partial
+ * revert of #79 for parse_label specifically), and on a high-confidence
+ * parse with a registered recipient calls `registerPackage` directly,
+ * posts the deterministic group ack + DMs the recipient, and returns
+ * `{ kind: "handled" }` so the orchestrator skips `sendToAsh`.
  *
- * On `getFileUrl` failure the channel falls back to a `[photo
- * received, file url could not be resolved] caption: …` shim — there's
- * no URL to hand the vision tool, so the agent's job is to ask the
- * holder (in their language) to type the recipient.
+ * Why this is "silent" on every disambiguation case (low-conf,
+ * missing recipientName, vision throws, getFileUrl throws,
+ * known_telegram / unknown recipient): Slice 2's job is the
+ * happy-path, and the trade-off the issue calls out is "silently
+ * logged for now ... did nothing is acceptable interim behaviour
+ * until Slice 3 ships" (#107 / #109). Closing the agent text-leak
+ * surface structurally — the live trace 2026-05-22 (#105) showed a
+ * single group photo producing 20+ free-form German messages — means
+ * the channel must never re-engage the agent on a Flow 1 photo until
+ * Slice 3 introduces the proper `[FLOW_1 CLARIFICATION]` synthetic
+ * with hard prohibitions on free-form output.
+ *
+ * Unregistered holder is the one exception: `registerPackage` throws
+ * `REGISTER_PACKAGE_HOLDER_NOT_REGISTERED` and we send a localised
+ * `/register` nudge DM (matching the text path's behaviour, #106).
+ * Group still stays silent.
  */
-async function buildGroupPhotoSynthetic(
+async function routeGroupPhoto(
   inbound: TelegramInboundMessage,
   fileId: string,
   deps: ProcessUpdateDeps,
-): Promise<string> {
+): Promise<Flow1RouteResult> {
+  if (inbound.fromUserId === null) {
+    // Anonymous group photo (no `from` on the payload) — can't
+    // resolve the holder, so stay silent.
+    return { kind: "silent" };
+  }
+
   const captionText = inbound.text.length > 0 ? inbound.text : undefined;
-  const captionForAgent = captionText ?? "(no caption)";
 
   let imageUrl: string;
   try {
@@ -885,11 +938,193 @@ async function buildGroupPhotoSynthetic(
         ? { name: err.name, message: err.message, stack: err.stack }
         : err,
     );
-    return buildPhotoUrlFailureMessage(captionForAgent);
+    // Slice 2 deferral: silent until Slice 3 (#109) introduces the
+    // [FLOW_1 CLARIFICATION] synthetic with reason=parse-failed.
+    return { kind: "silent" };
   }
 
-  const quotedCaption = captionForAgent.replace(/'/g, "''");
-  return `[photo received] file_url=${imageUrl} caption='${quotedCaption}'`;
+  let parsed: Awaited<ReturnType<ProcessUpdateDeps["parseLabel"]>>;
+  emitTrace("vision", "start", { tool: "parse_label" });
+  try {
+    parsed = await deps.parseLabel({ imageUrl, caption: captionText });
+    emitTrace("vision", "end", {
+      tool: "parse_label",
+      confidence: parsed.confidence,
+    });
+  } catch (err) {
+    console.error(
+      "[parse_label] failed for chatId",
+      inbound.chatId,
+      "error:",
+      err instanceof Error
+        ? { name: err.name, message: err.message, stack: err.stack }
+        : err,
+    );
+    emitTrace("vision", "error", { tool: "parse_label" });
+    // Slice 2 deferral: silent.
+    return { kind: "silent" };
+  }
+
+  if (parsed.confidence !== "high" || !parsed.recipientName) {
+    // Slice 2 deferral: low/medium-conf parses and missing recipient
+    // names stay silent. Slice 3 (#109) introduces the clarification
+    // synthetic for these cases.
+    emitTrace("flow1", "silent", {
+      reason:
+        parsed.confidence !== "high" ? "low-confidence" : "missing-recipient",
+      source: "photo",
+    });
+    return { kind: "silent" };
+  }
+
+  // Resolve the holder before calling registerPackage so the
+  // unregistered-holder branch can be detected without inspecting
+  // `RegisterPackageError`'s message string.
+  const holder = await deps
+    .getRegisteredResident(inbound.fromUserId)
+    .catch(() => null);
+
+  const recipientHouseNumber =
+    parsed.recipientHouseNumber ?? holder?.houseNumber ?? "";
+  if (recipientHouseNumber === "") {
+    // Defensive: no recipient house number AND no holder house
+    // number to default to. Slice 3 disambig.
+    emitTrace("flow1", "silent", {
+      reason: "missing-house-number",
+      source: "photo",
+    });
+    return { kind: "silent" };
+  }
+
+  let registered: RegisterPackageResult;
+  emitTrace("flow1", "register.start", {
+    recipient: parsed.recipientName,
+    source: "photo",
+  });
+  try {
+    registered = await deps.registerPackage(holder, {
+      recipientName: parsed.recipientName,
+      recipientHouseNumber,
+      carrier: parsed.carrier,
+      trackingNumber: parsed.trackingNumber,
+    });
+    emitTrace("flow1", "register.end", {
+      recipient: parsed.recipientName,
+      resolution: registered.recipientResolution.kind,
+      source: "photo",
+    });
+  } catch (err) {
+    const errorCode =
+      err && typeof err === "object" && "code" in err
+        ? (err as { code?: string }).code
+        : undefined;
+    if (errorCode === REGISTER_PACKAGE_HOLDER_NOT_REGISTERED_ERROR_CODE) {
+      const language =
+        inbound.fromLanguageCode &&
+        normaliseLanguageCode(inbound.fromLanguageCode);
+      const nudge = buildHolderNotRegisteredNudge(language);
+      try {
+        await deps.sendDirectMessage(inbound.fromUserId, nudge);
+      } catch (dmErr) {
+        console.error(
+          "[flow1] holder-not-registered nudge DM (photo) failed for userId",
+          inbound.fromUserId,
+          "error:",
+          dmErr instanceof Error ? dmErr.message : dmErr,
+        );
+      }
+      emitTrace("flow1", "reject.holder-not-registered", { source: "photo" });
+      return { kind: "handled" };
+    }
+    console.error(
+      "[register_package] (photo) failed for holder",
+      inbound.fromUserId,
+      "recipient",
+      parsed.recipientName,
+      "error:",
+      err instanceof Error
+        ? { name: err.name, message: err.message, stack: err.stack }
+        : err,
+    );
+    emitTrace("flow1", "register.error", { source: "photo" });
+    return { kind: "silent" };
+  }
+
+  if (registered.recipientResolution.kind !== "resident") {
+    // Slice 2: only the "registered resident" branch posts. Other
+    // branches (known_telegram, unknown) stay silent — Slice 3
+    // introduces the clarification synthetic / group question.
+    emitTrace("flow1", "silent", {
+      reason: registered.recipientResolution.kind,
+      source: "photo",
+    });
+    return { kind: "silent" };
+  }
+
+  const groupAckText = buildGroupAckText({
+    holder: registered.holder,
+    recipient: registered.recipientResolution.resident,
+  });
+  const recipientDmText = buildRecipientDmText({
+    holder: registered.holder,
+    recipient: registered.recipientResolution.resident,
+  });
+  const keyboard = buildPickupKeyboard(registered.package.id);
+
+  // Group ack. `sendDirectMessage` is chat-id-agnostic — sending to
+  // `inbound.chatId` posts to the group when the inbound came from a
+  // group.
+  try {
+    emitTrace("dm", "start", { kind: "flow1-group-ack" });
+    await deps.sendDirectMessage(
+      inbound.chatId,
+      groupAckText,
+      undefined,
+      keyboard,
+    );
+    emitTrace("dm", "end", { kind: "flow1-group-ack" });
+  } catch (err) {
+    console.error(
+      "[flow1] group ack post (photo) failed for chatId",
+      inbound.chatId,
+      "package",
+      registered.package.id,
+      "error:",
+      err instanceof Error ? err.message : err,
+    );
+    emitTrace("dm", "error", { kind: "flow1-group-ack" });
+  }
+
+  const recipientChatId = Number(registered.recipientResolution.resident.id);
+  if (Number.isFinite(recipientChatId)) {
+    try {
+      emitTrace("dm", "start", { kind: "flow1-recipient" });
+      await deps.sendDirectMessage(
+        recipientChatId,
+        recipientDmText,
+        undefined,
+        keyboard,
+      );
+      emitTrace("dm", "end", { kind: "flow1-recipient" });
+    } catch (err) {
+      console.error(
+        "[flow1] recipient DM (photo) failed for resident id",
+        registered.recipientResolution.resident.id,
+        "package",
+        registered.package.id,
+        "error:",
+        err instanceof Error ? err.message : err,
+      );
+      emitTrace("dm", "error", { kind: "flow1-recipient" });
+    }
+  } else {
+    console.error(
+      "[flow1] recipient.id is not a finite number — skipping DM (photo)",
+      { recipientId: registered.recipientResolution.resident.id },
+    );
+  }
+
+  return { kind: "handled" };
 }
 
 /**
@@ -1814,23 +2049,6 @@ function retryToastForLanguage(raw: string | null | undefined): string {
 }
 
 /**
- * Generic Flow-1 fallback synthetic for group photos when `getFileUrl`
- * throws — there's no URL to hand `parse_label`, so the agent's only
- * contribution on this branch is to ask the holder (in their language)
- * to type the recipient's name + house number. The synthetic stays in
- * English (the user's language is resolved off `Resident.language` at
- * agent runtime). Group photo path only — DM photos are channel-
- * deterministic (#100), no agent invocation.
- */
-function buildPhotoUrlFailureMessage(captionForAgent: string): string {
-  return [
-    "[photo received, file url could not be resolved]",
-    `caption: ${captionForAgent}`,
-    "Please ask the holder (in their language) to type the recipient's name and house number so the package can be registered.",
-  ].join(" ");
-}
-
-/**
  * v2.1 #97: channel-deterministic registration handler. Same shape as
  * `handleAcceptReceptionGroup` — owns the FULL lifecycle of a
  * registration inbound and returns `Response | null`:
@@ -2096,8 +2314,20 @@ export async function processInboundTelegramUpdate(
     message = result.toAgent;
     trigger = "telegram.photo";
   } else if (inbound.photoFileId !== null) {
-    // Group photo path — Flow 1 / parse_label.
-    message = await buildSyntheticGroupPhotoMessage(inbound, deps);
+    // v2.1 #107 (Slice 2 of #106): group photo route is now channel-
+    // deterministic. On a high-confidence parse_label + registered
+    // recipient the channel registers the package, posts the group
+    // ack, and DMs the recipient — sendToAsh is NEVER called. Every
+    // other branch (low/medium-conf parse, missing recipient,
+    // unknown/known_telegram resolution, parse_label outage,
+    // getFileUrl failure) stays silent. Slice 3 (#109) will introduce
+    // the [FLOW_1 CLARIFICATION] synthetic for the disambiguation
+    // cases — until then, silent is the correct interim behaviour.
+    const result = await routeGroupPhoto(inbound, inbound.photoFileId, deps);
+    if (result.kind === "handled" || result.kind === "silent") {
+      return new Response(null, { status: 204 });
+    }
+    message = result.toAgent;
     trigger = "telegram.photo";
   } else if (!inbound.isGroup && inbound.fromUserId !== null) {
     // `/receive` is the explicit, classifier-bypassing entry point for

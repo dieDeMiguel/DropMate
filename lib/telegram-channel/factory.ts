@@ -37,6 +37,7 @@ import { defineChannel, GET, POST } from "experimental-ash/channels";
 
 import classifyDmIntentTool from "../../agent/tools/classify_dm_intent.js";
 import classifyGroupMessageTool from "../../agent/tools/classify_group_message.js";
+import parseLabelTool from "../../agent/tools/parse_label.js";
 import parseTrackingPageTool from "../../agent/tools/parse_tracking_page.js";
 import {
   acceptReceptionRequest,
@@ -196,6 +197,34 @@ export function telegramChannel(config: TelegramChannelConfig) {
               }>;
               return execute(input, {
                 toolCallId: `parse_tracking_page:${Date.now()}`,
+                messages: [],
+              });
+            },
+            parseLabel: async (input) => {
+              // v2.1 #107 (Slice 2 of #106): channel-side vision call
+              // for Flow 1 group photos. Same shape as parseTrackingPage
+              // — errors propagate to process-update.ts's catch which
+              // logs and stays silent (no group leak on vision outages).
+              const execute = parseLabelTool.execute as (
+                input: unknown,
+                options: unknown,
+              ) => Promise<{
+                carrier:
+                  | "DHL"
+                  | "Hermes"
+                  | "DPD"
+                  | "GLS"
+                  | "UPS"
+                  | "Amazon"
+                  | "unknown";
+                trackingNumber?: string;
+                recipientName?: string;
+                recipientHouseNumber?: string;
+                confidence: "high" | "medium" | "low";
+                reason: string;
+              }>;
+              return execute(input, {
+                toolCallId: `parse_label:${Date.now()}`,
                 messages: [],
               });
             },

@@ -30,20 +30,31 @@
  * (see `agent/agent.ts`) — only the photo turn pays the vision cost,
  * and only via this tool.
  *
- * #79: invoked by the conversational agent itself as the first tool
- * call of every Flow 1 group-photo turn. The channel hands the agent a
- * `[photo received] file_url=<https-url> caption='…'` synthetic; the
- * agent reads `file_url` and passes it through here. Pre-#79 the
- * channel pre-called this tool and folded the structured result into a
- * `[label parsed] …` synthetic — that worked, but the vision call's
- * token spend was a sidecar and didn't show up on the Agent Runs row
- * for the turn. Moving the call site inside the turn (the model never
- * sees image bytes either way — it reads the tool's structured return)
- * fixes the attribution gap.
+ * v2.1 #107 (Slice 2 of #106): the tool is invoked by the channel
+ * layer (`lib/telegram-channel/process-update.ts::routeGroupPhoto`),
+ * NOT the conversational agent. The channel resolves the Telegram
+ * `file_id` to a signed HTTPS URL via `getFileUrl`, calls this tool
+ * with `{ imageUrl, caption }`, and uses the structured return to
+ * drive the deterministic registration + group ack + recipient DM —
+ * `sendToAsh` is never invoked on the Flow 1 photo happy path.
+ *
+ * Why the back-and-forth: the previous main (pre-#107) had the agent
+ * invoking this tool itself via a `[photo received] file_url=…`
+ * synthetic — that closed an observability gap (vision spend
+ * inside `ash.turn`) but left the inbound surface on the agent,
+ * which the live trace 2026-05-22 (#105) showed produces 20+
+ * free-form German messages on a single group photo inbound,
+ * including references to deleted tools and v1 form-fill prose.
+ * Pulling the decision OUT of the model entirely closes that text-
+ * leak surface structurally. The trade-off: the vision call no
+ * longer lands inside `ash.turn` on the happy path because there is
+ * no `ash.turn` (the agent doesn't run). Observability moves to the
+ * custom OTel spans emitted by `lib/trace.ts`.
  *
  * Low-confidence parses surface explicitly (`confidence: "low"`) so
- * the agent knows to ask for confirmation before registering rather
- * than auto-creating a Package on a guess.
+ * the channel can stay silent on uncertain parses rather than
+ * registering a guess. Slice 3 (#109) will hand the agent a
+ * clarification synthetic on those branches.
  */
 
 import { defineTool } from "experimental-ash/tools";
@@ -58,15 +69,14 @@ const inputSchema = z.object({
     .string()
     .url()
     .describe(
-      "HTTPS URL of the shipping-label photo. The channel resolves the " +
-        "Telegram `file_id` to a signed proxy URL and hands it to the " +
-        "agent inside the `[photo received] file_url=…` synthetic; the " +
-        "agent passes that URL through verbatim. The Vercel AI Gateway " +
-        "fetches the URL server-side and forwards the bytes to the " +
-        "underlying vision model. Inline bytes (Uint8Array / base64) " +
-        "are NOT supported here: the Gateway client converts them to a " +
-        "`data:` URI which the Gateway server rejects with `Unsupported " +
-        "file URI type`. URL string in, vision out.",
+      "HTTPS URL of the shipping-label photo. The channel resolves " +
+        "the Telegram `file_id` to a signed proxy URL and passes it " +
+        "in directly (v2.1 #107 — channel-invoked, no agent in the " +
+        "loop). The Vercel AI Gateway fetches the URL server-side " +
+        "and forwards the bytes to the underlying vision model. " +
+        "Inline bytes (Uint8Array / base64) are NOT supported here: " +
+        "the Gateway client converts them to a `data:` URI which the " +
+        "Gateway server rejects with `Unsupported file URI type`.",
     ),
   caption: z
     .string()
@@ -199,10 +209,10 @@ export default defineTool({
     "house number from a shipping-label photo. Tries Gemini 3.1 Flash " +
     "Lite (vision) first, then falls back to Claude Sonnet 4.6 if the " +
     "primary errors. Routes via Vercel AI Gateway. Returns `{ carrier, " +
-    "trackingNumber?, recipientName?, recipientHouseNumber?, confidence, " +
-    "reason }`. The conversational agent invokes this as the first " +
-    "tool call of every Flow 1 group-photo turn; the model never sees " +
-    "image bytes, only the structured return value.",
+    "trackingNumber?, recipientName?, recipientHouseNumber?, " +
+    "confidence, reason }`. v2.1 #107: invoked by the channel layer " +
+    "(`lib/telegram-channel/process-update.ts::routeGroupPhoto`) — " +
+    "NOT the conversational agent.",
   inputSchema,
   async execute({ imageUrl, caption }) {
     const args: VisionArgs = { imageUrl, caption };
