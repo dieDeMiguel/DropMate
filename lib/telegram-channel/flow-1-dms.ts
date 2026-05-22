@@ -238,3 +238,128 @@ export function buildDmTextPickupRetryText(
 ): string {
   return DM_TEXT_PICKUP_RETRY[pickLanguage(raw)];
 }
+
+/**
+ * v2.1 #109 (Slice 3 of #105): localised group question the channel
+ * posts when a Flow 1 inbound's recipient name doesn't resolve to any
+ * known street identity (`recipientResolution.kind === "unknown"`). The
+ * post is neutral — no DM, no inline keyboard — and asks the group to
+ * surface someone who knows the named recipient. The existing
+ * `scan_unresolved_recipient_packages`-style 3-day cleanup
+ * (or equivalent) handles unanswered questions; this slice just emits
+ * the question.
+ *
+ * Posted in the holder's language (whoever uploaded the label is the
+ * one most likely to share a language with the rest of the group);
+ * falls back to German.
+ */
+const UNKNOWN_RECIPIENT_GROUP_QUESTIONS: Readonly<
+  Record<SupportedLanguage, (name: string) => string>
+> = {
+  de: (name) => `📦 Paket für ${name} – kennt jemand ${name}?`,
+  en: (name) => `📦 Package for ${name} – does anyone know ${name}?`,
+  es: (name) => `📦 Paquete para ${name} – ¿alguien conoce a ${name}?`,
+  tr: (name) => `📦 ${name} için paket – ${name} adında birini tanıyan var mı?`,
+};
+
+export function buildUnknownRecipientGroupQuestion(
+  recipientName: string,
+  rawLanguage: string | null | undefined,
+): string {
+  return UNKNOWN_RECIPIENT_GROUP_QUESTIONS[pickLanguage(rawLanguage)](
+    recipientName,
+  );
+}
+
+/**
+ * v2.1 #109 (Slice 3 of #105): discriminator for the
+ * `[FLOW_1 CLARIFICATION]` synthetic the channel hands the agent when
+ * it genuinely can't deterministically resolve a Flow 1 inbound.
+ *
+ *   - `low-conf`         — classifier/vision returned medium or low
+ *                          confidence with a non-resident resolution
+ *                          (or an unknown recipient at low/medium
+ *                          confidence; high-conf unknowns go to the
+ *                          group-question branch instead).
+ *   - `missing-recipient`— classifier/vision was positive but the
+ *                          recipient name field is absent (or there
+ *                          are zero recipients on a positive
+ *                          registration verdict).
+ *   - `ambiguous-multi`  — the inbound names two or more recipients
+ *                          but the channel only parsed one (typical
+ *                          photo case: caption says "Paket für Anna
+ *                          und Beate", label says just "Anna").
+ *   - `parse-failed`     — vision tool threw on both primary +
+ *                          fallback. Channel can't even tell what's
+ *                          on the label; the agent asks the holder
+ *                          to retype the recipient.
+ */
+export type Flow1ClarificationReason =
+  | "low-conf"
+  | "missing-recipient"
+  | "ambiguous-multi"
+  | "parse-failed";
+
+/**
+ * Synthetic the channel hands the agent on a Flow 1 disambiguation
+ * fallthrough. Kept in English regardless of the holder's language:
+ * the agent's reply uses `args.language` and the system prompt
+ * localises the *output*, so this scaffolding text never reaches
+ * end users.
+ *
+ * The shape matches the design in #109's body — recipient/confidence/
+ * caption fields are embedded so the agent can quote them in its
+ * clarifying question without re-running classification.
+ */
+export function buildFlow1ClarificationSynthetic(args: {
+  readonly language: string;
+  readonly reason: Flow1ClarificationReason;
+  readonly source: "text" | "photo";
+  readonly carrier?: string;
+  readonly recipientName?: string;
+  readonly confidence?: "low" | "medium" | "high";
+  readonly caption?: string;
+  readonly holderName?: string;
+  readonly holderHouseNumber?: string;
+}): string {
+  const recipient = args.recipientName ?? "none";
+  const confidence = args.confidence ?? "low";
+  const carrier = args.carrier ?? "unknown";
+  const fieldLabel = args.source === "photo" ? "Caption" : "Text";
+  const captionLine =
+    args.caption && args.caption.length > 0 ? args.caption : "(no caption)";
+  const holder = args.holderName ?? "(unknown)";
+  const holderHouse = args.holderHouseNumber ?? "?";
+  return [
+    `[FLOW_1 CLARIFICATION language=${args.language} reason=${args.reason}]`,
+    `The channel parsed: carrier=${carrier} recipientName=${recipient} confidence=${confidence}.`,
+    `${fieldLabel}: ${captionLine}.`,
+    `Holder: ${holder} (house ${holderHouse}).`,
+    `Your only job: ONE short clarifying question in ${args.language} to the holder.`,
+    `Do NOT call any tools. Do NOT post to the group. Do NOT mention finding`,
+    `neighbours, availability, or absence.`,
+  ].join("\n");
+}
+
+/**
+ * Cheap regex heuristic for "the caption names 2+ recipients but the
+ * vision tool only returned 1". Detects:
+ *
+ *   - "Anna und Beate" / "Anna and Beate" (German/English conjunction)
+ *   - "Anna, Beate" (comma between two capitalised words)
+ *
+ * Used by the photo route to upgrade a low-conf or missing-recipient
+ * fallthrough to `reason=ambiguous-multi` so the agent's clarifying
+ * question can ask about the second label directly ("Sehe ich noch
+ * ein zweites Etikett?"). Returning false here means the channel
+ * reports the primary reason; nothing breaks if the heuristic misses.
+ */
+export function captionLooksLikeMultiRecipient(
+  caption: string | undefined,
+): boolean {
+  if (!caption) return false;
+  // Two capitalised name-shaped tokens joined by "und" / "and" / comma.
+  const re =
+    /[A-ZÄÖÜ][\p{L}-]+(?:\s+[A-ZÄÖÜ][\p{L}-]+)?\s+(?:und|and|y|ve)\s+[A-ZÄÖÜ][\p{L}-]+|[A-ZÄÖÜ][\p{L}-]+\s*,\s*[A-ZÄÖÜ][\p{L}-]+/u;
+  return re.test(caption);
+}

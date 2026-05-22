@@ -205,6 +205,42 @@ function summariseKnownTelegramRecipient(
 }
 
 /**
+ * Pure recipient-resolution lookup. v2.1 #109 (Slice 3 of #105) uses
+ * this when the classifier/vision returns medium confidence so the
+ * channel can decide whether to register a Package — at medium-conf
+ * we only register when the recipient resolves to a registered
+ * Resident; non-resident matches fall through to the agent with the
+ * `[FLOW_1 CLARIFICATION]` synthetic so the holder can disambiguate.
+ *
+ * `registerPackage` calls this internally on the high-conf path, so
+ * there's no duplicate Redis traffic — the high-conf flow keeps doing
+ * the resolution + Package write atomically.
+ */
+export async function resolveRecipient(
+  recipientName: string,
+  recipientHouseNumber: string,
+): Promise<RecipientResolution> {
+  const recipient = await findResidentByNameAndHouse(
+    recipientName,
+    recipientHouseNumber,
+  );
+  if (recipient) {
+    return {
+      kind: "resident",
+      resident: summariseResidentRecipient(recipient),
+    };
+  }
+  const knownUser = await findKnownTelegramUserByName(recipientName);
+  if (knownUser) {
+    return {
+      kind: "known_telegram",
+      telegram: summariseKnownTelegramRecipient(knownUser),
+    };
+  }
+  return { kind: "unknown" };
+}
+
+/**
  * Register a held Package for the calling holder.
  *
  * The holder MUST be a registered Resident — throws
@@ -230,28 +266,10 @@ export async function registerPackage(
     );
   }
 
-  const recipient = await findResidentByNameAndHouse(
+  const resolution = await resolveRecipient(
     input.recipientName,
     input.recipientHouseNumber,
   );
-
-  let resolution: RecipientResolution;
-  if (recipient) {
-    resolution = {
-      kind: "resident",
-      resident: summariseResidentRecipient(recipient),
-    };
-  } else {
-    const knownUser = await findKnownTelegramUserByName(input.recipientName);
-    if (knownUser) {
-      resolution = {
-        kind: "known_telegram",
-        telegram: summariseKnownTelegramRecipient(knownUser),
-      };
-    } else {
-      resolution = { kind: "unknown" };
-    }
-  }
 
   const openRequest = await findOpenReceptionRequestForRecipient(
     holder.street,
@@ -262,7 +280,8 @@ export async function registerPackage(
   const pkg: Package = {
     id: newPackageId(),
     streetId: holder.street,
-    recipientResidentId: recipient?.id ?? null,
+    recipientResidentId:
+      resolution.kind === "resident" ? resolution.resident.id : null,
     recipientName: input.recipientName,
     recipientHouseNumber: input.recipientHouseNumber,
     holderResidentId: holder.id,
