@@ -387,4 +387,103 @@ describe("acceptReceptionRequest (v2.1 Bug 3 / #95 — defensive sparse-field ha
       acceptReceptionRequest(volunteer, { requestId: "req_taken" }),
     ).rejects.toThrow(/already matched/);
   });
+
+  // #98: a requester cannot volunteer for their own card. Permanent
+  // reject (the request's `requesterResidentId` doesn't change), so the
+  // channel handler renders a dedicated toast and strips the keyboard
+  // — same shape as the cross-street rejection. Live trace 2026-05-22:
+  // a requester accidentally typed `Si` in the group, which the channel
+  // routed as an accept tap on their own card; the lib happily flipped
+  // the request to `matched` with `volunteerResidentId === requesterResidentId`,
+  // and the downstream DM-pair fired (the requester DM'd themselves the
+  // "thanks for helping" template).
+  it("throws AcceptReceptionRequestError with code=ACCEPT_RECEPTION_SELF_NOT_ALLOWED when caller is the requester (explicit requestId, #98)", async () => {
+    const requester = seedResident({
+      platformId: "400",
+      name: "Diego de Miguel",
+      houseNumber: "69",
+      street: "Methfesselstraße",
+    });
+    seedRequest({
+      id: "req_self",
+      streetId: "Methfesselstraße",
+      requesterResidentId: requester.platformId,
+      requesterName: requester.name,
+      requesterHouseNumber: requester.houseNumber,
+    });
+
+    const lib = await loadLib();
+    let thrown: unknown;
+    try {
+      await lib.acceptReceptionRequest(requester, { requestId: "req_self" });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(lib.AcceptReceptionRequestError);
+    expect((thrown as { code?: string }).code).toBe(
+      lib.ACCEPT_SELF_NOT_ALLOWED_ERROR_CODE,
+    );
+    expect((thrown as Error).message).toMatch(/cannot volunteer for your own request/);
+  });
+
+  it("throws ACCEPT_RECEPTION_SELF_NOT_ALLOWED on the most-recent-open lookup branch too (#98)", async () => {
+    // The implicit-requestId branch (no `requestId` in input) lists the
+    // street's open requests and picks the most recent one. If the
+    // caller is the requester of that request, the self-guard must
+    // still fire — same code as the explicit branch.
+    const requester = seedResident({
+      platformId: "401",
+      name: "Diego",
+      houseNumber: "69",
+      street: "Methfesselstraße",
+    });
+    seedRequest({
+      id: "req_self_implicit",
+      streetId: "Methfesselstraße",
+      requesterResidentId: requester.platformId,
+      requesterName: requester.name,
+      requesterHouseNumber: requester.houseNumber,
+    });
+
+    const lib = await loadLib();
+    let thrown: unknown;
+    try {
+      await lib.acceptReceptionRequest(requester, {});
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(lib.AcceptReceptionRequestError);
+    expect((thrown as { code?: string }).code).toBe(
+      lib.ACCEPT_SELF_NOT_ALLOWED_ERROR_CODE,
+    );
+  });
+
+  it("does NOT flip the request to matched when self-accept is rejected (#98 — state stays open)", async () => {
+    const requester = seedResident({
+      platformId: "402",
+      name: "Diego",
+      houseNumber: "69",
+      street: "Methfesselstraße",
+    });
+    seedRequest({
+      id: "req_self_state",
+      streetId: "Methfesselstraße",
+      requesterResidentId: requester.platformId,
+      requesterName: requester.name,
+      requesterHouseNumber: requester.houseNumber,
+    });
+
+    const lib = await loadLib();
+    await expect(
+      lib.acceptReceptionRequest(requester, { requestId: "req_self_state" }),
+    ).rejects.toThrow(lib.AcceptReceptionRequestError);
+
+    // Read the request back from the in-memory mock store: status must
+    // still be "open" and `volunteerResidentId` must still be null.
+    // Otherwise a self-accept would land a self-matched dead state and
+    // the card couldn't be claimed by anyone else.
+    const after = requestStore.get("req_self_state");
+    expect(after?.status).toBe("open");
+    expect(after?.volunteerResidentId).toBeNull();
+  });
 });

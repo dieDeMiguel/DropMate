@@ -2034,6 +2034,105 @@ describe("processInboundTelegramUpdate — callback_query", () => {
       }
     });
 
+    // #98: requester taps their own card. Permanent rejection (a
+    // request's `requesterResidentId` doesn't change), so the channel
+    // strips the keyboard alongside the dedicated toast — same shape as
+    // the cross-street rejection. Keyboard-strip closes the loop so the
+    // same fat-finger / autocomplete / voice-to-text mistap can't fire
+    // twice from the same surface. Live trace 2026-05-22 (prod
+    // `dpl_8A1T6ECT4ttiWRnBHot7Sa3vEUC9`): a requester accidentally
+    // typed `Si` (Spanish "yes") which the channel routed as an accept
+    // tap on their own card; the lib happily flipped the request to
+    // `matched` with `volunteerResidentId === requesterResidentId`, the
+    // DM-pair fired both ways, and the data path then contradicted
+    // itself, surfacing the v1-style cascade in the GROUP.
+    it("renders the dedicated self-accept toast AND strips the keyboard when acceptReceptionRequest throws with code ACCEPT_RECEPTION_SELF_NOT_ALLOWED (#98)", async () => {
+      const requester = makeVolunteer({ language: "de" });
+      const {
+        deps,
+        sendToAsh,
+        acceptReceptionRequest,
+        editGroupCard,
+        answerCallback,
+        stripKeyboard,
+        sendDirectMessage,
+      } = buildDeps({
+        isRegisteredResident: true,
+        registeredResident: requester,
+      });
+      const selfAccept = Object.assign(
+        new Error("cannot volunteer for your own request"),
+        {
+          code: "ACCEPT_RECEPTION_SELF_NOT_ALLOWED",
+          name: "AcceptReceptionRequestError",
+        },
+      );
+      acceptReceptionRequest.mockRejectedValueOnce(selfAccept);
+
+      const res = await processInboundTelegramUpdate(
+        makeRequest(
+          cbUpdate({
+            chatId: -100123,
+            messageId: 555,
+            fromUserId: 300,
+            data: "accept_reception_group:req_42",
+            chatType: "supergroup",
+          }),
+        ),
+        deps,
+      );
+
+      expect(res.status).toBe(204);
+      expect(acceptReceptionRequest).toHaveBeenCalledTimes(1);
+      expect(editGroupCard).not.toHaveBeenCalled();
+      expect(sendToAsh).not.toHaveBeenCalled();
+      expect(sendDirectMessage).not.toHaveBeenCalled();
+      expect(answerCallback).toHaveBeenCalledWith(
+        "cb_abc",
+        "Du kannst dein eigenes Paket nicht selbst annehmen.",
+      );
+      expect(stripKeyboard).toHaveBeenCalledWith(-100123, 555);
+    });
+
+    it("localises the self-accept toast across de/en/es/tr (#98)", async () => {
+      const cases: ReadonlyArray<{ language: string; expected: string }> = [
+        { language: "de", expected: "Du kannst dein eigenes Paket nicht selbst annehmen." },
+        { language: "en", expected: "You can't volunteer for your own package." },
+        { language: "es", expected: "No puedes aceptar tu propio paquete." },
+        { language: "tr", expected: "Kendi paketini sen kabul edemezsin." },
+      ];
+
+      for (const { language, expected } of cases) {
+        const requester = makeVolunteer({ language });
+        const { deps, acceptReceptionRequest, answerCallback, stripKeyboard } =
+          buildDeps({
+            isRegisteredResident: true,
+            registeredResident: requester,
+          });
+        const selfAccept = Object.assign(
+          new Error("cannot volunteer for your own request"),
+          { code: "ACCEPT_RECEPTION_SELF_NOT_ALLOWED" },
+        );
+        acceptReceptionRequest.mockRejectedValueOnce(selfAccept);
+
+        await processInboundTelegramUpdate(
+          makeRequest(
+            cbUpdate({
+              chatId: -100123,
+              messageId: 555,
+              fromUserId: 300,
+              data: "accept_reception_group:req_42",
+              chatType: "supergroup",
+            }),
+          ),
+          deps,
+        );
+
+        expect(answerCallback).toHaveBeenCalledWith("cb_abc", expected);
+        expect(stripKeyboard).toHaveBeenCalledWith(-100123, 555);
+      }
+    });
+
     it("localizes the failure toast to the volunteer's stored Resident.language (en) when acceptReceptionRequest throws (v2.1 Bug 3 / #95)", async () => {
       const englishVolunteer = makeVolunteer({ language: "en" });
       const { deps, acceptReceptionRequest, answerCallback, sendToAsh } =
