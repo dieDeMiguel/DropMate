@@ -12,7 +12,7 @@ served by `lib/telegram-channel/trace-routes.ts`.
 | CHANNEL       | `lib/telegram-channel/process-update.ts::processInboundTelegramUpdate` | Every inbound past verify+parse                                            |
 | REGISTRATION  | `handleRegistrationDm` + `lib/registration.ts`                         | `/register` or free-text registration DMs                                  |
 | CLASSIFIER    | `routeDmTextThroughClassifier` + `agent/tools/classify_dm_intent.ts`   | DM text that passes through the vision-free classifier                     |
-| VISION        | `routeDmPhoto` + `parseGroupPhotoToSynthetic`                          | Any photo inbound (DM via `parse_tracking_page`, group via `parse_label`)  |
+| VISION        | `routeDmPhoto` (DM photos via `parse_tracking_page`)                   | DM photo inbound. Group photos call `parse_label` from inside the agent's turn (#79), so they light AGENT + a tool sub-cell rather than VISION. |
 | FLOW 2 LIB    | `lib/reception-request.ts`                                             | Flow 2 create (free-text + `/receive` + photo); volunteer-accept callbacks |
 | AGENT         | `ash.turn`                                                             | Only fallthrough: Flow 1, Flow 3, language/pickup/delete, cron synthetics  |
 | REDIS         | `lib/redis.ts`                                                         | (currently aggregated under the lib box that called it)                    |
