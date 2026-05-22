@@ -36,7 +36,6 @@
 import { defineChannel, GET, POST } from "experimental-ash/channels";
 
 import classifyDmIntentTool from "../../agent/tools/classify_dm_intent.js";
-import parseLabelTool from "../../agent/tools/parse_label.js";
 import parseTrackingPageTool from "../../agent/tools/parse_tracking_page.js";
 import {
   acceptReceptionRequest,
@@ -169,35 +168,11 @@ export function telegramChannel(config: TelegramChannelConfig) {
               drainSessionToTelegram(session, chatId, { token }),
             getFileUrl: async (fileId) =>
               buildFileProxyUrl(origin, fileId, webhookSecret),
-            parseLabel: async (input) => {
-              // No silent catch: errors propagate to process-update.ts's
-              // catch which logs with stack + chatId. A silent `return
-              // null` here hid an entire failure chain in production
-              // (mediaType=application/octet-stream → provider reject →
-              // primary throw → fallback throw → primary rethrow →
-              // silenced by this catch → null → "couldn't read" reply).
-              const execute = parseLabelTool.execute as (
-                input: unknown,
-                options: unknown,
-              ) => Promise<{
-                carrier: string;
-                trackingNumber?: string;
-                recipientName?: string;
-                recipientHouseNumber?: string;
-                confidence: "high" | "medium" | "low";
-                reason: string;
-              }>;
-              return execute(input, {
-                toolCallId: `parse_label:${Date.now()}`,
-                messages: [],
-              });
-            },
             parseTrackingPage: async (input) => {
-              // Same no-silent-catch policy as parseLabel above: errors
-              // propagate to process-update.ts's catch which logs with
-              // stack + chatId, and the channel sends the deterministic
-              // recovery prompt DM (per #100 — no agent involvement on
-              // the DM photo path).
+              // No silent catch: errors propagate to process-update.ts's
+              // catch which logs with stack + chatId, and the channel
+              // sends the deterministic recovery prompt DM (per #100 —
+              // no agent involvement on the DM photo path).
               const execute = parseTrackingPageTool.execute as (
                 input: unknown,
                 options: unknown,

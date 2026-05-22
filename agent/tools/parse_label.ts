@@ -30,12 +30,16 @@
  * (see `agent/agent.ts`) — only the photo turn pays the vision cost,
  * and only via this tool.
  *
- * The orchestrator (`lib/telegram-channel/process-update.ts`) calls
- * `parse_label` BEFORE handing the turn to the conversational agent
- * when an inbound update contains a photo. The result is folded back
- * into a synthetic text message ("[label parsed] carrier=DHL …") so
- * the rest of Flow 1 (`register_package`, `notify_recipient`,
- * `post_to_group`) runs unchanged on a text-only model surface.
+ * #79: invoked by the conversational agent itself as the first tool
+ * call of every Flow 1 group-photo turn. The channel hands the agent a
+ * `[photo received] file_url=<https-url> caption='…'` synthetic; the
+ * agent reads `file_url` and passes it through here. Pre-#79 the
+ * channel pre-called this tool and folded the structured result into a
+ * `[label parsed] …` synthetic — that worked, but the vision call's
+ * token spend was a sidecar and didn't show up on the Agent Runs row
+ * for the turn. Moving the call site inside the turn (the model never
+ * sees image bytes either way — it reads the tool's structured return)
+ * fixes the attribution gap.
  *
  * Low-confidence parses surface explicitly (`confidence: "low"`) so
  * the agent knows to ask for confirmation before registering rather
@@ -54,11 +58,12 @@ const inputSchema = z.object({
     .string()
     .url()
     .describe(
-      "HTTPS URL of the shipping-label photo. The orchestrator resolves " +
-        "the Telegram `file_id` via `getTelegramFileUrl` (Bot API getFile " +
-        "+ CDN base) and passes the resulting URL through. The Vercel AI " +
-        "Gateway fetches the URL server-side and forwards the bytes to " +
-        "the underlying vision model. Inline bytes (Uint8Array / base64) " +
+      "HTTPS URL of the shipping-label photo. The channel resolves the " +
+        "Telegram `file_id` to a signed proxy URL and hands it to the " +
+        "agent inside the `[photo received] file_url=…` synthetic; the " +
+        "agent passes that URL through verbatim. The Vercel AI Gateway " +
+        "fetches the URL server-side and forwards the bytes to the " +
+        "underlying vision model. Inline bytes (Uint8Array / base64) " +
         "are NOT supported here: the Gateway client converts them to a " +
         "`data:` URI which the Gateway server rejects with `Unsupported " +
         "file URI type`. URL string in, vision out.",
@@ -195,9 +200,9 @@ export default defineTool({
     "Lite (vision) first, then falls back to Claude Sonnet 4.6 if the " +
     "primary errors. Routes via Vercel AI Gateway. Returns `{ carrier, " +
     "trackingNumber?, recipientName?, recipientHouseNumber?, confidence, " +
-    "reason }`. The orchestrator calls this on every inbound photo " +
-    "before the agent runs; the conversational model only ever sees " +
-    "the parsed text form.",
+    "reason }`. The conversational agent invokes this as the first " +
+    "tool call of every Flow 1 group-photo turn; the model never sees " +
+    "image bytes, only the structured return value.",
   inputSchema,
   async execute({ imageUrl, caption }) {
     const args: VisionArgs = { imageUrl, caption };

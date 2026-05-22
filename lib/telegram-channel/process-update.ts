@@ -34,17 +34,20 @@
  * double-taps), and — for group confirm_pickup taps — gate on the
  * tapper actually being the package's recipient.
  *
- * Photo path (#43 item 1, #88 for the DM branch): when an inbound
- * update contains a photo, the orchestrator calls one of two vision
- * tools BEFORE handing the turn to the conversational agent. Routing
- * is by chat type:
+ * Photo path: routing is by chat type.
  *
- *   - Group photo → `parse_label` (Flow 1; the holder is showing a
- *     shipping label they received on someone else's package). The
- *     orchestrator folds the parse into a `[label parsed] …` synthetic
- *     and lets the agent decide what to do next (Flow 1 still routes
- *     through `register_package`).
- *   - DM photo    → `parse_tracking_page` + channel-side routing
+ *   - Group photo → Flow 1 (the holder is showing a shipping label they
+ *     received on someone else's package). The channel resolves the
+ *     Telegram `file_id` to a signed HTTPS URL via `getFileUrl` and
+ *     hands the agent a `[photo received] file_url=… caption='…'`
+ *     synthetic. The agent invokes `parse_label({ imageUrl, caption })`
+ *     itself as the first tool call of the turn, so the vision call's
+ *     input/output token spend lands inside `ash.turn` rather than as
+ *     a sidecar. Pre-#79: the orchestrator pre-called `parseLabel` and
+ *     folded the result into a `[label parsed] …` synthetic. The
+ *     conversational model never sees image bytes either way — it
+ *     reads the tool's structured return value.
+ *   - DM photo → `parse_tracking_page` + channel-side routing
  *     (Flow 2 v2.1 / #88, fully agent-bypassed per #100). On
  *     `confidence === "high"` AND `absenceSignal` in {`true`,
  *     `undefined`}, the channel writes the `ReceptionRequest` directly
@@ -57,11 +60,11 @@
  *     for unregistered senders. The agent never runs on the DM photo
  *     path under any condition.
  *
- * Vision happens once, in a dedicated tool routed through Vercel AI
- * Gateway with Gemini 3.1 Flash Lite as primary and Claude Sonnet 4.6
- * as fallback. The conversational model (Gemini Flash) sees only the
- * synthetic text — eliminating the previous failure mode where Flash
- * received a `FilePart` and hallucinated "I cannot read images."
+ * Both vision tools route through Vercel AI Gateway with Gemini 3.1
+ * Flash Lite as primary and Claude Sonnet 4.6 as fallback. The
+ * conversational model (Gemini Flash) reads only structured tool
+ * results — eliminating the previous failure mode where Flash received
+ * a `FilePart` directly and hallucinated "I cannot read images."
  *
  * @see lib/telegram-channel/verify.ts        — header check (same primitive)
  * @see lib/telegram-channel/inbound.ts       — payload → canonical message
@@ -154,9 +157,11 @@ export interface ProcessUpdateDeps {
    * without importing the runtime — the spike's `RouteHandlerArgs`
    * passes the real function through verbatim.
    *
-   * Always a plain `string`: photo updates are parsed via `parseLabel`
-   * before this is called and the result is folded into a synthetic
-   * text message (#43 item 1).
+   * Always a plain `string`. For group photos the orchestrator hands
+   * the agent a `[photo received] file_url=… caption='…'` synthetic
+   * (the agent calls `parse_label` itself, #79); for DM photos the
+   * channel handles Flow 2 deterministically (#100) and `sendToAsh`
+   * is not invoked at all on the success path.
    */
   readonly sendToAsh: (
     message: string,
@@ -191,29 +196,6 @@ export interface ProcessUpdateDeps {
    */
   readonly getFileUrl: (fileId: string) => Promise<string>;
   /**
-   * Vision parser for shipping-label photos. Wired by the factory to
-   * `agent/tools/parse_label.ts`'s `execute({ imageUrl, caption })`.
-   * The orchestrator calls this exactly once per inbound photo
-   * update; the result is folded into a synthetic text message the
-   * conversational agent reads as if the user had typed it.
-   *
-   * Throws when the underlying model + fallback both fail — the
-   * orchestrator's catch logs the error and falls back to a generic
-   * "I received a photo but couldn't read it" prompt so the agent
-   * can ask the holder to retype the recipient.
-   */
-  readonly parseLabel: (input: {
-    imageUrl: string;
-    caption?: string;
-  }) => Promise<{
-    carrier: string;
-    trackingNumber?: string;
-    recipientName?: string;
-    recipientHouseNumber?: string;
-    confidence: "high" | "medium" | "low";
-    reason: string;
-  } | null>;
-  /**
    * Vision parser for carrier tracking-page screenshots (Flow 2 v2 /
    * #69; v2.1 Slice 3 / #88 rewired the consumption; #100 made the
    * downstream DM channel-deterministic). Wired by the factory to
@@ -235,8 +217,9 @@ export interface ProcessUpdateDeps {
    * DM so the user gets an actionable next step without the agent
    * running.
    *
-   * Group photos go through `parseLabel` instead. The orchestrator
-   * decides which one to call based on `inbound.isGroup`.
+   * Group photos route through the agent (it calls `parse_label`
+   * itself, #79); the orchestrator picks the DM vs group branch off
+   * `inbound.isGroup`.
    */
   readonly parseTrackingPage: (input: {
     imageUrl: string;
@@ -751,7 +734,7 @@ async function handleCallbackQuery(
  * Group photo path entry point — DM photos route through `routeDmPhoto`
  * (which returns a `Flow2RouteResult`) so the orchestrator can skip the
  * agent when the channel already sent the deterministic DM. This helper
- * is only consulted for group photos (Flow 1 / `parse_label`).
+ * is only consulted for group photos (Flow 1).
  */
 async function buildSyntheticGroupPhotoMessage(
   inbound: TelegramInboundMessage,
@@ -762,17 +745,28 @@ async function buildSyntheticGroupPhotoMessage(
     // Defensive — caller already narrowed.
     return inbound.text.length > 0 ? inbound.text : "(photo, no caption)";
   }
-  return parseGroupPhotoToSynthetic(inbound, fileId, deps);
+  return buildGroupPhotoSynthetic(inbound, fileId, deps);
 }
 
 /**
- * Group photo → `parse_label`. Returns a `[label parsed] …` synthetic
- * message, or the `[photo received, label could not be parsed]`
- * fallback when URL resolution / the vision tool throws or returns
- * null. Behaviour unchanged from #43 — Flow 1's agent still owns the
- * `register_package` decision; the channel just transcribes the label.
+ * #79: hand the agent a `[photo received] file_url=… caption='…'`
+ * synthetic so it can invoke `parse_label({ imageUrl, caption })`
+ * itself. The conversational model never sees the photo bytes — only
+ * the structured tool return value — but the vision call's token spend
+ * now lands inside `ash.turn` instead of as a sidecar in the channel
+ * handler.
+ *
+ * Caption quoting: single-quotes inside the caption are doubled
+ * (`'` → `''`) so the wrapping `'…'` parses as one field. The agent's
+ * Flow 1 photo stanza tells it to read `file_url=…` and pass that URL
+ * straight into `parse_label`.
+ *
+ * On `getFileUrl` failure the channel falls back to a `[photo
+ * received, file url could not be resolved] caption: …` shim — there's
+ * no URL to hand the vision tool, so the agent's job is to ask the
+ * holder (in their language) to type the recipient.
  */
-async function parseGroupPhotoToSynthetic(
+async function buildGroupPhotoSynthetic(
   inbound: TelegramInboundMessage,
   fileId: string,
   deps: ProcessUpdateDeps,
@@ -792,58 +786,11 @@ async function parseGroupPhotoToSynthetic(
         ? { name: err.name, message: err.message, stack: err.stack }
         : err,
     );
-    return buildLabelParseFailureMessage(captionForAgent);
+    return buildPhotoUrlFailureMessage(captionForAgent);
   }
 
-  let parsed: Awaited<ReturnType<ProcessUpdateDeps["parseLabel"]>> = null;
-  emitTrace("vision", "start", { tool: "parse_label" });
-  try {
-    parsed = await deps.parseLabel({ imageUrl, caption: captionText });
-    console.info(
-      "[parse_label] ok for chatId",
-      inbound.chatId,
-      "result:",
-      parsed,
-    );
-    emitTrace("vision", "end", {
-      tool: "parse_label",
-      confidence: parsed?.confidence ?? "null",
-    });
-  } catch (err) {
-    console.error(
-      "[parse_label] failed for chatId",
-      inbound.chatId,
-      "mediaType-via-fetch (sanitised) — error:",
-      err instanceof Error ? { name: err.name, message: err.message, stack: err.stack } : err,
-    );
-    emitTrace("vision", "error", { tool: "parse_label" });
-    parsed = null;
-  }
-
-  if (parsed === null) {
-    return buildLabelParseFailureMessage(captionForAgent);
-  }
-
-  const parts: string[] = ["[label parsed]"];
-  parts.push(`carrier=${parsed.carrier}`);
-  if (parsed.recipientName) {
-    parts.push(`recipient=${parsed.recipientName}`);
-  }
-  if (parsed.recipientHouseNumber) {
-    parts.push(`house=${parsed.recipientHouseNumber}`);
-  }
-  if (parsed.trackingNumber) {
-    parts.push(`tracking=${parsed.trackingNumber}`);
-  }
-  parts.push(`confidence=${parsed.confidence}`);
-  parts.push(`caption='${captionForAgent}'`);
-
-  let synthetic = parts.join(" ");
-  if (parsed.confidence === "low") {
-    synthetic +=
-      " — please confirm with the holder before registering (the recipient name may be wrong).";
-  }
-  return synthetic;
+  const quotedCaption = captionForAgent.replace(/'/g, "''");
+  return `[photo received] file_url=${imageUrl} caption='${quotedCaption}'`;
 }
 
 /**
@@ -1518,17 +1465,17 @@ function retryToastForLanguage(raw: string | null | undefined): string {
 }
 
 /**
- * Generic Flow-1 fallback synthetic for group photos when `parse_label`
- * returns null or `getFileUrl` throws. The agent's only contribution on
- * this branch is to ask the holder (in their language) to type the
- * recipient's name + house number, so the synthetic stays in English
- * (the user's language is resolved off `Resident.language` at agent
- * runtime). Group photo path only — DM photos are channel-deterministic
- * (#100), no agent invocation.
+ * Generic Flow-1 fallback synthetic for group photos when `getFileUrl`
+ * throws — there's no URL to hand `parse_label`, so the agent's only
+ * contribution on this branch is to ask the holder (in their language)
+ * to type the recipient's name + house number. The synthetic stays in
+ * English (the user's language is resolved off `Resident.language` at
+ * agent runtime). Group photo path only — DM photos are channel-
+ * deterministic (#100), no agent invocation.
  */
-function buildLabelParseFailureMessage(captionForAgent: string): string {
+function buildPhotoUrlFailureMessage(captionForAgent: string): string {
   return [
-    "[photo received, label could not be parsed]",
+    "[photo received, file url could not be resolved]",
     `caption: ${captionForAgent}`,
     "Please ask the holder (in their language) to type the recipient's name and house number so the package can be registered.",
   ].join(" ");
