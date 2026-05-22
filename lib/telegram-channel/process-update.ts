@@ -83,6 +83,7 @@ import {
 } from "../reception-request.js";
 import { normaliseLanguageCode } from "../language.js";
 import type { PackageCarrier, Resident } from "../redis.js";
+import { emitTrace } from "../trace.js";
 import {
   buildRegistrationConfirmationDm,
   isRegisterCommand,
@@ -795,6 +796,7 @@ async function parseGroupPhotoToSynthetic(
   }
 
   let parsed: Awaited<ReturnType<ProcessUpdateDeps["parseLabel"]>> = null;
+  emitTrace("vision", "start", { tool: "parse_label" });
   try {
     parsed = await deps.parseLabel({ imageUrl, caption: captionText });
     console.info(
@@ -803,6 +805,10 @@ async function parseGroupPhotoToSynthetic(
       "result:",
       parsed,
     );
+    emitTrace("vision", "end", {
+      tool: "parse_label",
+      confidence: parsed?.confidence ?? "null",
+    });
   } catch (err) {
     console.error(
       "[parse_label] failed for chatId",
@@ -810,6 +816,7 @@ async function parseGroupPhotoToSynthetic(
       "mediaType-via-fetch (sanitised) — error:",
       err instanceof Error ? { name: err.name, message: err.message, stack: err.stack } : err,
     );
+    emitTrace("vision", "error", { tool: "parse_label" });
     parsed = null;
   }
 
@@ -893,6 +900,7 @@ async function routeDmPhoto(
   }
 
   let parsed: Awaited<ReturnType<ProcessUpdateDeps["parseTrackingPage"]>> = null;
+  emitTrace("vision", "start", { tool: "parse_tracking_page" });
   try {
     parsed = await deps.parseTrackingPage({ imageUrl, caption: captionText });
     console.info(
@@ -901,6 +909,10 @@ async function routeDmPhoto(
       "result:",
       parsed,
     );
+    emitTrace("vision", "end", {
+      tool: "parse_tracking_page",
+      confidence: parsed?.confidence ?? "null",
+    });
   } catch (err) {
     console.error(
       "[parse_tracking_page] failed for chatId",
@@ -910,10 +922,12 @@ async function routeDmPhoto(
         ? { name: err.name, message: err.message, stack: err.stack }
         : err,
     );
+    emitTrace("vision", "error", { tool: "parse_tracking_page" });
     parsed = null;
   }
 
   if (parsed === null) {
+    emitTrace("flow2", "vlc", { reason: "vision-null" });
     return sendFlow2VlcDm(inbound, languageHint, deps);
   }
 
@@ -922,6 +936,7 @@ async function routeDmPhoto(
     (parsed.absenceSignal === true || parsed.absenceSignal === undefined);
 
   if (!isHighConfidenceFlow2 || inbound.fromUserId === null) {
+    emitTrace("flow2", "vlc", { reason: "low-confidence" });
     return sendFlow2VlcDm(inbound, languageHint, deps);
   }
 
@@ -929,17 +944,20 @@ async function routeDmPhoto(
     .getRegisteredResident(inbound.fromUserId)
     .catch(() => null);
   if (!caller) {
+    emitTrace("flow2", "vlc", { reason: "unregistered" });
     return sendFlow2VlcDm(inbound, languageHint, deps);
   }
 
   const callerLanguage = caller.language ?? languageHint;
 
+  emitTrace("flow2", "create.start", { source: "photo" });
   try {
     await deps.createReceptionRequest(caller, {
       carrier: parsed.carrier,
       expectedWindowStartAt: parseIsoToUnixMs(parsed.expectedWindowStartAt),
       expectedWindowEndAt: parseIsoToUnixMs(parsed.expectedWindowEndAt),
     });
+    emitTrace("flow2", "create.end", { source: "photo" });
   } catch (err) {
     console.error(
       "[create_reception_request] (photo path) failed for chatId",
@@ -951,6 +969,7 @@ async function routeDmPhoto(
         ? { name: err.name, message: err.message, stack: err.stack }
         : err,
     );
+    emitTrace("flow2", "reject.redis-hiccup", { source: "photo" });
     return sendFlow2VlcDm(inbound, callerLanguage, deps);
   }
 
@@ -972,7 +991,9 @@ async function sendFlow2AckDm(
 ): Promise<Flow2RouteResult> {
   const text = buildFlow2AckDm(language);
   try {
+    emitTrace("dm", "start", { kind: "flow2-ack" });
     await deps.sendDirectMessage(inbound.chatId, text);
+    emitTrace("dm", "end", { kind: "flow2-ack" });
   } catch (err) {
     console.error(
       "[flow-2-dm-ack] failed for chatId",
@@ -982,6 +1003,7 @@ async function sendFlow2AckDm(
         ? { name: err.name, message: err.message, stack: err.stack }
         : err,
     );
+    emitTrace("dm", "error", { kind: "flow2-ack" });
   }
   return { kind: "handled" };
 }
@@ -1001,7 +1023,9 @@ async function sendFlow2VlcDm(
 ): Promise<Flow2RouteResult> {
   const text = buildFlow2VisionLowConfidenceDm(language);
   try {
+    emitTrace("dm", "start", { kind: "flow2-vlc" });
     await deps.sendDirectMessage(inbound.chatId, text);
+    emitTrace("dm", "end", { kind: "flow2-vlc" });
   } catch (err) {
     console.error(
       "[flow-2-dm-vlc] failed for chatId",
@@ -1011,6 +1035,7 @@ async function sendFlow2VlcDm(
         ? { name: err.name, message: err.message, stack: err.stack }
         : err,
     );
+    emitTrace("dm", "error", { kind: "flow2-vlc" });
   }
   return { kind: "handled" };
 }
@@ -1053,10 +1078,15 @@ async function routeDmTextThroughClassifier(
   }
 
   let classification: Flow2ClassificationResult;
+  emitTrace("classifier", "start");
   try {
     classification = await deps.classifyDmIntent({
       text: inbound.text,
       languageHint: inbound.fromLanguageCode ?? undefined,
+    });
+    emitTrace("classifier", "end", {
+      isFlow2: classification.isFlow2,
+      confidence: classification.confidence,
     });
   } catch (err) {
     console.error(
@@ -1067,6 +1097,7 @@ async function routeDmTextThroughClassifier(
         ? { name: err.name, message: err.message, stack: err.stack }
         : err,
     );
+    emitTrace("classifier", "error");
     return { kind: "fallthrough", toAgent: inbound.text };
   }
 
@@ -1084,6 +1115,7 @@ async function routeDmTextThroughClassifier(
     return { kind: "fallthrough", toAgent: inbound.text };
   }
 
+  emitTrace("flow2", "create.start", { source: "classifier" });
   try {
     await deps.createReceptionRequest(caller, {
       carrier: classification.carrier,
@@ -1091,6 +1123,7 @@ async function routeDmTextThroughClassifier(
       expectedWindowStartAt: classification.expectedWindowStartAt,
       expectedWindowEndAt: classification.expectedWindowEndAt,
     });
+    emitTrace("flow2", "create.end", { source: "classifier" });
   } catch (err) {
     console.error(
       "[create_reception_request] failed for chatId",
@@ -1102,6 +1135,7 @@ async function routeDmTextThroughClassifier(
         ? { name: err.name, message: err.message, stack: err.stack }
         : err,
     );
+    emitTrace("flow2", "reject.redis-hiccup", { source: "classifier" });
     return { kind: "fallthrough", toAgent: inbound.text };
   }
 
@@ -1148,6 +1182,7 @@ async function routeReceiveCommand(
 
   const parsed = parseReceiveCommand(inbound.text);
 
+  emitTrace("flow2", "create.start", { source: "slash-receive" });
   try {
     await deps.createReceptionRequest(caller, {
       carrier: parsed.carrier,
@@ -1155,6 +1190,7 @@ async function routeReceiveCommand(
       expectedWindowStartAt: parsed.expectedWindowStartAt,
       expectedWindowEndAt: parsed.expectedWindowEndAt,
     });
+    emitTrace("flow2", "create.end", { source: "slash-receive" });
   } catch (err) {
     console.error(
       "[/receive] createReceptionRequest failed for chatId",
@@ -1166,6 +1202,7 @@ async function routeReceiveCommand(
         ? { name: err.name, message: err.message, stack: err.stack }
         : err,
     );
+    emitTrace("flow2", "reject.redis-hiccup", { source: "slash-receive" });
     return { kind: "fallthrough", toAgent: inbound.text };
   }
 
@@ -1292,8 +1329,10 @@ async function handleAcceptReceptionGroup(
   }
 
   let accepted: AcceptReceptionRequestResult;
+  emitTrace("flow2", "accept.start");
   try {
     accepted = await deps.acceptReceptionRequest(volunteer, { requestId });
+    emitTrace("flow2", "accept.end");
   } catch (err) {
     console.error(
       "[accept_reception_group] acceptReceptionRequest failed for userId",
@@ -1311,6 +1350,7 @@ async function handleAcceptReceptionGroup(
         : undefined;
     const language = volunteer.language ?? cb.fromLanguageCode;
     if (errorCode === ACCEPT_SELF_NOT_ALLOWED_ERROR_CODE) {
+      emitTrace("flow2", "reject.self");
       // #101: rejection is permanent *for this tapper only* — the lib
       // re-checks `requesterResidentId === caller.id` on every tap, so
       // a re-tap by the requester just produces the same toast again.
@@ -1328,6 +1368,7 @@ async function handleAcceptReceptionGroup(
       return new Response(null, { status: 204 });
     }
     if (errorCode === ACCEPT_DIFFERENT_STREET_ERROR_CODE) {
+      emitTrace("flow2", "reject.cross-street");
       // #96 Part B: permanent rejection. Strip the keyboard so the
       // volunteer doesn't keep re-tapping (the toast already explains
       // why the tap can't succeed) and toast in their language.
@@ -1345,6 +1386,7 @@ async function handleAcceptReceptionGroup(
     // Recoverable failure class: generic retry toast + keyboard stays
     // live so the volunteer can re-tap once the underlying hiccup
     // clears. Same #95 contract as before for every non-street class.
+    emitTrace("flow2", "reject.redis-hiccup", { stage: "accept" });
     await deps
       .answerCallback(cb.callbackId, retryToastForLanguage(language))
       .catch(() => undefined);
@@ -1393,7 +1435,9 @@ async function handleAcceptReceptionGroup(
   const volunteerChatId = Number(accepted.volunteer.platformId);
   if (Number.isFinite(volunteerChatId)) {
     try {
+      emitTrace("dm", "start", { kind: "volunteer-accept" });
       await deps.sendDirectMessage(volunteerChatId, volunteerDmText);
+      emitTrace("dm", "end", { kind: "volunteer-accept" });
     } catch (err) {
       console.error(
         "[accept_reception_group] volunteer DM failed for platformId",
@@ -1415,11 +1459,13 @@ async function handleAcceptReceptionGroup(
   const requesterChatId = Number(accepted.requester.id);
   if (Number.isFinite(requesterChatId)) {
     try {
+      emitTrace("dm", "start", { kind: "requester-accept" });
       await deps.sendDirectMessage(
         requesterChatId,
         requesterDm.text,
         requesterDm.entities,
       );
+      emitTrace("dm", "end", { kind: "requester-accept" });
     } catch (err) {
       console.error(
         "[accept_reception_group] requester DM failed for resident id",
@@ -1542,9 +1588,12 @@ async function handleRegistrationDm(
   // emit the welcome wall) and DM a one-sentence localised prompt
   // pointing at the canonical shape.
   if (isSlash && parsed === null) {
+    emitTrace("registration", "start", { phase: "usage-hint" });
     const prompt = buildRegisterUsageHint(language);
     try {
+      emitTrace("dm", "start");
       await deps.sendDirectMessage(inbound.chatId, prompt);
+      emitTrace("dm", "end");
     } catch (err) {
       console.error(
         "[handleRegistrationDm] usage-hint DM failed for chatId",
@@ -1555,11 +1604,13 @@ async function handleRegistrationDm(
           : err,
       );
     }
+    emitTrace("registration", "end");
     return new Response(null, { status: 204 });
   }
 
   // Slash or free-text with a successful parse: write the Resident +
   // send ONE deterministic confirmation DM, then return 204.
+  emitTrace("registration", "start");
   try {
     const { resident } = await deps.registerResident({
       name: parsed!.name,
@@ -1575,7 +1626,9 @@ async function handleRegistrationDm(
       fallbackLanguageCode: language,
     });
     try {
+      emitTrace("dm", "start");
       await deps.sendDirectMessage(inbound.chatId, confirmation);
+      emitTrace("dm", "end");
     } catch (err) {
       console.error(
         "[handleRegistrationDm] confirmation DM failed for chatId",
@@ -1586,6 +1639,7 @@ async function handleRegistrationDm(
           : err,
       );
     }
+    emitTrace("registration", "end");
     return new Response(null, { status: 204 });
   } catch (err) {
     console.error(
@@ -1649,6 +1703,15 @@ export async function processInboundTelegramUpdate(
   } catch {
     return new Response("bad json", { status: 400 });
   }
+
+  // #102 live diagram: every inbound past verify+parse ignites the
+  // CHANNEL box. The factory entered `runWithTrace(...)` before calling
+  // us, so `emitTrace` publishes onto the bus the SSE route is feeding
+  // to the browser. Emitting unconditionally — before the callback /
+  // message branch — means the channel box lights on every shape the
+  // orchestrator handles (callback taps, photos, slash, free-text DMs,
+  // group messages).
+  emitTrace("channel", "start");
 
   // Callback queries are handled before regular messages — both branches
   // are exclusive at the Bot API level (a single update is either one or
@@ -1770,6 +1833,12 @@ export async function processInboundTelegramUpdate(
   // agent — channel-deterministic paths (Flow 2 entries, registration,
   // volunteer-accept) return earlier and never reach this line.
   deps.setTriggerAttribute?.(trigger);
+
+  // #102 live diagram: the AGENT box only lights on these fallthrough
+  // paths — Flow 2 entries, registration, volunteer-accept all return
+  // earlier. This is the structural invariant v2.1 enforces; the
+  // diagram makes it visible to booth visitors.
+  emitTrace("agent", "start", { trigger });
 
   const session = await deps.sendToAsh(message, {
     auth,
