@@ -17,12 +17,12 @@
  * are identical for DMs.
  *
  * Optional `buttons` arg (#24): when supplied, the DM is sent with an
- * inline keyboard. The model uses this to attach quick-action buttons
- * to pickup notifications ("Mark as picked up"). Each button carries
- * `callback_data` formatted as `"<action>:<id>"` — e.g.
- * `"confirm_pickup:pkg_42"`, `"remind_later:pkg_42"`. The orchestrator
- * parses this on tap to route the action through the agent. Button
- * text MUST already be in the recipient's language.
+ * inline keyboard. Each button carries `callback_data` formatted as
+ * `"<action>:<id>"` — e.g. `"remind_later:pkg_42"`. The orchestrator
+ * parses this on tap to route the action through the agent (for
+ * actions the channel doesn't intercept itself; `confirm_pickup`
+ * taps are channel-driven after #108). Button text MUST already be
+ * in the recipient's language.
  *
  * Bot token comes from `TELEGRAM_BOT_TOKEN`; the tool throws clearly if
  * it's unset rather than silently sending with `undefined`.
@@ -49,8 +49,8 @@ const buttonSchema = z.object({
     .max(64)
     .describe(
       "Encoded action to fire when the button is tapped. Convention: " +
-        '"<action>:<id>" — e.g. "confirm_pickup:pkg_42", ' +
-        '"remind_later:pkg_42". Max 64 bytes per Bot API spec.',
+        '"<action>:<id>" — e.g. "remind_later:pkg_42". Max 64 bytes ' +
+        "per Bot API spec.",
     ),
 });
 

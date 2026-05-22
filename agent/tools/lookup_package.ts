@@ -2,28 +2,26 @@
  * `lookup_package` — find held packages addressed to a given recipient
  * on the caller's street.
  *
- * Used in two situations:
- *  1. Flow 1 closing: the recipient DMs "Picked up, thanks!" and the
- *     model needs the Package id to pass to `confirm_pickup`.
- *  2. Flow 3 (#26): "Wo ist mein Paket?" — the model uses the same
- *     lookup before deciding whether to fall back to a group question.
+ * Used for Flow 3 (#26): "Wo ist mein Paket?" — the model uses this
+ * lookup before deciding whether to fall back to a group question.
  *
- * The caller's street is read from the session-authenticated holder's
- * own Resident record (same pattern as `register_package`). Cross-
- * street lookups are deliberately not supported in the spike — a
- * resident asking about a package can only find packages on their
- * own street, which matches PRD §9 privacy (data minimisation).
+ * Flow 1 pickup confirmation moved to the channel layer in #108 —
+ * `confirm_pickup` no longer exists as a tool, and the recipient
+ * closes the package by tapping `[Abgeholt]` on the group ack
+ * deterministically. This tool is therefore Flow 3-only in v2.1.
+ *
+ * The caller's street is read from the session-authenticated
+ * holder's own Resident record. Cross-street lookups are
+ * deliberately not supported in the spike — a resident asking
+ * about a package can only find packages on their own street,
+ * which matches PRD §9 privacy (data minimisation).
  *
  * Returns every `status: "held"` Package whose `recipientName`
  * case-insensitively matches `recipientName` (either direction — a
  * family name alone matches a full given+family name and vice versa)
- * AND whose `recipientHouseNumber` matches exactly. When `carrier` is provided
- * it further narrows the result. The model is expected to:
- *   - 0 matches → ask whether to query the group (Flow 3) or treat
- *     as "no package to pick up" (Flow 1).
- *   - 1 match → call `confirm_pickup` with the id.
- *   - >1 matches → ask the user to disambiguate (carrier, holder,
- *     or tracking number).
+ * AND whose `recipientHouseNumber` matches exactly. When `carrier`
+ * is provided it further narrows the result. The model handles the
+ * empty / single / ambiguous cases.
  */
 
 import { defineTool } from "experimental-ash/tools";
@@ -99,16 +97,14 @@ const inputSchema = z.object({
 export default defineTool({
   description:
     "Find held packages on the caller's street addressed to a given " +
-    "recipient. Use before `confirm_pickup` so you know the package id, " +
-    "and use as the first step of a 'Wo ist mein Paket?' query. " +
-    "Returns `{ matches, count }` where each match is " +
-    "`{ package, holder }` — `package` is the Package record (pass " +
-    "`package.id` to `confirm_pickup`), `holder` is a summary of the " +
-    "neighbor holding it (name, house number, floor, buzzer, " +
-    "availability patterns) or `null` if the holder's Resident is " +
-    "missing. Lets you compose pickup directions in one turn. The " +
-    "model is responsible for handling the empty / single / ambiguous " +
-    "cases.",
+    "recipient. Use as the first step of a 'Wo ist mein Paket?' " +
+    "query (Flow 3). Returns `{ matches, count }` where each match " +
+    "is `{ package, holder }` — `package` is the Package record, " +
+    "`holder` is a summary of the neighbor holding it (name, house " +
+    "number, floor, buzzer, availability patterns) or `null` if the " +
+    "holder's Resident is missing. Lets you compose pickup directions " +
+    "in one turn. The model is responsible for handling the empty / " +
+    "single / ambiguous cases.",
   inputSchema,
   async execute({ recipientName, recipientHouseNumber, carrier }) {
     const caller = await requireRegisteredTelegramCaller("lookup_package");

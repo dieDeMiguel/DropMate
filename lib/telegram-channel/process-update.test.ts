@@ -14,6 +14,11 @@ import {
 } from "./process-update.js";
 import type { Package, ReceptionRequest, Resident } from "../redis.js";
 import type { RegisterPackageResult } from "../package.js";
+import {
+  PICKUP_ALREADY_DONE_ERROR_CODE,
+  PICKUP_NOT_RECIPIENT_ERROR_CODE,
+  type ConfirmPickupResult,
+} from "../pickup.js";
 
 const SECRET = "expected-secret";
 
@@ -72,7 +77,6 @@ interface BuiltDeps {
   parseLabel: ReturnType<typeof vi.fn>;
   answerCallback: ReturnType<typeof vi.fn>;
   stripKeyboard: ReturnType<typeof vi.fn>;
-  getPackageRecipientId: ReturnType<typeof vi.fn>;
   recordTelegramObservation: ReturnType<typeof vi.fn>;
   isRegisteredResident: ReturnType<typeof vi.fn>;
   classifyDmIntent: ReturnType<typeof vi.fn>;
@@ -81,6 +85,7 @@ interface BuiltDeps {
   createReceptionRequest: ReturnType<typeof vi.fn>;
   acceptReceptionRequest: ReturnType<typeof vi.fn>;
   registerPackage: ReturnType<typeof vi.fn>;
+  confirmPickup: ReturnType<typeof vi.fn>;
   editGroupCard: ReturnType<typeof vi.fn>;
   sendDirectMessage: ReturnType<typeof vi.fn>;
   registerResident: ReturnType<typeof vi.fn>;
@@ -99,7 +104,6 @@ function buildDeps(overrides: {
   parsedTrackingPage?: ParsedTrackingPage | null;
   parsedLabel?: ParsedLabel;
   parsedLabelError?: Error;
-  packageRecipientId?: string | null;
   isRegisteredResident?: boolean;
   classification?: Flow2ClassificationResult;
   groupClassification?: ClassifyGroupMessageResult;
@@ -109,6 +113,8 @@ function buildDeps(overrides: {
   registerResult?: { resident: Resident; updated: boolean };
   registerPackageResult?: RegisterPackageResult;
   registerPackageError?: Error;
+  confirmPickupResult?: ConfirmPickupResult;
+  confirmPickupError?: Error;
 } = {}): BuiltDeps {
   const session = overrides.session ?? makeSession("sess_new");
   const sendToAsh = vi.fn().mockResolvedValue(session);
@@ -155,11 +161,6 @@ function buildDeps(overrides: {
         .mockResolvedValue(overrides.parsedLabel ?? defaultParsedLabel);
   const answerCallback = vi.fn().mockResolvedValue(undefined);
   const stripKeyboard = vi.fn().mockResolvedValue(undefined);
-  const getPackageRecipientId = vi
-    .fn()
-    .mockResolvedValue(
-      "packageRecipientId" in overrides ? overrides.packageRecipientId : null,
-    );
   const recordTelegramObservation = vi.fn().mockResolvedValue(undefined);
   const isRegisteredResident = vi
     .fn()
@@ -239,6 +240,45 @@ function buildDeps(overrides: {
         .fn()
         .mockResolvedValue(
           overrides.registerPackageResult ?? defaultRegisterPackageResult,
+        );
+  // v2.1 #108: default confirmPickup verdict — the recipient is
+  // closing their own held package (the Flow 1 happy path). Tests
+  // exercising the error branches override this with
+  // `confirmPickupError`.
+  const defaultConfirmPickupResult: ConfirmPickupResult = {
+    package: {
+      id: "pkg_42",
+      streetId: "Methfesselstraße",
+      recipientResidentId: "200",
+      recipientName: "Marlene Hartmann",
+      recipientHouseNumber: "88",
+      holderResidentId: "100",
+      carrier: "DHL",
+      status: "picked_up",
+      receivedAt: Date.now() - 60_000,
+      pickedUpAt: Date.now(),
+      reminded: false,
+    } satisfies Package,
+    holder: {
+      id: "100",
+      platformId: "100",
+      name: "Diego de Miguel",
+      houseNumber: "69",
+      language: "de",
+    },
+    recipient: {
+      id: "200",
+      name: "Marlene Hartmann",
+      houseNumber: "88",
+      language: "de",
+    },
+  };
+  const confirmPickup = overrides.confirmPickupError
+    ? vi.fn().mockRejectedValue(overrides.confirmPickupError)
+    : vi
+        .fn()
+        .mockResolvedValue(
+          overrides.confirmPickupResult ?? defaultConfirmPickupResult,
         );
   const getRegisteredResident = vi
     .fn()
@@ -336,7 +376,6 @@ function buildDeps(overrides: {
     parseLabel,
     answerCallback,
     stripKeyboard,
-    getPackageRecipientId,
     recordTelegramObservation,
     isRegisteredResident,
     classifyDmIntent,
@@ -345,6 +384,7 @@ function buildDeps(overrides: {
     createReceptionRequest,
     acceptReceptionRequest,
     registerPackage,
+    confirmPickup,
     editGroupCard,
     sendDirectMessage,
     registerResident,
@@ -360,7 +400,6 @@ function buildDeps(overrides: {
       parseLabel,
       answerCallback,
       stripKeyboard,
-      getPackageRecipientId,
       recordTelegramObservation,
       isRegisteredResident,
       classifyDmIntent,
@@ -369,6 +408,7 @@ function buildDeps(overrides: {
       createReceptionRequest,
       acceptReceptionRequest,
       registerPackage,
+      confirmPickup,
       editGroupCard,
       sendDirectMessage,
       registerResident,
@@ -1461,71 +1501,6 @@ describe("processInboundTelegramUpdate — callback_query", () => {
     };
   }
 
-  it("acks, strips the keyboard, and synthesizes a confirm_pickup message into the session (DM)", async () => {
-    const session = makeSession("sess_cb");
-    const { deps, sendToAsh, answerCallback, stripKeyboard, waitUntil, drainSession } =
-      buildDeps({ session });
-
-    const res = await processInboundTelegramUpdate(
-      makeRequest(
-        cbUpdate({
-          chatId: 42,
-          messageId: 555,
-          fromUserId: 99,
-          data: "confirm_pickup:pkg_42",
-          languageCode: "de",
-        }),
-      ),
-      deps,
-    );
-
-    expect(res.status).toBe(204);
-    expect(answerCallback).toHaveBeenCalledWith("cb_abc");
-    expect(stripKeyboard).toHaveBeenCalledWith(42, 555);
-
-    expect(sendToAsh).toHaveBeenCalledTimes(1);
-    const [text, options] = sendToAsh.mock.calls[0]!;
-    expect(text).toMatch(/confirm.*pickup.*pkg_42/i);
-    expect(options.continuationToken).toBe("tg:42");
-    expect(options.auth).toEqual<TelegramSessionAuth>({
-      principalId: "99",
-      principalType: "user",
-      authenticator: "telegram",
-      attributes: { languageCode: "de" },
-    });
-    expect(options.state).toEqual<TelegramChannelState>({
-      chatId: 42,
-      isGroup: false,
-      fromUserId: 99,
-      fromLanguageCode: "de",
-    });
-
-    expect(waitUntil).toHaveBeenCalledTimes(1);
-    await waitUntil.mock.calls[0]![0];
-    expect(drainSession).toHaveBeenCalledWith(session, 42);
-  });
-
-  it("uses tg:<chatId> as the continuation token on callback taps (no per-run id reuse — #65)", async () => {
-    // Regression test for #65 on the callback path. Same root cause as
-    // the message-path regression: the orchestrator used to reuse the
-    // returned per-run wrun_… session id as the next turn's continuation
-    // token, which Ash silently rejected and respun from scratch. Stable
-    // tg:<chatId> keying eliminates the failure mode.
-    const session = makeSession("wrun_01KRZEH9RHK4EPTWZ6BDGGTSVQ");
-    const { deps, sendToAsh } = buildDeps({ session });
-
-    await processInboundTelegramUpdate(
-      makeRequest(
-        cbUpdate({ chatId: 42, messageId: 1, fromUserId: 99, data: "confirm_pickup:pkg_1" }),
-      ),
-      deps,
-    );
-
-    const options = sendToAsh.mock.calls[0]![1];
-    expect(options.continuationToken).toBe("tg:42");
-    expect(options.continuationToken).not.toMatch(/^wrun_/);
-  });
-
   it("synthesizes an apology message when a stale 'accept_reception_request:req_99' callback arrives (Slice 5 #90 — tool deleted)", async () => {
     // The v2.1 group-card flow uses `accept_reception_group:<id>` — the
     // legacy `accept_reception_request:<id>` callback is no longer wired
@@ -1569,153 +1544,479 @@ describe("processInboundTelegramUpdate — callback_query", () => {
     expect(text).toMatch(/req_99/);
   });
 
-  it("gates group confirm_pickup on recipient scope — wrong tapper gets a toast and no agent invocation", async () => {
-    const { deps, sendToAsh, answerCallback, stripKeyboard, getPackageRecipientId } =
-      buildDeps({ packageRecipientId: "200" });
+  describe("confirm_pickup tap (v2.1 #108 — channel-deterministic Flow 1 pickup)", () => {
+    // The pre-#108 surface ack'd + strip'd the keyboard, then synthesised a
+    // `[button-tap]` message into the agent (sendToAsh). After v2.1 #108
+    // the channel handles the tap end-to-end: `confirmPickup` flips the
+    // status, the orchestrator edits the group ack in place + DMs the
+    // holder thanks. `sendToAsh` is NEVER called on this path — that is
+    // the structural invariant these cases pin.
 
-    const res = await processInboundTelegramUpdate(
-      makeRequest(
-        cbUpdate({
-          chatId: -100123,
-          messageId: 1,
-          fromUserId: 99, // not 200
-          data: "confirm_pickup:pkg_42",
-          chatType: "supergroup",
-        }),
-      ),
-      deps,
-    );
+    it("flips status, edits the group ack in place, and DMs the holder thanks on the happy path (group tap)", async () => {
+      const {
+        deps,
+        sendToAsh,
+        confirmPickup,
+        answerCallback,
+        stripKeyboard,
+        editGroupCard,
+        sendDirectMessage,
+        getRegisteredResident,
+      } = buildDeps({
+        registeredResident: {
+          id: "200",
+          name: "Marlene Hartmann",
+          street: "Methfesselstraße",
+          houseNumber: "88",
+          platformId: "200",
+          platform: "telegram",
+          language: "de",
+          availabilityPatterns: [],
+          registeredAt: 1716000000000,
+          source: "explicit",
+          confirmed: true,
+        } satisfies Resident,
+      });
 
-    expect(res.status).toBe(204);
-    expect(getPackageRecipientId).toHaveBeenCalledWith("pkg_42");
-    expect(answerCallback).toHaveBeenCalledWith(
-      "cb_abc",
-      expect.stringMatching(/only the recipient/i),
-    );
-    expect(stripKeyboard).not.toHaveBeenCalled();
-    expect(sendToAsh).not.toHaveBeenCalled();
-  });
+      const res = await processInboundTelegramUpdate(
+        makeRequest(
+          cbUpdate({
+            chatId: -100123,
+            messageId: 555,
+            fromUserId: 200,
+            data: "confirm_pickup:pkg_42",
+            chatType: "supergroup",
+            languageCode: "de",
+          }),
+        ),
+        deps,
+      );
 
-  it("admits group confirm_pickup when the tapper IS the recipient", async () => {
-    const { deps, sendToAsh, stripKeyboard } = buildDeps({
-      packageRecipientId: "99",
+      expect(res.status).toBe(204);
+
+      // Channel resolved the caller, called the lib, then ack'd + stripped.
+      expect(getRegisteredResident).toHaveBeenCalledWith(200);
+      expect(confirmPickup).toHaveBeenCalledTimes(1);
+      expect(confirmPickup.mock.calls[0]![1]).toBe("pkg_42");
+      expect(answerCallback).toHaveBeenCalledWith("cb_abc");
+      expect(stripKeyboard).toHaveBeenCalledWith(-100123, 555);
+
+      // Group ack edited in place with the picked-up marker.
+      expect(editGroupCard).toHaveBeenCalledTimes(1);
+      const [editChatId, editMessageId, editText] = editGroupCard.mock.calls[0]!;
+      expect(editChatId).toBe(-100123);
+      expect(editMessageId).toBe(555);
+      expect(editText).toContain("✅ abgeholt");
+      expect(editText).toContain("Diego de Miguel");
+      expect(editText).toContain("Marlene Hartmann");
+
+      // Holder thanks DM lands.
+      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+      const [holderChatId, dmText] = sendDirectMessage.mock.calls[0]!;
+      expect(holderChatId).toBe(100); // holder.platformId from default mock
+      expect(dmText).toContain("Marlene Hartmann");
+      expect(dmText).toContain("danke");
+
+      // Agent is NEVER invoked on this path.
+      expect(sendToAsh).not.toHaveBeenCalled();
     });
 
-    await processInboundTelegramUpdate(
-      makeRequest(
-        cbUpdate({
-          chatId: -100123,
-          messageId: 1,
-          fromUserId: 99,
-          data: "confirm_pickup:pkg_42",
-          chatType: "supergroup",
-        }),
-      ),
-      deps,
-    );
+    it("happy path also works from a DM surface (recipient tapped [Abgeholt] on their DM, not the group)", async () => {
+      const {
+        deps,
+        sendToAsh,
+        confirmPickup,
+        editGroupCard,
+        sendDirectMessage,
+      } = buildDeps({
+        registeredResident: {
+          id: "200",
+          name: "Marlene Hartmann",
+          street: "Methfesselstraße",
+          houseNumber: "88",
+          platformId: "200",
+          platform: "telegram",
+          language: "de",
+          availabilityPatterns: [],
+          registeredAt: 1716000000000,
+          source: "explicit",
+          confirmed: true,
+        } satisfies Resident,
+      });
 
-    expect(stripKeyboard).toHaveBeenCalledWith(-100123, 1);
-    expect(sendToAsh).toHaveBeenCalledTimes(1);
-  });
+      await processInboundTelegramUpdate(
+        makeRequest(
+          cbUpdate({
+            chatId: 200, // recipient's DM chat
+            messageId: 777,
+            fromUserId: 200,
+            data: "confirm_pickup:pkg_42",
+            chatType: "private",
+          }),
+        ),
+        deps,
+      );
 
-  it("rejects group confirm_pickup when the package is unknown (recipient lookup returns null)", async () => {
-    const { deps, sendToAsh, stripKeyboard } = buildDeps({
-      packageRecipientId: null,
+      expect(confirmPickup).toHaveBeenCalledTimes(1);
+      // editGroupCard targets whichever message carried the keyboard —
+      // here the recipient's DM message id. Same primitive does the
+      // edit either way (it's just editMessageText on the platform).
+      expect(editGroupCard).toHaveBeenCalledWith(200, 777, expect.any(String));
+      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+      expect(sendToAsh).not.toHaveBeenCalled();
     });
 
-    await processInboundTelegramUpdate(
-      makeRequest(
-        cbUpdate({
-          chatId: -100123,
-          messageId: 1,
-          fromUserId: 99,
-          data: "confirm_pickup:pkg_missing",
-          chatType: "supergroup",
-        }),
-      ),
-      deps,
-    );
+    it("PICKUP_NOT_RECIPIENT throw → dedicated toast + keyboard stripped, no DMs", async () => {
+      const { PICKUP_NOT_RECIPIENT_ERROR_CODE } = await import("../pickup.js");
+      const err: Error & { code?: string } = new Error("not recipient");
+      err.code = PICKUP_NOT_RECIPIENT_ERROR_CODE;
 
-    expect(stripKeyboard).not.toHaveBeenCalled();
-    expect(sendToAsh).not.toHaveBeenCalled();
-  });
+      const {
+        deps,
+        sendToAsh,
+        confirmPickup,
+        answerCallback,
+        stripKeyboard,
+        editGroupCard,
+        sendDirectMessage,
+      } = buildDeps({
+        registeredResident: {
+          id: "999",
+          name: "Some Neighbor",
+          street: "Methfesselstraße",
+          houseNumber: "10",
+          platformId: "999",
+          platform: "telegram",
+          language: "de",
+          availabilityPatterns: [],
+          registeredAt: 1716000000000,
+          source: "explicit",
+          confirmed: true,
+        } satisfies Resident,
+        confirmPickupError: err,
+      });
 
-  it("does NOT apply the recipient-scope check in a DM (1:1 already scoped to the tapper)", async () => {
-    const { deps, sendToAsh, getPackageRecipientId } = buildDeps();
+      await processInboundTelegramUpdate(
+        makeRequest(
+          cbUpdate({
+            chatId: -100123,
+            messageId: 555,
+            fromUserId: 999,
+            data: "confirm_pickup:pkg_42",
+            chatType: "supergroup",
+            languageCode: "de",
+          }),
+        ),
+        deps,
+      );
 
-    await processInboundTelegramUpdate(
-      makeRequest(
-        cbUpdate({
-          chatId: 42,
-          messageId: 1,
-          fromUserId: 99,
-          data: "confirm_pickup:pkg_42",
-        }),
-      ),
-      deps,
-    );
-
-    expect(getPackageRecipientId).not.toHaveBeenCalled();
-    expect(sendToAsh).toHaveBeenCalledTimes(1);
-  });
-
-  it("records a KnownTelegramUser observation on every callback tap, including rejected ones (#45)", async () => {
-    // Wrong tapper on a group confirm_pickup — the scope guard rejects and
-    // sendToAsh is NOT called, but the bot has still seen this user and
-    // must capture them so they can be mentioned later.
-    const { deps, sendToAsh, recordTelegramObservation } = buildDeps({
-      packageRecipientId: "different-user",
+      expect(confirmPickup).toHaveBeenCalledTimes(1);
+      expect(answerCallback).toHaveBeenCalledWith(
+        "cb_abc",
+        expect.stringMatching(/nicht der empfänger/i),
+      );
+      // Keyboard stripped — permanent rejection.
+      expect(stripKeyboard).toHaveBeenCalledWith(-100123, 555);
+      // No edit, no DM, no agent invocation.
+      expect(editGroupCard).not.toHaveBeenCalled();
+      expect(sendDirectMessage).not.toHaveBeenCalled();
+      expect(sendToAsh).not.toHaveBeenCalled();
     });
 
-    await processInboundTelegramUpdate(
-      makeRequest({
-        update_id: 1,
-        callback_query: {
-          id: "cb_abc",
-          data: "confirm_pickup:pkg_42",
-          from: {
-            id: 4242,
-            is_bot: false,
-            first_name: "Natascha",
-            last_name: "Elter",
-            username: "natascha_elter",
-            language_code: "de",
+    it("PICKUP_ALREADY_DONE throw → dedicated toast, NO keyboard strip (already stripped from previous success)", async () => {
+      const { PICKUP_ALREADY_DONE_ERROR_CODE } = await import("../pickup.js");
+      const err: Error & { code?: string } = new Error("already picked up");
+      err.code = PICKUP_ALREADY_DONE_ERROR_CODE;
+
+      const {
+        deps,
+        sendToAsh,
+        answerCallback,
+        stripKeyboard,
+        editGroupCard,
+        sendDirectMessage,
+      } = buildDeps({
+        registeredResident: {
+          id: "200",
+          name: "Marlene Hartmann",
+          street: "Methfesselstraße",
+          houseNumber: "88",
+          platformId: "200",
+          platform: "telegram",
+          language: "en",
+          availabilityPatterns: [],
+          registeredAt: 1716000000000,
+          source: "explicit",
+          confirmed: true,
+        } satisfies Resident,
+        confirmPickupError: err,
+      });
+
+      await processInboundTelegramUpdate(
+        makeRequest(
+          cbUpdate({
+            chatId: -100123,
+            messageId: 555,
+            fromUserId: 200,
+            data: "confirm_pickup:pkg_42",
+            chatType: "supergroup",
+            languageCode: "en",
+          }),
+        ),
+        deps,
+      );
+
+      expect(answerCallback).toHaveBeenCalledWith(
+        "cb_abc",
+        expect.stringMatching(/already.*picked up/i),
+      );
+      expect(stripKeyboard).not.toHaveBeenCalled();
+      expect(editGroupCard).not.toHaveBeenCalled();
+      expect(sendDirectMessage).not.toHaveBeenCalled();
+      expect(sendToAsh).not.toHaveBeenCalled();
+    });
+
+    it("generic confirmPickup throw (Redis hiccup) → retry toast + keyboard stays live", async () => {
+      const {
+        deps,
+        sendToAsh,
+        answerCallback,
+        stripKeyboard,
+        editGroupCard,
+      } = buildDeps({
+        registeredResident: {
+          id: "200",
+          name: "Marlene Hartmann",
+          street: "Methfesselstraße",
+          houseNumber: "88",
+          platformId: "200",
+          platform: "telegram",
+          language: "de",
+          availabilityPatterns: [],
+          registeredAt: 1716000000000,
+          source: "explicit",
+          confirmed: true,
+        } satisfies Resident,
+        confirmPickupError: new Error("upstash 500"),
+      });
+
+      await processInboundTelegramUpdate(
+        makeRequest(
+          cbUpdate({
+            chatId: -100123,
+            messageId: 555,
+            fromUserId: 200,
+            data: "confirm_pickup:pkg_42",
+            chatType: "supergroup",
+            languageCode: "de",
+          }),
+        ),
+        deps,
+      );
+
+      expect(answerCallback).toHaveBeenCalledWith(
+        "cb_abc",
+        expect.stringMatching(/schiefgelaufen/i),
+      );
+      // Keyboard stays live — caller can retry.
+      expect(stripKeyboard).not.toHaveBeenCalled();
+      expect(editGroupCard).not.toHaveBeenCalled();
+      expect(sendToAsh).not.toHaveBeenCalled();
+    });
+
+    it("unregistered tapper → not-recipient toast + keyboard stripped, no lib call", async () => {
+      const {
+        deps,
+        sendToAsh,
+        confirmPickup,
+        answerCallback,
+        stripKeyboard,
+        getRegisteredResident,
+      } = buildDeps({ registeredResident: null });
+
+      await processInboundTelegramUpdate(
+        makeRequest(
+          cbUpdate({
+            chatId: -100123,
+            messageId: 555,
+            fromUserId: 99,
+            data: "confirm_pickup:pkg_42",
+            chatType: "supergroup",
+            languageCode: "de",
+          }),
+        ),
+        deps,
+      );
+
+      expect(getRegisteredResident).toHaveBeenCalledWith(99);
+      // Lib never called for unregistered taps — the channel rejects
+      // them as non-recipients (an unregistered user can't be the
+      // recipient of any Package by definition).
+      expect(confirmPickup).not.toHaveBeenCalled();
+      expect(answerCallback).toHaveBeenCalledWith(
+        "cb_abc",
+        expect.stringMatching(/nicht der empfänger/i),
+      );
+      expect(stripKeyboard).toHaveBeenCalledWith(-100123, 555);
+      expect(sendToAsh).not.toHaveBeenCalled();
+    });
+
+    it("getRegisteredResident throws → retry toast + keyboard stays live, no lib call", async () => {
+      const {
+        deps,
+        sendToAsh,
+        confirmPickup,
+        answerCallback,
+        stripKeyboard,
+        getRegisteredResident,
+      } = buildDeps();
+      getRegisteredResident.mockRejectedValueOnce(new Error("redis hiccup"));
+
+      await processInboundTelegramUpdate(
+        makeRequest(
+          cbUpdate({
+            chatId: -100123,
+            messageId: 555,
+            fromUserId: 200,
+            data: "confirm_pickup:pkg_42",
+            chatType: "supergroup",
+            languageCode: "de",
+          }),
+        ),
+        deps,
+      );
+
+      expect(confirmPickup).not.toHaveBeenCalled();
+      expect(answerCallback).toHaveBeenCalledWith(
+        "cb_abc",
+        expect.stringMatching(/schiefgelaufen/i),
+      );
+      expect(stripKeyboard).not.toHaveBeenCalled();
+      expect(sendToAsh).not.toHaveBeenCalled();
+    });
+
+    it("editGroupCard and sendDirectMessage failures are swallowed (canonical state already correct)", async () => {
+      const {
+        deps,
+        sendToAsh,
+        editGroupCard,
+        sendDirectMessage,
+      } = buildDeps({
+        registeredResident: {
+          id: "200",
+          name: "Marlene Hartmann",
+          street: "Methfesselstraße",
+          houseNumber: "88",
+          platformId: "200",
+          platform: "telegram",
+          language: "de",
+          availabilityPatterns: [],
+          registeredAt: 1716000000000,
+          source: "explicit",
+          confirmed: true,
+        } satisfies Resident,
+      });
+      editGroupCard.mockRejectedValueOnce(new Error("edit failed"));
+      sendDirectMessage.mockRejectedValueOnce(new Error("dm failed"));
+
+      const res = await processInboundTelegramUpdate(
+        makeRequest(
+          cbUpdate({
+            chatId: -100123,
+            messageId: 555,
+            fromUserId: 200,
+            data: "confirm_pickup:pkg_42",
+            chatType: "supergroup",
+          }),
+        ),
+        deps,
+      );
+
+      // Both side effects were attempted (and failed), but the
+      // overall response stays 204 because the lib already flipped
+      // canonical state — surfacing a 5xx now would be misleading.
+      expect(res.status).toBe(204);
+      expect(editGroupCard).toHaveBeenCalledTimes(1);
+      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+      expect(sendToAsh).not.toHaveBeenCalled();
+    });
+
+    it("records a KnownTelegramUser observation on every pickup tap, including rejected ones (#45 preservation)", async () => {
+      const { deps, sendToAsh, recordTelegramObservation, confirmPickup } =
+        buildDeps({ registeredResident: null });
+
+      await processInboundTelegramUpdate(
+        makeRequest({
+          update_id: 1,
+          callback_query: {
+            id: "cb_abc",
+            data: "confirm_pickup:pkg_42",
+            from: {
+              id: 4242,
+              is_bot: false,
+              first_name: "Natascha",
+              last_name: "Elter",
+              username: "natascha_elter",
+              language_code: "de",
+            },
+            message: {
+              message_id: 555,
+              chat: { id: -1001, type: "supergroup" },
+            },
           },
-          message: {
-            message_id: 555,
-            chat: { id: -1001, type: "supergroup" },
-          },
-        },
-      }),
-      deps,
-    );
+        }),
+        deps,
+      );
 
-    expect(sendToAsh).not.toHaveBeenCalled();
-    expect(recordTelegramObservation).toHaveBeenCalledTimes(1);
-    expect(recordTelegramObservation).toHaveBeenCalledWith({
-      userId: 4242,
-      firstName: "Natascha",
-      lastName: "Elter",
-      username: "natascha_elter",
-      languageCode: "de",
-      chatId: -1001,
+      expect(confirmPickup).not.toHaveBeenCalled();
+      expect(sendToAsh).not.toHaveBeenCalled();
+      expect(recordTelegramObservation).toHaveBeenCalledTimes(1);
+      expect(recordTelegramObservation).toHaveBeenCalledWith({
+        userId: 4242,
+        firstName: "Natascha",
+        lastName: "Elter",
+        username: "natascha_elter",
+        languageCode: "de",
+        chatId: -1001,
+      });
     });
-  });
 
-  it("continues to drive the agent even if answerCallback or stripKeyboard throw", async () => {
-    const { deps, sendToAsh, answerCallback, stripKeyboard } = buildDeps();
-    answerCallback.mockRejectedValueOnce(new Error("ack failed"));
-    stripKeyboard.mockRejectedValueOnce(new Error("edit failed"));
+    it("does NOT pass confirm_pickup to setTriggerAttribute — no agent run means no Trigger row to attribute", async () => {
+      const { deps, setTriggerAttribute } = buildDeps({
+        registeredResident: {
+          id: "200",
+          name: "Marlene Hartmann",
+          street: "Methfesselstraße",
+          houseNumber: "88",
+          platformId: "200",
+          platform: "telegram",
+          language: "de",
+          availabilityPatterns: [],
+          registeredAt: 1716000000000,
+          source: "explicit",
+          confirmed: true,
+        } satisfies Resident,
+      });
 
-    const res = await processInboundTelegramUpdate(
-      makeRequest(
-        cbUpdate({ chatId: 42, messageId: 1, fromUserId: 99, data: "confirm_pickup:pkg_42" }),
-      ),
-      deps,
-    );
+      await processInboundTelegramUpdate(
+        makeRequest(
+          cbUpdate({
+            chatId: -100123,
+            messageId: 555,
+            fromUserId: 200,
+            data: "confirm_pickup:pkg_42",
+            chatType: "supergroup",
+          }),
+        ),
+        deps,
+      );
 
-    expect(res.status).toBe(204);
-    expect(sendToAsh).toHaveBeenCalledTimes(1);
+      // The legacy `telegram.callback-confirm-pickup` value is gone in
+      // v2.1 #108. The channel-deterministic pickup path never calls
+      // `sendToAsh`, so there is no `ash.turn` row for the dashboard
+      // to attribute — same as the volunteer-accept path (#96).
+      expect(setTriggerAttribute).not.toHaveBeenCalled();
+    });
   });
 
   it("falls through to message handling when the update has no callback_query", async () => {
@@ -2775,13 +3076,16 @@ describe("processInboundTelegramUpdate — callback_query", () => {
     it("does NOT consult isRegisteredResident for non-accept-group actions", async () => {
       const { deps, sendToAsh, isRegisteredResident } = buildDeps();
 
+      // remind_later is a legacy synthetic-path callback the channel
+      // doesn't intercept itself — it still hits sendToAsh, and the
+      // accept-group registration check must not fire for it.
       await processInboundTelegramUpdate(
         makeRequest(
           cbUpdate({
             chatId: 42,
             messageId: 1,
             fromUserId: 99,
-            data: "confirm_pickup:pkg_42",
+            data: "remind_later:pkg_42",
           }),
         ),
         deps,
@@ -3912,9 +4216,26 @@ describe("processInboundTelegramUpdate — setTriggerAttribute (v2.1 #99)", () =
     expect(setTriggerAttribute).toHaveBeenCalledWith("telegram.slash-receive");
   });
 
-  it("callback_query confirm_pickup → telegram.callback-confirm-pickup", async () => {
+  it("callback_query confirm_pickup → NOT attributed (v2.1 #108 — channel handles deterministically)", async () => {
+    // The pre-#108 surface attributed `telegram.callback-confirm-pickup`
+    // because the tap fell through to `sendToAsh`. After #108 the
+    // channel handles the tap end-to-end and never calls `sendToAsh`
+    // on this path — so there is no `ash.turn` row to attribute,
+    // and the trigger attribute must not be set.
     const { deps, sendToAsh, setTriggerAttribute } = buildDeps({
-      packageRecipientId: "99",
+      registeredResident: {
+        id: "99",
+        name: "Tapper",
+        street: "Methfesselstraße",
+        houseNumber: "88",
+        platformId: "99",
+        platform: "telegram",
+        language: "de",
+        availabilityPatterns: [],
+        registeredAt: 1716000000000,
+        source: "explicit",
+        confirmed: true,
+      } satisfies Resident,
     });
 
     const cbUpdate = {
@@ -3933,10 +4254,8 @@ describe("processInboundTelegramUpdate — setTriggerAttribute (v2.1 #99)", () =
 
     await processInboundTelegramUpdate(makeRequest(cbUpdate), deps);
 
-    expect(sendToAsh).toHaveBeenCalledTimes(1);
-    expect(setTriggerAttribute).toHaveBeenCalledWith(
-      "telegram.callback-confirm-pickup",
-    );
+    expect(sendToAsh).not.toHaveBeenCalled();
+    expect(setTriggerAttribute).not.toHaveBeenCalled();
   });
 
   it("callback_query non-confirm-pickup actions → telegram.callback (generic bucket)", async () => {
