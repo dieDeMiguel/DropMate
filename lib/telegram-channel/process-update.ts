@@ -85,6 +85,11 @@ import {
   type CreateReceptionRequestResult,
 } from "../reception-request.js";
 import { normaliseLanguageCode } from "../language.js";
+import {
+  REGISTER_PACKAGE_HOLDER_NOT_REGISTERED_ERROR_CODE,
+  type RegisterPackageInput,
+  type RegisterPackageResult,
+} from "../package.js";
 import type { PackageCarrier, Resident } from "../redis.js";
 import { emitTrace } from "../trace.js";
 import {
@@ -103,13 +108,19 @@ import {
   buildFlow2VisionLowConfidenceDm,
 } from "./flow-2-dms.js";
 import {
+  buildGroupAckText,
+  buildHolderNotRegisteredNudge,
+  buildPickupKeyboard,
+  buildRecipientDmText,
+} from "./flow-1-dms.js";
+import {
   extractInboundCallback,
   extractInboundMessage,
   type TelegramInboundCallback,
   type TelegramInboundMessage,
   type TelegramUpdatePayload,
 } from "./inbound.js";
-import type { TelegramMessageEntity } from "./send.js";
+import type { InlineKeyboardMarkup, TelegramMessageEntity } from "./send.js";
 import { verifyTelegramSecretHeader } from "./verify.js";
 import {
   buildRequesterAcceptDm,
@@ -307,6 +318,43 @@ export interface ProcessUpdateDeps {
     languageHint?: string;
   }) => Promise<Flow2ClassificationResult>;
   /**
+   * v2.1 #106 Slice 1: classifier for group text inbounds. Mirrors
+   * `classifyDmIntent` shape but for the Flow 1 register-package
+   * decision — the channel calls this on every group text message
+   * BEFORE the agent runs so the registration decision lives outside
+   * the model's reasoning loop. The live trace 2026-05-22 showed a
+   * single group photo producing 20+ free-form messages on the agent
+   * path; this classifier closes the same surface for text.
+   *
+   * Throws on irrecoverable failure (both primary + fallback errored).
+   * The channel's catch logs the error and stays silent in the group
+   * — better to miss the routing than to misroute. (Contrast with
+   * `classifyDmIntent`'s fall-through-to-agent behaviour: a group
+   * text classifier outage going to the agent is exactly what #106
+   * exists to prevent.)
+   */
+  readonly classifyGroupMessage: (input: {
+    text: string;
+    languageHint?: string;
+  }) => Promise<ClassifyGroupMessageResult>;
+  /**
+   * v2.1 #106 Slice 1: channel-side handle for the lib-level
+   * `registerPackage`. The channel calls this directly (no agent
+   * invocation) when the group classifier returns a high-confidence
+   * package registration verdict. Implemented in the factory as a
+   * thin re-export of `lib/package.ts::registerPackage`.
+   *
+   * Throws `RegisterPackageError` with code
+   * `REGISTER_PACKAGE_HOLDER_NOT_REGISTERED` when the holder is not a
+   * registered Resident — the channel sends a localised /register
+   * nudge in that case. Other Redis hiccups bubble up as plain
+   * Errors; the channel logs them and stays silent.
+   */
+  readonly registerPackage: (
+    holder: Resident | null,
+    input: RegisterPackageInput,
+  ) => Promise<RegisterPackageResult>;
+  /**
    * Resolves a Telegram `user_id` to the full `Resident` record (or
    * `null` if unregistered). Consumed by the Flow 2 v2 channel path:
    * when the classifier returns `confidence: "high"`, the channel
@@ -388,6 +436,7 @@ export interface ProcessUpdateDeps {
     chatId: number,
     text: string,
     entities?: ReadonlyArray<TelegramMessageEntity>,
+    replyMarkup?: InlineKeyboardMarkup,
   ) => Promise<void>;
   /**
    * v2.1 #97: channel-side handle for the lib-level `registerResident`.
@@ -506,6 +555,56 @@ export interface Flow2ClassificationResult {
   readonly confidence: "high" | "medium" | "low";
   readonly reason: string;
 }
+
+/**
+ * Subset of the `classify_group_message` tool output the orchestrator
+ * consumes. Defined here so process-update.ts stays decoupled from
+ * the tool implementation; the factory wires the real tool's
+ * `execute` into the dep.
+ *
+ * @see agent/tools/classify_group_message.ts
+ */
+export interface ClassifyGroupMessageRecipient {
+  readonly name: string;
+  readonly houseNumber?: string;
+}
+export interface ClassifyGroupMessageResult {
+  readonly isPackageRegistration: boolean;
+  readonly recipients: ReadonlyArray<ClassifyGroupMessageRecipient>;
+  readonly carrier?: PackageCarrier;
+  readonly confidence: "high" | "medium" | "low";
+  readonly reason: string;
+}
+
+/**
+ * v2.1 #106 Slice 1: group text routes return this discriminated union
+ * so the orchestrator can decide whether to skip the agent entirely
+ * (channel already posted the deterministic group ack + DMs) or fall
+ * through to `sendToAsh` (the route couldn't disambiguate — typically
+ * a low-confidence classifier verdict or an unregistered recipient
+ * that Slice 3 / #109 will handle with a clarification synthetic).
+ *
+ * Same shape as `Flow2RouteResult` for symmetry.
+ *
+ *   - `kind: "handled"` → channel already posted the group ack + DMs
+ *     (or stayed silent on a non-registration verdict / Redis hiccup).
+ *     The orchestrator returns 204 immediately. `sendToAsh` is NEVER
+ *     called on this branch.
+ *   - `kind: "silent"`  → channel intentionally did nothing (classifier
+ *     said this isn't a registration, or the registration was
+ *     low-confidence and we'd rather miss than misroute). Same 204
+ *     outcome as `"handled"` — the discriminator exists so logs can
+ *     distinguish "we did the work" from "we deliberately abstained".
+ *   - `kind: "fallthrough"` → hand `toAgent` to `sendToAsh` as the
+ *     user message. Used when the classifier returned medium/low
+ *     confidence on a plausible registration — Slice 3 (#109) will
+ *     hand the agent a clarification synthetic here; Slice 1 just
+ *     stays silent (no agent involvement) until that lands.
+ */
+export type Flow1RouteResult =
+  | { readonly kind: "handled" }
+  | { readonly kind: "silent" }
+  | { readonly kind: "fallthrough"; readonly toAgent: string };
 
 /**
  * Parsed `callback_data` shape. The convention is `"<action>:<id>"`;
@@ -1088,6 +1187,256 @@ async function routeDmTextThroughClassifier(
 
   const language = caller.language ?? inbound.fromLanguageCode ?? "de";
   return sendFlow2AckDm(inbound, language, deps);
+}
+
+/**
+ * v2.1 #106 Slice 1: route a group text message through the Flow 1
+ * classifier. On a high-confidence verdict + a recipient that
+ * resolves to a registered Resident, the channel deterministically:
+ *
+ *   1. Calls `registerPackage(holder, { recipientName, ... })` via
+ *      the lib. The function writes the Package, links to any open
+ *      Flow 2 request, and returns the resident-recipient summary.
+ *   2. Posts ONE group ack + sends ONE recipient DM via
+ *      `sendDirectMessage` (the dep is chat-id-agnostic — it sends
+ *      to a group chat or a 1:1 chat identically; the `[Abgeholt]`
+ *      keyboard rides along on both).
+ *   3. Returns `{ kind: "handled" }` so the orchestrator skips
+ *      `sendToAsh` — closing the agent text-leak surface the live
+ *      trace 2026-05-22 produced (#105).
+ *
+ * Failure / disambiguation cases that this slice does NOT handle (Slice
+ * 3 / #109 introduces the proper clarification synthetic):
+ *
+ *   - Classifier outage / both models error → stay silent. Logged so
+ *     ops can see it; the group is not the right place to surface an
+ *     internal hiccup, and the agent would just produce noise.
+ *   - `isPackageRegistration === false` → stay silent. Off-topic chat,
+ *     pickup confirmations, social posts.
+ *   - `confidence !== "high"` → stay silent for now. Slice 3 will
+ *     route this to a clarification synthetic.
+ *   - 0 recipients on a high-conf positive → stay silent (defensive —
+ *     the classifier prompt rules this out, but the schema permits it).
+ *   - 2+ recipients → register only the registered-resident matches;
+ *     post one combined group ack covering them. Unknown recipients in
+ *     the same message stay silent (Slice 3 will handle).
+ *   - Recipient resolves to known_telegram (not yet a Resident) → stay
+ *     silent. Slice 3's clarification synthetic asks the holder for
+ *     more info.
+ *   - Recipient resolves to unknown → stay silent. Slice 3 will post
+ *     the "kennt jemand X?" group question.
+ *   - Unregistered holder (`registerPackage` throws with
+ *     `REGISTER_PACKAGE_HOLDER_NOT_REGISTERED`) → send ONE best-effort
+ *     DM to the holder pointing at `/register`. Stay silent in the
+ *     group.
+ *   - Any other `registerPackage` throw → stay silent (Redis hiccup,
+ *     transient). Logged.
+ */
+async function routeGroupTextThroughClassifier(
+  inbound: TelegramInboundMessage,
+  deps: ProcessUpdateDeps,
+): Promise<Flow1RouteResult> {
+  if (inbound.fromUserId === null) {
+    // Anonymous group post (no `from` on the payload) — rare; can't
+    // resolve the holder, so stay silent.
+    return { kind: "silent" };
+  }
+
+  let classification: ClassifyGroupMessageResult;
+  emitTrace("classifier", "start", { flow: "flow1" });
+  try {
+    classification = await deps.classifyGroupMessage({
+      text: inbound.text,
+      languageHint: inbound.fromLanguageCode ?? undefined,
+    });
+    emitTrace("classifier", "end", {
+      flow: "flow1",
+      isPackageRegistration: classification.isPackageRegistration,
+      confidence: classification.confidence,
+    });
+  } catch (err) {
+    console.error(
+      "[classify_group_message] failed for chatId",
+      inbound.chatId,
+      "error:",
+      err instanceof Error
+        ? { name: err.name, message: err.message, stack: err.stack }
+        : err,
+    );
+    emitTrace("classifier", "error", { flow: "flow1" });
+    // Stay silent. Slice 3 (#109) introduces a clarification synthetic
+    // for the agent; until then, a classifier outage means we miss the
+    // routing — better than emitting a wall of free-form agent text.
+    return { kind: "silent" };
+  }
+
+  if (
+    !classification.isPackageRegistration ||
+    classification.confidence !== "high" ||
+    classification.recipients.length === 0
+  ) {
+    return { kind: "silent" };
+  }
+
+  // Resolve the holder (the user who posted in the group). They must
+  // be a registered Resident — `registerPackage` throws otherwise.
+  const holder = await deps
+    .getRegisteredResident(inbound.fromUserId)
+    .catch(() => null);
+
+  // For each named recipient: register a package + (when the recipient
+  // resolves to a registered Resident) post ONE group ack + ONE DM.
+  // Unknown / known_telegram recipients in the same message stay
+  // silent (Slice 3 covers those).
+  let anyRegistered = false;
+  for (const namedRecipient of classification.recipients) {
+    const recipientHouseNumber =
+      namedRecipient.houseNumber ?? holder?.houseNumber ?? "";
+    if (recipientHouseNumber === "") {
+      // Defensive: no recipient house number AND no holder house
+      // number to default to. Skip — the schema admits this only when
+      // both are absent, which is a Slice-3 disambiguation case.
+      continue;
+    }
+
+    let registered: RegisterPackageResult;
+    emitTrace("flow1", "register.start", {
+      recipient: namedRecipient.name,
+    });
+    try {
+      registered = await deps.registerPackage(holder, {
+        recipientName: namedRecipient.name,
+        recipientHouseNumber,
+        carrier: classification.carrier,
+      });
+      emitTrace("flow1", "register.end", {
+        recipient: namedRecipient.name,
+        resolution: registered.recipientResolution.kind,
+      });
+    } catch (err) {
+      const errorCode =
+        err && typeof err === "object" && "code" in err
+          ? (err as { code?: string }).code
+          : undefined;
+      if (errorCode === REGISTER_PACKAGE_HOLDER_NOT_REGISTERED_ERROR_CODE) {
+        // Best-effort DM nudge to the holder. The group stays silent.
+        const language =
+          inbound.fromLanguageCode &&
+          normaliseLanguageCode(inbound.fromLanguageCode);
+        const nudge = buildHolderNotRegisteredNudge(language);
+        try {
+          await deps.sendDirectMessage(inbound.fromUserId, nudge);
+        } catch (dmErr) {
+          // Bot-initiated DMs to users who haven't started a private
+          // chat are forbidden by the Bot API. Log + move on.
+          console.error(
+            "[flow1] holder-not-registered nudge DM failed for userId",
+            inbound.fromUserId,
+            "error:",
+            dmErr instanceof Error ? dmErr.message : dmErr,
+          );
+        }
+        // The holder isn't a Resident — no further registrations are
+        // possible on this turn. Break the loop.
+        emitTrace("flow1", "reject.holder-not-registered");
+        return { kind: "handled" };
+      }
+      console.error(
+        "[register_package] failed for holder",
+        inbound.fromUserId,
+        "recipient",
+        namedRecipient.name,
+        "error:",
+        err instanceof Error
+          ? { name: err.name, message: err.message, stack: err.stack }
+          : err,
+      );
+      emitTrace("flow1", "register.error");
+      // Skip this recipient; try the next one. Better partial outcome
+      // than abandoning the whole turn.
+      continue;
+    }
+
+    if (registered.recipientResolution.kind !== "resident") {
+      // Slice 1: only the "registered resident" branch posts. Other
+      // branches (known_telegram, unknown) stay silent — Slice 3
+      // introduces the clarification synthetic for those.
+      emitTrace("flow1", "silent", {
+        reason: registered.recipientResolution.kind,
+      });
+      continue;
+    }
+
+    const groupAckText = buildGroupAckText({
+      holder: registered.holder,
+      recipient: registered.recipientResolution.resident,
+    });
+    const recipientDmText = buildRecipientDmText({
+      holder: registered.holder,
+      recipient: registered.recipientResolution.resident,
+    });
+    const keyboard = buildPickupKeyboard(registered.package.id);
+
+    // Group ack. `sendDirectMessage` is chat-id-agnostic — sending to
+    // `inbound.chatId` posts to the group when the inbound came from
+    // a group.
+    try {
+      emitTrace("dm", "start", { kind: "flow1-group-ack" });
+      await deps.sendDirectMessage(
+        inbound.chatId,
+        groupAckText,
+        undefined,
+        keyboard,
+      );
+      emitTrace("dm", "end", { kind: "flow1-group-ack" });
+    } catch (err) {
+      console.error(
+        "[flow1] group ack post failed for chatId",
+        inbound.chatId,
+        "package",
+        registered.package.id,
+        "error:",
+        err instanceof Error ? err.message : err,
+      );
+      emitTrace("dm", "error", { kind: "flow1-group-ack" });
+    }
+
+    // Recipient DM. Chat id for a 1:1 Telegram chat equals the
+    // recipient's user id — same mapping the volunteer-accept path
+    // relies on.
+    const recipientChatId = Number(registered.recipientResolution.resident.id);
+    if (Number.isFinite(recipientChatId)) {
+      try {
+        emitTrace("dm", "start", { kind: "flow1-recipient" });
+        await deps.sendDirectMessage(
+          recipientChatId,
+          recipientDmText,
+          undefined,
+          keyboard,
+        );
+        emitTrace("dm", "end", { kind: "flow1-recipient" });
+      } catch (err) {
+        console.error(
+          "[flow1] recipient DM failed for resident id",
+          registered.recipientResolution.resident.id,
+          "package",
+          registered.package.id,
+          "error:",
+          err instanceof Error ? err.message : err,
+        );
+        emitTrace("dm", "error", { kind: "flow1-recipient" });
+      }
+    } else {
+      console.error(
+        "[flow1] recipient.id is not a finite number — skipping DM",
+        { recipientId: registered.recipientResolution.resident.id },
+      );
+    }
+
+    anyRegistered = true;
+  }
+
+  return { kind: anyRegistered ? "handled" : "silent" };
 }
 
 /**
@@ -1763,7 +2112,19 @@ export async function processInboundTelegramUpdate(
     message = result.toAgent;
     trigger = usedReceiveCommand ? "telegram.slash-receive" : "telegram.text-dm";
   } else if (inbound.isGroup) {
-    message = inbound.text;
+    // v2.1 #106 Slice 1: group text now routes through the Flow 1
+    // classifier first. On a high-confidence package-registration
+    // verdict with a registered recipient, the channel registers
+    // the package + posts the group ack + DMs the recipient itself —
+    // `sendToAsh` is NEVER called on that branch. On disambiguation
+    // cases (low/medium confidence, unknown/known_telegram recipient,
+    // unregistered holder), Slice 1 stays silent; Slice 3 (#109)
+    // introduces the clarification synthetic for the agent.
+    const result = await routeGroupTextThroughClassifier(inbound, deps);
+    if (result.kind === "handled" || result.kind === "silent") {
+      return new Response(null, { status: 204 });
+    }
+    message = result.toAgent;
     trigger = "telegram.group";
   } else {
     // Anonymous DM (no `from` on the payload). Rare — Telegram normally
