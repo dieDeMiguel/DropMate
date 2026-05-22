@@ -2070,7 +2070,7 @@ describe("processInboundTelegramUpdate — callback_query", () => {
     // `matched` with `volunteerResidentId === requesterResidentId`, the
     // DM-pair fired both ways, and the data path then contradicted
     // itself, surfacing the v1-style cascade in the GROUP.
-    it("renders the dedicated self-accept toast AND strips the keyboard when acceptReceptionRequest throws with code ACCEPT_RECEPTION_SELF_NOT_ALLOWED (#98)", async () => {
+    it("renders the dedicated self-accept toast and KEEPS THE KEYBOARD LIVE when acceptReceptionRequest throws with code ACCEPT_RECEPTION_SELF_NOT_ALLOWED (#98 / #101)", async () => {
       const requester = makeVolunteer({ language: "de" });
       const {
         deps,
@@ -2115,10 +2115,92 @@ describe("processInboundTelegramUpdate — callback_query", () => {
         "cb_abc",
         "Du kannst dein eigenes Paket nicht selbst annehmen.",
       );
-      expect(stripKeyboard).toHaveBeenCalledWith(-100123, 555);
+      // #101: keyboard MUST stay live so other neighbours on the same
+      // street can still claim. The rejection is per-tapper, not per-card.
+      expect(stripKeyboard).not.toHaveBeenCalled();
     });
 
-    it("localises the self-accept toast across de/en/es/tr (#98)", async () => {
+    it("leaves the keyboard live so another neighbour can claim the SAME card after a self-tap (#101)", async () => {
+      const requester = makeVolunteer({ id: "300", language: "de" });
+      const otherNeighbour = makeVolunteer({
+        id: "400",
+        platformId: "400",
+        name: "Natascha Other",
+        language: "de",
+      });
+      const {
+        deps,
+        sendToAsh,
+        acceptReceptionRequest,
+        editGroupCard,
+        answerCallback,
+        stripKeyboard,
+        sendDirectMessage,
+        getRegisteredResident,
+      } = buildDeps({
+        isRegisteredResident: true,
+        registeredResident: requester,
+      });
+
+      // First tap: the requester taps their own card → self-accept reject.
+      // The default acceptResult queue is overridden for this call only.
+      const selfAccept = Object.assign(
+        new Error("cannot volunteer for your own request"),
+        {
+          code: "ACCEPT_RECEPTION_SELF_NOT_ALLOWED",
+          name: "AcceptReceptionRequestError",
+        },
+      );
+      acceptReceptionRequest.mockRejectedValueOnce(selfAccept);
+
+      await processInboundTelegramUpdate(
+        makeRequest(
+          cbUpdate({
+            chatId: -100123,
+            messageId: 555,
+            fromUserId: 300,
+            data: "accept_reception_group:req_42",
+            chatType: "supergroup",
+          }),
+        ),
+        deps,
+      );
+
+      // After self-tap: keyboard MUST still be live so another tapper can claim.
+      expect(stripKeyboard).not.toHaveBeenCalled();
+      expect(editGroupCard).not.toHaveBeenCalled();
+      expect(sendDirectMessage).not.toHaveBeenCalled();
+
+      // Second tap on the SAME card: a different neighbour on the same
+      // street claims successfully. The keyboard being live above is what
+      // makes this tap reachable in real Telegram. `getRegisteredResident`
+      // gets one queued response for the second tap; `acceptReceptionRequest`
+      // falls back to the buildDeps default (success result).
+      getRegisteredResident.mockResolvedValueOnce(otherNeighbour);
+
+      await processInboundTelegramUpdate(
+        makeRequest(
+          cbUpdate({
+            chatId: -100123,
+            messageId: 555,
+            fromUserId: 400,
+            data: "accept_reception_group:req_42",
+            chatType: "supergroup",
+          }),
+        ),
+        deps,
+      );
+
+      // Happy path: keyboard stripped + card edited + the two deterministic DMs sent.
+      expect(stripKeyboard).toHaveBeenCalledTimes(1);
+      expect(stripKeyboard).toHaveBeenCalledWith(-100123, 555);
+      expect(editGroupCard).toHaveBeenCalledTimes(1);
+      expect(sendDirectMessage).toHaveBeenCalledTimes(2);
+      expect(sendToAsh).not.toHaveBeenCalled();
+      expect(answerCallback).toHaveBeenCalledTimes(2);
+    });
+
+    it("localises the self-accept toast across de/en/es/tr without stripping the keyboard (#98 / #101)", async () => {
       const cases: ReadonlyArray<{ language: string; expected: string }> = [
         { language: "de", expected: "Du kannst dein eigenes Paket nicht selbst annehmen." },
         { language: "en", expected: "You can't volunteer for your own package." },
@@ -2153,7 +2235,7 @@ describe("processInboundTelegramUpdate — callback_query", () => {
         );
 
         expect(answerCallback).toHaveBeenCalledWith("cb_abc", expected);
-        expect(stripKeyboard).toHaveBeenCalledWith(-100123, 555);
+        expect(stripKeyboard).not.toHaveBeenCalled();
       }
     });
 
