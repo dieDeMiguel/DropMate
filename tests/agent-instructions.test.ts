@@ -191,6 +191,40 @@ describe("agent/instructions.md Flow 2 ack format rules (v2.1 Bug 2, #94)", () =
   });
 });
 
+// Regression for v2.1 #97 — observed live 2026-05-22: a fresh /register
+// inbound produced TEN bot messages — a freely-generated welcome wall,
+// a German reintroduction, a trilingual /language brochure, AND a Flow 2
+// misfire ("Habe in der Gruppe gefragt …") against a registration that
+// never asked for a reception request. The fix has two layers:
+//   1. The channel layer writes the Resident + sends ONE confirmation DM
+//      before the agent runs (asserted in process-update.test.ts).
+//   2. The Onboarding stanza in instructions.md hard-prohibits the
+//      welcome wall + Flow 2 misfire for any registration turn that
+//      slips past the channel's regex.
+// This block pins the instructions.md side of (2).
+describe("agent/instructions.md Onboarding stanza (v2.1 #97)", () => {
+  function extractOnboardingStanza(contents: string): string {
+    const start = contents.indexOf("# Onboarding");
+    if (start === -1) {
+      throw new Error(
+        "could not locate the Onboarding stanza in instructions.md (added for v2.1 #97); if it was renamed or removed, update this test or the docs",
+      );
+    }
+    const after = contents.indexOf("\n# ", start + 1);
+    return after === -1 ? contents.slice(start) : contents.slice(start, after);
+  }
+
+  it("hard-prohibits the welcome-wall + Flow 2 misfire patterns observed in the live trace", async () => {
+    const contents = await readFile(instructionsPath, "utf8");
+    const stanza = extractOnboardingStanza(contents);
+    expect(stanza).toMatch(/do not emit a welcome wall/i);
+    expect(stanza).toMatch(/do not call `post_to_group`/i);
+    // Names the `/register` shape so the agent's one-sentence fallback
+    // matches the canonical channel-deterministic input.
+    expect(stanza).toMatch(/\/register/);
+  });
+});
+
 // Regression for #43 item 2b round 3 — observed live 2026-05-18: the
 // model produced the literal string "<holder.name>" in its reply because
 // previous instructions used angle-bracket dashed placeholders

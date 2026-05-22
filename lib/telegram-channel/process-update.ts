@@ -86,6 +86,15 @@ import {
 } from "../reception-request.js";
 import { normaliseLanguageCode } from "../language.js";
 import type { PackageCarrier, Resident } from "../redis.js";
+import {
+  buildRegistrationConfirmationDm,
+  isRegisterCommand,
+  parseFreeTextRegistration,
+  parseRegisterCommand,
+  type ParsedRegistration,
+  type RegisterResidentInput,
+  type RegisterResidentResult,
+} from "../registration.js";
 import { isReceiveCommand, parseReceiveCommand } from "../slash-command.js";
 
 import {
@@ -394,6 +403,20 @@ export interface ProcessUpdateDeps {
     text: string,
     entities?: ReadonlyArray<TelegramMessageEntity>,
   ) => Promise<void>;
+  /**
+   * v2.1 #97: channel-side handle for the lib-level `registerResident`.
+   * Wired by the factory to `lib/registration.ts::registerResident`. The
+   * channel calls this directly (no agent invocation) when a DM matches
+   * `/register …` or the free-text registration shape — so the agent
+   * never sees a registration-shaped turn and cannot fire the welcome
+   * wall + Flow 2 misfire observed in the live trace (issue #97 body).
+   *
+   * Throws on Redis I/O failure; the channel's catch logs the error and
+   * falls back to handing the raw text to the agent (the v2 behaviour).
+   */
+  readonly registerResident: (
+    input: RegisterResidentInput,
+  ) => Promise<RegisterResidentResult>;
 }
 
 /**
@@ -1408,6 +1431,144 @@ function buildVisionLowConfidenceMessage(args: {
 }
 
 /**
+ * v2.1 #97: channel-deterministic registration handler. Same shape as
+ * `handleAcceptReceptionGroup` — owns the FULL lifecycle of a
+ * registration inbound and returns `Response | null`:
+ *
+ *   - `Response` → registration handled (the channel already sent the
+ *     confirmation DM); the orchestrator returns this directly and
+ *     SKIPS `sendToAsh` entirely. No welcome wall, no Flow 2 misfire,
+ *     no other bot messages.
+ *   - `null`     → not a registration inbound (or the registration text
+ *     parsed but the lib write failed). The orchestrator falls through
+ *     to the classifier path so the agent gets a turn — same fail-safe
+ *     pattern as Slice 1 (#86), Slice 2 (#87), Slice 3 (#88).
+ *
+ * Why two parsers (slash + free-text):
+ *
+ *   - `/register …` is the deterministic, intent-explicit entry — the
+ *     user typed the slash so we apply the body regex and accept
+ *     whatever parses. If the regex fails on `/register` (bare slash,
+ *     or args that don't match), we still skip the agent and DM a
+ *     one-sentence "try `/register Name, Street Number`" prompt rather
+ *     than letting the welcome wall fire. The user is clearly trying
+ *     to register; the model has no useful contribution to make there.
+ *   - Free-text registration (e.g. `Diego de Miguel, Lutterothstrasse
+ *     69 Erdgeschoss Links` with no slash) matches the same body
+ *     regex but is more conservative — false positives on free text
+ *     would silently overwrite Resident records. The body regex is
+ *     strict (street-suffix + house number both required) so the
+ *     false-positive surface is small.
+ *
+ * On free-text non-match we return `null` and let the classifier run —
+ * the user might be sending a Flow 2 inbound that just happens to
+ * contain a street name.
+ */
+async function handleRegistrationDm(
+  inbound: TelegramInboundMessage,
+  deps: ProcessUpdateDeps,
+): Promise<Response | null> {
+  if (inbound.fromUserId === null) return null;
+
+  const isSlash = isRegisterCommand(inbound.text);
+  const parsed: ParsedRegistration | null = isSlash
+    ? parseRegisterCommand(inbound.text)
+    : parseFreeTextRegistration(inbound.text);
+
+  // Free-text non-match — let the classifier path run.
+  if (!isSlash && parsed === null) return null;
+
+  const language = inbound.fromLanguageCode;
+
+  // Slash invoked but args don't parse: skip the agent (it'd otherwise
+  // emit the welcome wall) and DM a one-sentence localised prompt
+  // pointing at the canonical shape.
+  if (isSlash && parsed === null) {
+    const prompt = buildRegisterUsageHint(language);
+    try {
+      await deps.sendDirectMessage(inbound.chatId, prompt);
+    } catch (err) {
+      console.error(
+        "[handleRegistrationDm] usage-hint DM failed for chatId",
+        inbound.chatId,
+        "error:",
+        err instanceof Error
+          ? { name: err.name, message: err.message, stack: err.stack }
+          : err,
+      );
+    }
+    return new Response(null, { status: 204 });
+  }
+
+  // Slash or free-text with a successful parse: write the Resident +
+  // send ONE deterministic confirmation DM, then return 204.
+  try {
+    const { resident } = await deps.registerResident({
+      name: parsed!.name,
+      street: parsed!.street,
+      houseNumber: parsed!.houseNumber,
+      floor: parsed!.floor,
+      buzzerName: parsed!.buzzerName,
+      platformId: String(inbound.fromUserId),
+      telegramLanguageCode: language,
+    });
+    const confirmation = buildRegistrationConfirmationDm({
+      resident,
+      fallbackLanguageCode: language,
+    });
+    try {
+      await deps.sendDirectMessage(inbound.chatId, confirmation);
+    } catch (err) {
+      console.error(
+        "[handleRegistrationDm] confirmation DM failed for chatId",
+        inbound.chatId,
+        "error:",
+        err instanceof Error
+          ? { name: err.name, message: err.message, stack: err.stack }
+          : err,
+      );
+    }
+    return new Response(null, { status: 204 });
+  } catch (err) {
+    console.error(
+      "[handleRegistrationDm] registerResident failed for chatId",
+      inbound.chatId,
+      "userId",
+      inbound.fromUserId,
+      "error:",
+      err instanceof Error
+        ? { name: err.name, message: err.message, stack: err.stack }
+        : err,
+    );
+    // Lib write failed — fall through to the agent so the user gets
+    // some response. Free-text inbound's registration write failing
+    // also falls through (rather than swallowing into a generic
+    // apology) so the agent can ask the user to retry.
+    return null;
+  }
+}
+
+/**
+ * One-sentence localised prompt for a `/register` slash with no
+ * parseable arguments. Same de/en/es/tr language set as the rest of the
+ * channel; falls back to German.
+ */
+const REGISTER_USAGE_HINTS: Readonly<Record<string, string>> = {
+  de: "Bitte schreibe: /register <Name>, <Straße> <Hausnummer> [Etage] [Klingelname]. Beispiel: /register Diego de Miguel, Lutterothstrasse 69 Erdgeschoss Links.",
+  en: "Please write: /register <Name>, <Street> <House number> [Floor] [Buzzer]. Example: /register Diego de Miguel, Lutterothstrasse 69 Erdgeschoss Links.",
+  es: "Por favor escribe: /register <Nombre>, <Calle> <Número> [Piso] [Timbre]. Ejemplo: /register Diego de Miguel, Lutterothstrasse 69 Erdgeschoss Links.",
+  tr: "Lütfen şöyle yaz: /register <Ad>, <Sokak> <Numara> [Kat] [Zil]. Örnek: /register Diego de Miguel, Lutterothstrasse 69 Erdgeschoss Links.",
+};
+
+function buildRegisterUsageHint(raw: string | null | undefined): string {
+  const normalised = normaliseLanguageCode(raw);
+  if (normalised && REGISTER_USAGE_HINTS[normalised]) {
+    return REGISTER_USAGE_HINTS[normalised]!;
+  }
+  return REGISTER_USAGE_HINTS["de"]!;
+}
+
+/**
  * Runs one inbound Telegram webhook delivery through the agent.
  *
  * Returns the HTTP `Response` the route should reply with. Telegram
@@ -1479,6 +1640,20 @@ export async function processInboundTelegramUpdate(
             ? { languageCode: inbound.fromLanguageCode }
             : {},
         };
+
+  // v2.1 #97: registration is the explicit, channel-deterministic
+  // onboarding entry. The slash variant must run BEFORE any other DM
+  // route because `/register` IS the user's intent — no classifier
+  // call, no agent invocation. The free-text variant runs in the same
+  // position so a comma-separated "Name, Street Number" inbound also
+  // bypasses the agent (the agent's only viable response is to
+  // register the user, which we can do here without burning a turn).
+  // Only DMs from known senders are eligible — group messages and
+  // anonymous webhooks fall through to the legacy path.
+  if (inbound.photoFileId === null && !inbound.isGroup && inbound.fromUserId !== null) {
+    const handled = await handleRegistrationDm(inbound, deps);
+    if (handled) return handled;
+  }
 
   let message: string;
   if (inbound.photoFileId !== null) {

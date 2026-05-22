@@ -42,6 +42,7 @@ import {
   acceptReceptionRequest,
   createReceptionRequest,
 } from "../reception-request.js";
+import { registerResident } from "../registration.js";
 import {
   getPackage,
   getResident,
@@ -245,6 +246,7 @@ export function telegramChannel(config: TelegramChannelConfig) {
             sendDirectMessage: async (chatId, text, entities) => {
               await sendTelegramMessage(token, chatId, text, undefined, entities);
             },
+            registerResident: (input) => registerResident(input),
           });
         },
       ),
