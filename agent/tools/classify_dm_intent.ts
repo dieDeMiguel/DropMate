@@ -1,7 +1,11 @@
 /**
- * `classify_dm_intent` — deterministic classifier for free-text DMs
- * the channel layer must route to Flow 2 v2 (the requester is
- * pre-announcing a package and wants help receiving it).
+ * `classify_dm_intent` — deterministic classifier for free-text DMs.
+ *
+ * v2.1 #110 widens the output schema from a boolean `isFlow2` to a
+ * discriminated `kind` so the channel can route pickup-confirmation
+ * DMs ("Hab abgeholt", "Picked up", "Recibido", "Teslim aldım") in
+ * addition to Flow 2 ("I won't be home") inbounds. Both routes are
+ * channel-deterministic — the agent never runs on the success path.
  *
  * v2.1 Slice 1 (#86): in v2, the conversational agent decided whether
  * an inbound free-text DM should write a reception request,
@@ -96,13 +100,34 @@ const inputSchema = z.object({
 const HHMM_REGEX = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 const modelOutputSchema = z.object({
-  isFlow2: z
-    .boolean()
+  kind: z
+    .enum([
+      "flow2-reception",
+      "pickup-confirmation",
+      "registration",
+      "other",
+    ])
     .describe(
-      "True iff the message is a Flow 2 (pre-announce, 'I won't be home') " +
-        "inbound. False for Flow 1 (group label / package received), Flow " +
-        "3 (search 'where is my package?'), Flow 4 (status request), " +
-        "registration, language switch, or off-topic chat.",
+      "Discriminated intent of the inbound DM. Set EXACTLY one:\n" +
+        "  - 'flow2-reception'      — pre-announce ('I won't be home'); the\n" +
+        "                              channel writes a ReceptionRequest +\n" +
+        "                              posts the neutral group card. Both\n" +
+        "                              absenceSignal AND a supporting field\n" +
+        "                              (carrier/window) should be present at\n" +
+        "                              high confidence.\n" +
+        "  - 'pickup-confirmation'  — the writer is confirming they already\n" +
+        "                              picked up a held package ('Hab\n" +
+        "                              abgeholt', 'Picked up', 'Recibido',\n" +
+        "                              'Teslim aldım'). The channel resolves\n" +
+        "                              which package via the writer's own\n" +
+        "                              held-packages list. Set when the\n" +
+        "                              writer is unambiguously closing\n" +
+        "                              their own pickup. Conservative bias.\n" +
+        "  - 'registration'         — `/register <name>, <street> <number>`\n" +
+        "                              shape or the free-text equivalent.\n" +
+        "  - 'other'                — everything else (chit-chat, Flow 0\n" +
+        "                              without absence, Flow 3 search, Flow\n" +
+        "                              1 group-label, unknown).",
     ),
   absenceSignal: z
     .boolean()
@@ -154,9 +179,17 @@ const modelOutputSchema = z.object({
   confidence: z
     .enum(["high", "medium", "low"])
     .describe(
-      "Routing confidence. `high` ONLY when isFlow2 && absenceSignal " +
-        "&& (carrier OR window present). Anything else is medium or " +
-        "low. The channel posts the card ONLY on `high`.",
+      "Routing confidence. Per-kind rules:\n" +
+        "  - kind 'flow2-reception': `high` ONLY when absenceSignal &&\n" +
+        "    (carrier OR window present). Anything else medium or low.\n" +
+        "  - kind 'pickup-confirmation': `high` ONLY when the writer is\n" +
+        "    unambiguously announcing they took possession ('Hab\n" +
+        "    abgeholt', 'Picked up', 'Recibido', 'Teslim aldım'). A\n" +
+        "    bare 'danke' or unrelated text is NOT a pickup confirmation.\n" +
+        "  - kind 'registration': `high` on `/register …`; lower on\n" +
+        "    free-text registration shapes.\n" +
+        "  - kind 'other': always `low`.\n" +
+        "The channel routes deterministically ONLY on `high`.",
     ),
   reason: z
     .string()
@@ -167,11 +200,26 @@ const modelOutputSchema = z.object({
 });
 
 /**
+ * Discriminator on the classifier's intent verdict. Lifted out of the
+ * `kind` field on `ClassifyDmIntentResult` so call sites can branch
+ * on a named type rather than a string literal.
+ */
+export type DmIntentKind =
+  | "flow2-reception"
+  | "pickup-confirmation"
+  | "registration"
+  | "other";
+
+/**
  * Public return shape. Window endpoints are Unix ms (Europe/Berlin),
  * converted from the model's local clock strings by `execute()`.
+ *
+ * `kind` (v2.1 #110) is the routing discriminator the channel
+ * branches on. Pre-#110 callers consulted the boolean `isFlow2`;
+ * post-#110 the equivalent check is `kind === "flow2-reception"`.
  */
 export interface ClassifyDmIntentResult {
-  readonly isFlow2: boolean;
+  readonly kind: DmIntentKind;
   readonly absenceSignal: boolean;
   readonly carrier?: PackageCarrier;
   readonly expectedDate?: string;
@@ -184,23 +232,62 @@ export interface ClassifyDmIntentResult {
 export const classifierSystemPrompt = [
   "You are a deterministic classifier for a German-speaking",
   "neighbor-coordination bot. A registered resident sends the bot a",
-  "free-text DM. Decide whether the message is a Flow 2 inbound — the",
-  "resident is pre-announcing a package they expect and won't be home",
-  "to receive — and extract whatever supporting fields are present.",
+  "free-text DM. Assign EXACTLY ONE `kind` value:",
   "",
-  "Flow 2 examples (return isFlow2=true):",
+  "  - 'flow2-reception'     — pre-announce 'I won't be home', the writer",
+  "                             wants help receiving a package.",
+  "  - 'pickup-confirmation' — the writer is confirming they already",
+  "                             collected a held package addressed to",
+  "                             them.",
+  "  - 'registration'        — `/register …` or the free-text registration",
+  "                             shape.",
+  "  - 'other'               — chit-chat, Flow 0 pre-announce WITHOUT",
+  "                             absence, Flow 3 search, Flow 1 group label,",
+  "                             status request, unknown.",
+  "",
+  "===== kind: 'flow2-reception' =====",
+  "",
+  "Examples:",
   "  - 'Ich erwarte morgen 14-16 Uhr DHL und bin nicht zu Hause'",
   "  - 'Tomorrow I'll get a Hermes package but I'll be at work'",
   "  - 'Mañana espero un paquete de DHL pero no estaré en casa'",
   "  - 'Yarın bir DHL kargosu bekliyorum ama evde olmayacağım'",
   "  - 'Donnerstag kommt mein Paket, ich bin nicht da'",
   "",
-  "NOT Flow 2 (return isFlow2=false):",
-  "  - 'Wo ist mein Paket?' — Flow 3 search, not a pre-announce",
-  "  - 'Habe ein Paket für Müller angenommen' — Flow 1, group label",
-  "  - 'Ein Paket kommt heute' — pre-announce WITHOUT absence; Flow 0",
-  "  - '/register <name>, <street> <number>' — registration",
-  "  - 'Danke!' / 'Hallo' / 'Wie geht's?' — chit-chat",
+  "NOT 'flow2-reception':",
+  "  - 'Wo ist mein Paket?' — Flow 3 search, not a pre-announce → 'other'",
+  "  - 'Habe ein Paket für Müller angenommen' — Flow 1 group label →",
+  "    'other'",
+  "  - 'Ein Paket kommt heute' — pre-announce WITHOUT absence → 'other'",
+  "  - '/register <name>, <street> <number>' → 'registration'",
+  "  - 'Danke!' / 'Hallo' / 'Wie geht's?' → 'other'",
+  "",
+  "===== kind: 'pickup-confirmation' =====",
+  "",
+  "The writer is closing the loop on a held package addressed to them.",
+  "Canonical phrasings:",
+  "  DE: 'Hab abgeholt', 'Habe das Paket abgeholt', 'Schon abgeholt',",
+  "      'Hab das Paket', 'Ist abgeholt'",
+  "  EN: 'Picked up', 'Got the package', 'Got it', 'Picked it up',",
+  "      'Package picked up'",
+  "  ES: 'Recibido', 'Lo recogí', 'Ya lo tengo', 'Paquete recogido',",
+  "      'Lo he recogido'",
+  "  TR: 'Teslim aldım', 'Paketi aldım', 'Aldım', 'Paket bende'",
+  "",
+  "Confidence rules:",
+  "  - `high`   — unambiguous closing language (one of the canonical",
+  "               phrasings or a clear paraphrase).",
+  "  - `medium` — the writer might be confirming pickup but the language",
+  "               is fuzzy ('ich habe das', 'I have it').",
+  "  - `low`    — uncertain.",
+  "",
+  "NOT 'pickup-confirmation':",
+  "  - 'Wo ist mein Paket?' — Flow 3 search → 'other'",
+  "  - 'Habe ein Paket für Müller angenommen' — Flow 1 (writer is the",
+  "    HOLDER, not the recipient) → 'other'",
+  "  - 'Danke' / 'Thanks' alone — too generic → 'other'",
+  "  - 'Ich nehme das Paket an' — accepting a Flow 2 ask, not pickup →",
+  "    'other'",
   "",
   "Absence-signal phrases to recognise (across languages):",
   "  DE: 'nicht zu Hause', 'nicht da', 'im Büro', 'unterwegs',",
@@ -271,16 +358,20 @@ export const classifierSystemPrompt = [
   "",
   "===== Confidence =====",
   "",
-  "  high   — isFlow2 AND absenceSignal AND (carrier OR window present)",
-  "  medium — isFlow2 AND absenceSignal but no supporting field, OR",
-  "           isFlow2 with absence implicit ('I'll be travelling next",
-  "           week')",
-  "  low    — isFlow2 uncertain (vague phrasing, missing absence),",
-  "           non-Flow-2 inbounds (isFlow2: false → always low)",
+  "  high   — kind: 'flow2-reception' AND absenceSignal AND (carrier OR",
+  "           window present), OR kind: 'pickup-confirmation' AND",
+  "           unambiguous closing language, OR kind: 'registration' with",
+  "           the `/register` prefix.",
+  "  medium — kind: 'flow2-reception' AND absenceSignal but no",
+  "           supporting field, OR kind: 'pickup-confirmation' with",
+  "           fuzzy closing language.",
+  "  low    — kind: 'other' (always), or kind uncertain.",
   "",
-  "Bias toward LOWER confidence when uncertain. A false positive posts",
-  "to the group; a false negative just means the user re-asks via",
-  "/receive.",
+  "Bias toward LOWER confidence when uncertain. A false-positive Flow 2",
+  "posts to the group (privacy leak per PRD §9); a false-positive pickup",
+  "closes the wrong package (canonical state corruption). False negatives",
+  "are cheap — the writer just re-asks via /receive or taps the group",
+  "[Abgeholt] button.",
 ].join("\n");
 
 interface ClassifierArgs {
@@ -359,7 +450,7 @@ export function toPublicResult(
   model: z.infer<typeof modelOutputSchema>,
 ): ClassifyDmIntentResult {
   const result: {
-    isFlow2: boolean;
+    kind: DmIntentKind;
     absenceSignal: boolean;
     carrier?: PackageCarrier;
     expectedDate?: string;
@@ -368,7 +459,7 @@ export function toPublicResult(
     confidence: "high" | "medium" | "low";
     reason: string;
   } = {
-    isFlow2: model.isFlow2,
+    kind: model.kind,
     absenceSignal: model.absenceSignal,
     confidence: model.confidence,
     reason: model.reason,
@@ -414,16 +505,18 @@ function parseHhmm(hhmm: string): [number, number] {
 
 export default defineTool({
   description:
-    "Classify a free-text DM as Flow 2 (pre-announce 'I won't be home') " +
-    "or not, extracting carrier / date / window when present. Tries " +
-    "Gemini 2.5 Flash first, falls back to Claude Sonnet 4.6 if the " +
-    "primary errors. Returns `{ isFlow2, absenceSignal, carrier?, " +
+    "Classify a free-text DM by intent kind ('flow2-reception', " +
+    "'pickup-confirmation', 'registration', 'other'), extracting " +
+    "Flow-2 supporting fields (carrier / date / window) when present. " +
+    "Tries Gemini 2.5 Flash first, falls back to Claude Sonnet 4.6 if " +
+    "the primary errors. Returns `{ kind, absenceSignal, carrier?, " +
     "expectedDate?, expectedWindowStartAt?, expectedWindowEndAt?, " +
     "confidence, reason }` (window endpoints in Europe/Berlin Unix " +
     "ms, converted in-tool from the model's local clock strings). " +
-    "The channel routes the card-posting decision off `confidence === " +
-    "'high'` — biased conservatively so false positives " +
-    "(privacy-violating group posts) stay rare.",
+    "The channel routes deterministically off `confidence === 'high'` " +
+    "and the `kind` discriminator — biased conservatively so false " +
+    "positives (privacy-violating group posts, wrong-package pickup " +
+    "closure) stay rare.",
   inputSchema,
   async execute({ text, languageHint }) {
     const args: ClassifierArgs = { text, languageHint };

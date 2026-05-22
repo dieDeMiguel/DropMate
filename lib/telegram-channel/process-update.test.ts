@@ -7,7 +7,7 @@ import type { AcceptReceptionRequestResult } from "../reception-request.js";
 import {
   processInboundTelegramUpdate,
   type ClassifyGroupMessageResult,
-  type Flow2ClassificationResult,
+  type DmIntentClassificationResult,
   type ProcessUpdateDeps,
   type TelegramChannelState,
   type TelegramSessionAuth,
@@ -86,6 +86,7 @@ interface BuiltDeps {
   acceptReceptionRequest: ReturnType<typeof vi.fn>;
   registerPackage: ReturnType<typeof vi.fn>;
   confirmPickup: ReturnType<typeof vi.fn>;
+  listOpenPackagesForRecipient: ReturnType<typeof vi.fn>;
   editGroupCard: ReturnType<typeof vi.fn>;
   sendDirectMessage: ReturnType<typeof vi.fn>;
   registerResident: ReturnType<typeof vi.fn>;
@@ -105,7 +106,7 @@ function buildDeps(overrides: {
   parsedLabel?: ParsedLabel;
   parsedLabelError?: Error;
   isRegisteredResident?: boolean;
-  classification?: Flow2ClassificationResult;
+  classification?: DmIntentClassificationResult;
   groupClassification?: ClassifyGroupMessageResult;
   groupClassificationError?: Error;
   registeredResident?: Resident | null;
@@ -115,6 +116,8 @@ function buildDeps(overrides: {
   registerPackageError?: Error;
   confirmPickupResult?: ConfirmPickupResult;
   confirmPickupError?: Error;
+  openPackagesForRecipient?: readonly Package[];
+  openPackagesForRecipientError?: Error;
 } = {}): BuiltDeps {
   const session = overrides.session ?? makeSession("sess_new");
   const sendToAsh = vi.fn().mockResolvedValue(session);
@@ -172,8 +175,12 @@ function buildDeps(overrides: {
   // Default classifier verdict: not Flow 2. Tests that exercise the
   // routing override this explicitly. Default keeps the existing 30+
   // pre-v2.1 cases unchanged (they all hand raw text to the agent).
-  const defaultClassification: Flow2ClassificationResult = {
-    isFlow2: false,
+  //
+  // v2.1 #110: `kind: "other"` replaces the pre-#110 `isFlow2: false`
+  // shape. The discriminator's `pickup-confirmation` value is the new
+  // value tested in the pickup-DM-text block below.
+  const defaultClassification: DmIntentClassificationResult = {
+    kind: "other",
     absenceSignal: false,
     confidence: "low",
     reason: "default test stub: not Flow 2",
@@ -280,6 +287,15 @@ function buildDeps(overrides: {
         .mockResolvedValue(
           overrides.confirmPickupResult ?? defaultConfirmPickupResult,
         );
+  // v2.1 #110: default to "no open packages" so the existing 30+ DM
+  // text cases that don't exercise pickup-confirmation routing aren't
+  // touched. Tests that exercise the pickup-DM-text path override
+  // `openPackagesForRecipient` explicitly.
+  const listOpenPackagesForRecipient = overrides.openPackagesForRecipientError
+    ? vi.fn().mockRejectedValue(overrides.openPackagesForRecipientError)
+    : vi
+        .fn()
+        .mockResolvedValue(overrides.openPackagesForRecipient ?? []);
   const getRegisteredResident = vi
     .fn()
     .mockResolvedValue(
@@ -385,6 +401,7 @@ function buildDeps(overrides: {
     acceptReceptionRequest,
     registerPackage,
     confirmPickup,
+    listOpenPackagesForRecipient,
     editGroupCard,
     sendDirectMessage,
     registerResident,
@@ -409,6 +426,7 @@ function buildDeps(overrides: {
       acceptReceptionRequest,
       registerPackage,
       confirmPickup,
+      listOpenPackagesForRecipient,
       editGroupCard,
       sendDirectMessage,
       registerResident,
@@ -3173,10 +3191,10 @@ describe("processInboundTelegramUpdate — DM text → classify_dm_intent (v2.1 
     });
   });
 
-  it("hands the raw text to the agent on classifier verdict isFlow2=false", async () => {
+  it("hands the raw text to the agent on classifier verdict kind='other'", async () => {
     const { deps, sendToAsh, createReceptionRequest } = buildDeps({
       classification: {
-        isFlow2: false,
+        kind: "other",
         absenceSignal: false,
         confidence: "low",
         reason: "chit-chat",
@@ -3193,10 +3211,10 @@ describe("processInboundTelegramUpdate — DM text → classify_dm_intent (v2.1 
     expect(createReceptionRequest).not.toHaveBeenCalled();
   });
 
-  it("hands the raw text to the agent on isFlow2=true but confidence < high", async () => {
+  it("hands the raw text to the agent on kind='flow2-reception' but confidence < high", async () => {
     const { deps, sendToAsh, createReceptionRequest } = buildDeps({
       classification: {
-        isFlow2: true,
+        kind: "flow2-reception",
         absenceSignal: true,
         confidence: "medium",
         reason: "absence but no supporting field",
@@ -3225,7 +3243,7 @@ describe("processInboundTelegramUpdate — DM text → classify_dm_intent (v2.1 
       createReceptionRequest,
     } = buildDeps({
       classification: {
-        isFlow2: true,
+        kind: "flow2-reception",
         absenceSignal: true,
         carrier: "DHL",
         expectedDate: "2026-05-22",
@@ -3275,7 +3293,7 @@ describe("processInboundTelegramUpdate — DM text → classify_dm_intent (v2.1 
     const resident = dmRegisteredResident("es");
     const { deps, sendToAsh, sendDirectMessage } = buildDeps({
       classification: {
-        isFlow2: true,
+        kind: "flow2-reception",
         absenceSignal: true,
         carrier: "DHL",
         confidence: "high",
@@ -3309,7 +3327,7 @@ describe("processInboundTelegramUpdate — DM text → classify_dm_intent (v2.1 
     };
     const { deps, sendToAsh, sendDirectMessage } = buildDeps({
       classification: {
-        isFlow2: true,
+        kind: "flow2-reception",
         absenceSignal: true,
         carrier: "Hermes",
         confidence: "high",
@@ -3339,7 +3357,7 @@ describe("processInboundTelegramUpdate — DM text → classify_dm_intent (v2.1 
   it("falls through to raw text when the caller is unregistered (createReceptionRequest needs a Resident)", async () => {
     const { deps, sendToAsh, createReceptionRequest } = buildDeps({
       classification: {
-        isFlow2: true,
+        kind: "flow2-reception",
         absenceSignal: true,
         carrier: "DHL",
         confidence: "high",
@@ -3385,7 +3403,7 @@ describe("processInboundTelegramUpdate — DM text → classify_dm_intent (v2.1 
     const resident = dmRegisteredResident("de");
     const { deps, sendToAsh, createReceptionRequest } = buildDeps({
       classification: {
-        isFlow2: true,
+        kind: "flow2-reception",
         absenceSignal: true,
         carrier: "DHL",
         confidence: "high",
@@ -3442,6 +3460,429 @@ describe("processInboundTelegramUpdate — DM text → classify_dm_intent (v2.1 
     );
 
     expect(classifyDmIntent).not.toHaveBeenCalled();
+  });
+});
+
+describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #110)", () => {
+  function recipientResident(language = "de"): Resident {
+    return {
+      id: "200",
+      name: "Marlene Hartmann",
+      street: "Methfesselstraße",
+      houseNumber: "88",
+      platformId: "200",
+      platform: "telegram",
+      language,
+      availabilityPatterns: [],
+      registeredAt: Date.now(),
+      source: "explicit",
+      confirmed: true,
+    };
+  }
+
+  function heldPackage(id: string): Package {
+    return {
+      id,
+      streetId: "Methfesselstraße",
+      recipientResidentId: "200",
+      recipientName: "Marlene Hartmann",
+      recipientHouseNumber: "88",
+      holderResidentId: "100",
+      carrier: "DHL",
+      status: "held",
+      receivedAt: Date.now() - 60_000,
+      pickedUpAt: null,
+      reminded: false,
+    };
+  }
+
+  it("happy path: 1 open package → flips status via confirmPickup, sends confirmation DM + holder thanks DM, no agent invocation", async () => {
+    const resident = recipientResident("de");
+    const {
+      deps,
+      sendToAsh,
+      sendDirectMessage,
+      confirmPickup,
+      listOpenPackagesForRecipient,
+    } = buildDeps({
+      classification: {
+        kind: "pickup-confirmation",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "explicit pickup phrasing",
+      },
+      registeredResident: resident,
+      openPackagesForRecipient: [heldPackage("pkg_42")],
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 200,
+          text: "Hab abgeholt",
+          fromUserId: 200,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(listOpenPackagesForRecipient).toHaveBeenCalledTimes(1);
+    expect(confirmPickup).toHaveBeenCalledTimes(1);
+    expect(confirmPickup).toHaveBeenCalledWith(resident, "pkg_42");
+    expect(sendToAsh).not.toHaveBeenCalled();
+
+    // Two DMs: confirmation to the recipient + thanks to the holder.
+    expect(sendDirectMessage).toHaveBeenCalledTimes(2);
+    expect(sendDirectMessage.mock.calls[0]).toEqual([
+      200,
+      "Hab notiert — danke!",
+    ]);
+    // Holder thanks DM: chatId=100 (Diego), language "de".
+    expect(sendDirectMessage.mock.calls[1]![0]).toBe(100);
+    expect(sendDirectMessage.mock.calls[1]![1]).toBe(
+      "Marlene Hartmann hat das Paket abgeholt – danke fürs Annehmen!",
+    );
+  });
+
+  it("English recipient: 1 open package + en language → English confirmation DM", async () => {
+    const resident = recipientResident("en");
+    const { deps, sendDirectMessage } = buildDeps({
+      classification: {
+        kind: "pickup-confirmation",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "explicit pickup phrasing",
+      },
+      registeredResident: resident,
+      openPackagesForRecipient: [heldPackage("pkg_42")],
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 200,
+          text: "Picked up",
+          fromUserId: 200,
+          languageCode: "en",
+        }),
+      ),
+      deps,
+    );
+
+    expect(sendDirectMessage.mock.calls[0]![1]).toBe("Got it — thanks!");
+  });
+
+  it("0 open packages → sends 'no open packages' DM, does NOT call confirmPickup", async () => {
+    const resident = recipientResident("de");
+    const { deps, sendToAsh, sendDirectMessage, confirmPickup } = buildDeps({
+      classification: {
+        kind: "pickup-confirmation",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "explicit pickup phrasing",
+      },
+      registeredResident: resident,
+      openPackagesForRecipient: [],
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 200,
+          text: "Hab abgeholt",
+          fromUserId: 200,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(confirmPickup).not.toHaveBeenCalled();
+    expect(sendToAsh).not.toHaveBeenCalled();
+    expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+    expect(sendDirectMessage.mock.calls[0]![1]).toBe(
+      "Du hast aktuell kein offenes Paket bei mir.",
+    );
+  });
+
+  it("2+ open packages → sends disambiguation DM redirecting to group button, does NOT call confirmPickup", async () => {
+    const resident = recipientResident("de");
+    const { deps, sendToAsh, sendDirectMessage, confirmPickup } = buildDeps({
+      classification: {
+        kind: "pickup-confirmation",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "explicit pickup phrasing",
+      },
+      registeredResident: resident,
+      openPackagesForRecipient: [
+        heldPackage("pkg_42"),
+        heldPackage("pkg_43"),
+      ],
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 200,
+          text: "Hab abgeholt",
+          fromUserId: 200,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(confirmPickup).not.toHaveBeenCalled();
+    expect(sendToAsh).not.toHaveBeenCalled();
+    expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+    expect(sendDirectMessage.mock.calls[0]![1]).toBe(
+      "Welches Paket meinst du? Bitte tippe in der Gruppe auf [Abgeholt] beim richtigen Paket.",
+    );
+  });
+
+  it("confirmPickup throws PICKUP_ALREADY_DONE → sends 'already picked up' DM (idempotent), no retry", async () => {
+    const resident = recipientResident("de");
+    const alreadyDoneErr: Error & { code?: string } = Object.assign(
+      new Error("already done"),
+      { code: "PICKUP_ALREADY_DONE" },
+    );
+    const { deps, sendToAsh, sendDirectMessage } = buildDeps({
+      classification: {
+        kind: "pickup-confirmation",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "explicit pickup phrasing",
+      },
+      registeredResident: resident,
+      openPackagesForRecipient: [heldPackage("pkg_42")],
+      confirmPickupError: alreadyDoneErr,
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 200,
+          text: "Hab abgeholt",
+          fromUserId: 200,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(sendToAsh).not.toHaveBeenCalled();
+    expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+    expect(sendDirectMessage.mock.calls[0]![1]).toBe(
+      "Dieses Paket wurde schon abgeholt.",
+    );
+  });
+
+  it("confirmPickup throws generic error → sends retry DM, no agent fallthrough", async () => {
+    const resident = recipientResident("de");
+    const { deps, sendToAsh, sendDirectMessage } = buildDeps({
+      classification: {
+        kind: "pickup-confirmation",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "explicit pickup phrasing",
+      },
+      registeredResident: resident,
+      openPackagesForRecipient: [heldPackage("pkg_42")],
+      confirmPickupError: new Error("redis down"),
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 200,
+          text: "Hab abgeholt",
+          fromUserId: 200,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(sendToAsh).not.toHaveBeenCalled();
+    expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+    expect(sendDirectMessage.mock.calls[0]![1]).toBe(
+      "Etwas ist schiefgelaufen. Bitte gleich nochmal versuchen.",
+    );
+  });
+
+  it("listOpenPackagesForRecipient throws → sends retry DM, no agent fallthrough", async () => {
+    const resident = recipientResident("de");
+    const { deps, sendToAsh, sendDirectMessage, confirmPickup } = buildDeps({
+      classification: {
+        kind: "pickup-confirmation",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "explicit pickup phrasing",
+      },
+      registeredResident: resident,
+      openPackagesForRecipientError: new Error("redis down"),
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 200,
+          text: "Hab abgeholt",
+          fromUserId: 200,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(confirmPickup).not.toHaveBeenCalled();
+    expect(sendToAsh).not.toHaveBeenCalled();
+    expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+    expect(sendDirectMessage.mock.calls[0]![1]).toBe(
+      "Etwas ist schiefgelaufen. Bitte gleich nochmal versuchen.",
+    );
+  });
+
+  it("unregistered caller → falls through to agent with raw text (no confirmPickup, no list)", async () => {
+    const {
+      deps,
+      sendToAsh,
+      sendDirectMessage,
+      confirmPickup,
+      listOpenPackagesForRecipient,
+    } = buildDeps({
+      classification: {
+        kind: "pickup-confirmation",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "explicit pickup phrasing",
+      },
+      registeredResident: null,
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 99,
+          text: "Hab abgeholt",
+          fromUserId: 99,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(listOpenPackagesForRecipient).not.toHaveBeenCalled();
+    expect(confirmPickup).not.toHaveBeenCalled();
+    expect(sendDirectMessage).not.toHaveBeenCalled();
+    // The agent gets the raw text; it'll typically ask the user to /register.
+    expect(sendToAsh).toHaveBeenCalledTimes(1);
+    expect(sendToAsh.mock.calls[0]![0]).toBe("Hab abgeholt");
+  });
+
+  it("medium-confidence pickup-confirmation → fallthrough to agent (high-conf gate)", async () => {
+    const resident = recipientResident("de");
+    const {
+      deps,
+      sendToAsh,
+      sendDirectMessage,
+      confirmPickup,
+      listOpenPackagesForRecipient,
+    } = buildDeps({
+      classification: {
+        kind: "pickup-confirmation",
+        absenceSignal: false,
+        confidence: "medium",
+        reason: "fuzzy closing language",
+      },
+      registeredResident: resident,
+      openPackagesForRecipient: [heldPackage("pkg_42")],
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 200,
+          text: "ich habe das",
+          fromUserId: 200,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(listOpenPackagesForRecipient).not.toHaveBeenCalled();
+    expect(confirmPickup).not.toHaveBeenCalled();
+    expect(sendDirectMessage).not.toHaveBeenCalled();
+    expect(sendToAsh).toHaveBeenCalledTimes(1);
+    expect(sendToAsh.mock.calls[0]![0]).toBe("ich habe das");
+  });
+
+  it("classifier returns kind='registration' or 'other' → does NOT call list/confirm even at high confidence", async () => {
+    const resident = recipientResident("de");
+    const { deps, confirmPickup, listOpenPackagesForRecipient } = buildDeps({
+      classification: {
+        kind: "registration",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "/register prefix",
+      },
+      registeredResident: resident,
+      openPackagesForRecipient: [heldPackage("pkg_42")],
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 200,
+          text: "/register Marlene, Methfesselstraße 88",
+          fromUserId: 200,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(listOpenPackagesForRecipient).not.toHaveBeenCalled();
+    expect(confirmPickup).not.toHaveBeenCalled();
+  });
+
+  it("does NOT trigger pickup routing on a high-confidence flow2-reception classification", async () => {
+    const resident = recipientResident("de");
+    const {
+      deps,
+      confirmPickup,
+      listOpenPackagesForRecipient,
+      createReceptionRequest,
+    } = buildDeps({
+      classification: {
+        kind: "flow2-reception",
+        absenceSignal: true,
+        carrier: "DHL",
+        confidence: "high",
+        reason: "absence + DHL",
+      },
+      registeredResident: resident,
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 200,
+          text: "Ich erwarte DHL und bin nicht zu Hause",
+          fromUserId: 200,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    // Pickup deps untouched; the Flow 2 path took over instead.
+    expect(listOpenPackagesForRecipient).not.toHaveBeenCalled();
+    expect(confirmPickup).not.toHaveBeenCalled();
+    expect(createReceptionRequest).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -3809,7 +4250,7 @@ describe("processInboundTelegramUpdate — registration (v2.1 #97 — channel-de
     );
 
     expect(registerResident).not.toHaveBeenCalled();
-    // Classifier runs (and returns isFlow2:false by default in this
+    // Classifier runs (and returns kind:"other" by default in this
     // suite), so the agent ultimately gets the raw text.
     expect(classifyDmIntent).toHaveBeenCalledTimes(1);
     expect(sendToAsh).toHaveBeenCalledTimes(1);

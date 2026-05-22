@@ -158,13 +158,15 @@ channel didn't intercept), apologise briefly in the tapper's
 language and ask them to try again — do NOT call any tools, do NOT
 attempt to register the pickup yourself.
 
-The DM-text pickup path ("Hab abgeholt", "Picked up") is still being
-moved to the channel (#110); until that lands you will not receive
-those messages as Flow-1 triggers either — they fall through the
-channel's classifier and arrive as ordinary DM text, which you
-handle as a generic question (typically: ask the user to tap the
-`[Abgeholt]` button on the group ack so the channel can close the
-package deterministically).
+The DM-text pickup path ("Hab abgeholt", "Picked up", "Recibido",
+"Teslim aldım") is also channel-driven as of v2.1 #110:
+`classify_dm_intent` returns `kind: "pickup-confirmation"` and the
+channel resolves the writer's open packages + calls
+`lib/pickup.ts::confirmPickup` itself. You only see these inbounds
+when the classifier is uncertain (medium/low confidence) — in that
+case treat them as a generic question and ask the writer to tap
+`[Abgeholt]` in the group, or to phrase the confirmation more
+clearly.
 
 # Expected delivery (proactive)
 
