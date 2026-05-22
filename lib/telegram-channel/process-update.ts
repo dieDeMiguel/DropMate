@@ -419,7 +419,65 @@ export interface ProcessUpdateDeps {
   readonly registerResident: (
     input: RegisterResidentInput,
   ) => Promise<RegisterResidentResult>;
+  /**
+   * v2.1 #99: attribute the inbound shape onto the active OpenTelemetry
+   * span so Vercel's Agent Runs dashboard can populate the Trigger
+   * column on every Telegram-driven `ash.turn`. Called BEFORE
+   * `sendToAsh` at every call site the channel still hands to the
+   * agent (text DMs, group messages, photos, `/receive` fallthrough,
+   * `confirm_pickup` callbacks). The volunteer-accept callback path
+   * does NOT call `sendToAsh` after #89/#96 — so it does NOT need
+   * attribution either.
+   *
+   * Optional — when omitted, the orchestrator skips attribution silently
+   * so tests can opt in by passing a spy and the spike webhook can run
+   * without pulling in OpenTelemetry. The factory wires a real impl
+   * via `setTelegramTriggerAttribute` from `trigger-attribute.ts`
+   * which uses `trace.getActiveSpan()?.setAttribute("trigger", …)` when
+   * `@opentelemetry/api` is loadable; if not, a no-op shim.
+   *
+   * Layered on top of the framework-canonical `kindHint: "telegram"`
+   * (set on the channel definition itself) so the dashboard's channel
+   * chip reads `telegram` while downstream filters can still tell
+   * text DMs apart from button taps and photo uploads.
+   */
+  readonly setTriggerAttribute?: (trigger: TelegramTriggerKind) => void;
 }
+
+/**
+ * The post-routing inbound shapes the channel distinguishes for the
+ * Trigger column on Vercel's Agent Runs view. Values describe what the
+ * channel handed to the agent — not the raw Telegram payload — because
+ * v2.1's channel-deterministic routes intercept many inbounds (Flow 2
+ * entries, registration, volunteer-accept) before they reach the agent.
+ * Only the surfaces that still call `sendToAsh` get attribution.
+ *
+ *   - `telegram.text-dm`               — free-text DM that fell through
+ *                                        the Slice 1 classifier (caller
+ *                                        unregistered, classifier outage,
+ *                                        or non-Flow-2 verdict).
+ *   - `telegram.group`                 — group text (no Flow 2 in groups).
+ *   - `telegram.photo`                 — any photo turn that reaches the
+ *                                        agent: group photos (Flow 1 /
+ *                                        `parse_label`) and DM photo
+ *                                        recovery fallthrough.
+ *   - `telegram.slash-receive`         — `/receive` slash command that
+ *                                        fell through to the agent
+ *                                        (typically unregistered caller).
+ *   - `telegram.callback-confirm-pickup` — confirm_pickup button tap.
+ *   - `telegram.callback`              — other callback actions that
+ *                                        still reach the agent (stale
+ *                                        `accept_reception_request`,
+ *                                        `decline_reception_request`,
+ *                                        `remind_later`, unknown).
+ */
+export type TelegramTriggerKind =
+  | "telegram.text-dm"
+  | "telegram.group"
+  | "telegram.photo"
+  | "telegram.slash-receive"
+  | "telegram.callback-confirm-pickup"
+  | "telegram.callback";
 
 /**
  * v2.1 #100: Flow 2 entry routes return this discriminated union so the
@@ -658,6 +716,19 @@ async function handleCallbackQuery(
       ? { languageCode: cb.fromLanguageCode }
       : {},
   };
+
+  // v2.1 #99: attribute the post-routing inbound shape onto the active
+  // OTel span so Agent Runs shows what fired this turn. `confirm_pickup`
+  // is the only callback the channel still hands to the agent on the
+  // happy path; the rest (legacy `accept_reception_request`,
+  // `decline_reception_request`, `remind_later`, unknown actions) get
+  // the generic `telegram.callback` bucket so we can still distinguish
+  // them from text/photo/slash triggers in dashboard filters.
+  const callbackTrigger: TelegramTriggerKind =
+    parsed.action === "confirm_pickup"
+      ? "telegram.callback-confirm-pickup"
+      : "telegram.callback";
+  deps.setTriggerAttribute?.(callbackTrigger);
 
   const session = await deps.sendToAsh(syntheticMessage, {
     auth,
@@ -1658,27 +1729,47 @@ export async function processInboundTelegramUpdate(
   // Group photos still go through the agent (Flow 1) and group text
   // messages also go through the agent (no Flow 2 in groups).
   let message: string;
+  let trigger: TelegramTriggerKind;
   if (inbound.photoFileId !== null && !inbound.isGroup) {
     // DM photo path — fully channel-deterministic per #100.
     const result = await routeDmPhoto(inbound, inbound.photoFileId, deps);
     if (result.kind === "handled") return new Response(null, { status: 204 });
     message = result.toAgent;
+    trigger = "telegram.photo";
   } else if (inbound.photoFileId !== null) {
     // Group photo path — Flow 1 / parse_label.
     message = await buildSyntheticGroupPhotoMessage(inbound, deps);
+    trigger = "telegram.photo";
   } else if (!inbound.isGroup && inbound.fromUserId !== null) {
     // `/receive` is the explicit, classifier-bypassing entry point for
     // Flow 2 v2 (#87). It must run BEFORE `classify_dm_intent` because
     // the user invoking the slash is already a high-confidence signal
     // — there's no reason to ask Gemini Flash to second-guess them.
-    const result = isReceiveCommand(inbound.text)
+    const usedReceiveCommand = isReceiveCommand(inbound.text);
+    const result = usedReceiveCommand
       ? await routeReceiveCommand(inbound, deps)
       : await routeDmTextThroughClassifier(inbound, deps);
     if (result.kind === "handled") return new Response(null, { status: 204 });
     message = result.toAgent;
-  } else {
+    trigger = usedReceiveCommand ? "telegram.slash-receive" : "telegram.text-dm";
+  } else if (inbound.isGroup) {
     message = inbound.text;
+    trigger = "telegram.group";
+  } else {
+    // Anonymous DM (no `from` on the payload). Rare — Telegram normally
+    // attaches a `from` on every message. Bucket with text-dm so the
+    // dashboard's Trigger column still populates rather than reading
+    // `—`.
+    message = inbound.text;
+    trigger = "telegram.text-dm";
   }
+
+  // v2.1 #99: attribute the post-routing inbound shape onto the active
+  // OTel span so Agent Runs shows what fired this turn. The Trigger
+  // column populates whenever the channel hands a message to the
+  // agent — channel-deterministic paths (Flow 2 entries, registration,
+  // volunteer-accept) return earlier and never reach this line.
+  deps.setTriggerAttribute?.(trigger);
 
   const session = await deps.sendToAsh(message, {
     auth,

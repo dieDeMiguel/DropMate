@@ -80,6 +80,7 @@ interface BuiltDeps {
   editGroupCard: ReturnType<typeof vi.fn>;
   sendDirectMessage: ReturnType<typeof vi.fn>;
   registerResident: ReturnType<typeof vi.fn>;
+  setTriggerAttribute: ReturnType<typeof vi.fn>;
 }
 
 type ParsedLabel = NonNullable<
@@ -254,6 +255,7 @@ function buildDeps(overrides: {
   const registerResident = vi
     .fn()
     .mockResolvedValue(overrides.registerResult ?? defaultRegisterResult);
+  const setTriggerAttribute = vi.fn();
   return {
     sendToAsh,
     waitUntil,
@@ -273,6 +275,7 @@ function buildDeps(overrides: {
     editGroupCard,
     sendDirectMessage,
     registerResident,
+    setTriggerAttribute,
     deps: {
       expectedSecret:
         "expectedSecret" in overrides ? overrides.expectedSecret : SECRET,
@@ -294,6 +297,7 @@ function buildDeps(overrides: {
       editGroupCard,
       sendDirectMessage,
       registerResident,
+      setTriggerAttribute,
     },
   };
 }
@@ -3553,5 +3557,266 @@ describe("processInboundTelegramUpdate — registration (v2.1 #97 — channel-de
     expect(await runFor("en")).toContain("Please write");
     expect(await runFor("es")).toContain("Por favor escribe");
     expect(await runFor("tr")).toContain("Lütfen şöyle yaz");
+  });
+});
+
+describe("processInboundTelegramUpdate — setTriggerAttribute (v2.1 #99)", () => {
+  // The channel sets the inbound shape on the active OTel span BEFORE
+  // every `sendToAsh` call so Vercel's Agent Runs view can populate the
+  // Trigger column. The dep is optional (so existing tests / the spike
+  // can opt out by omitting it); when supplied the factory wires a real
+  // implementation that delegates to `setTelegramTriggerAttribute`.
+  //
+  // The values describe what the channel handed to the agent — not the
+  // raw inbound shape — because v2.1's channel-deterministic routes
+  // intercept many Flow 2 / registration / volunteer-accept inbounds
+  // before they reach the agent. Only surfaces that still call
+  // `sendToAsh` get attribution.
+
+  it("free-text DM (classifier fallthrough) → telegram.text-dm", async () => {
+    const { deps, sendToAsh, setTriggerAttribute } = buildDeps();
+
+    await processInboundTelegramUpdate(
+      makeRequest(dmUpdate({ chatId: 1, text: "Hallo", fromUserId: 99 })),
+      deps,
+    );
+
+    expect(sendToAsh).toHaveBeenCalledTimes(1);
+    expect(setTriggerAttribute).toHaveBeenCalledWith("telegram.text-dm");
+    // Attribute set BEFORE the agent runs so it lands on the active
+    // span before Ash opens its `ash.turn` child.
+    expect(setTriggerAttribute.mock.invocationCallOrder[0]!).toBeLessThan(
+      sendToAsh.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("group text message → telegram.group", async () => {
+    const { deps, sendToAsh, setTriggerAttribute } = buildDeps();
+
+    const groupUpdate = {
+      update_id: 1,
+      message: {
+        message_id: 1,
+        date: 1,
+        text: "Hallo Gruppe",
+        chat: { id: -100, type: "supergroup" },
+        from: { id: 99, is_bot: false, first_name: "T", language_code: "de" },
+      },
+    };
+
+    await processInboundTelegramUpdate(makeRequest(groupUpdate), deps);
+
+    expect(sendToAsh).toHaveBeenCalledTimes(1);
+    expect(setTriggerAttribute).toHaveBeenCalledWith("telegram.group");
+  });
+
+  it("group photo (Flow 1 / parse_label) → telegram.photo", async () => {
+    const { deps, sendToAsh, setTriggerAttribute } = buildDeps();
+
+    const photoUpdate = {
+      update_id: 1,
+      message: {
+        message_id: 1,
+        date: 1,
+        chat: { id: -100, type: "supergroup" },
+        from: { id: 99, is_bot: false, first_name: "T" },
+        photo: [
+          { file_id: "small", file_size: 100, width: 90, height: 90 },
+          { file_id: "large", file_size: 5000, width: 1280, height: 1280 },
+        ],
+      },
+    };
+
+    await processInboundTelegramUpdate(makeRequest(photoUpdate), deps);
+
+    expect(sendToAsh).toHaveBeenCalledTimes(1);
+    expect(setTriggerAttribute).toHaveBeenCalledWith("telegram.photo");
+  });
+
+  it("DM photo recovery fallthrough (low-confidence parse handled by channel) → handled, no agent invocation", async () => {
+    // DM photo low-confidence is handled by the channel deterministically
+    // per #100 — `sendToAsh` is NEVER called, so the trigger attribute
+    // is NEVER set. Regression: ensures channel-deterministic paths
+    // don't pollute the dashboard with phantom Trigger entries on rows
+    // that have no turns.
+    const { deps, sendToAsh, setTriggerAttribute } = buildDeps({
+      parsedTrackingPage: {
+        carrier: "DHL",
+        confidence: "low",
+        reason: "blurry receipt",
+      },
+      registeredResident: {
+        id: "99",
+        name: "Diego",
+        street: "Lutterothstrasse",
+        houseNumber: "69",
+        platformId: "99",
+        platform: "telegram",
+        language: "de",
+        availabilityPatterns: [],
+        registeredAt: 1716000000000,
+        source: "explicit",
+        confirmed: true,
+      },
+    });
+
+    const dmPhoto = {
+      update_id: 1,
+      message: {
+        message_id: 1,
+        date: 1,
+        chat: { id: 1, type: "private" },
+        from: { id: 99, is_bot: false, first_name: "T", language_code: "de" },
+        photo: [{ file_id: "f", file_size: 100, width: 90, height: 90 }],
+      },
+    };
+
+    await processInboundTelegramUpdate(makeRequest(dmPhoto), deps);
+
+    expect(sendToAsh).not.toHaveBeenCalled();
+    expect(setTriggerAttribute).not.toHaveBeenCalled();
+  });
+
+  it("/receive slash fallthrough (unregistered caller) → telegram.slash-receive", async () => {
+    // Unregistered caller on /receive → channel falls through to the
+    // agent so the Onboarding stanza can ask them to /register first.
+    // Trigger attribute should describe what the channel handed off.
+    const { deps, sendToAsh, setTriggerAttribute } = buildDeps({
+      registeredResident: null,
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 1,
+          text: "/receive DHL morgen 14-16",
+          fromUserId: 99,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(sendToAsh).toHaveBeenCalledTimes(1);
+    expect(setTriggerAttribute).toHaveBeenCalledWith("telegram.slash-receive");
+  });
+
+  it("callback_query confirm_pickup → telegram.callback-confirm-pickup", async () => {
+    const { deps, sendToAsh, setTriggerAttribute } = buildDeps({
+      packageRecipientId: "99",
+    });
+
+    const cbUpdate = {
+      update_id: 1,
+      callback_query: {
+        id: "cb1",
+        from: { id: 99, is_bot: false, first_name: "T" },
+        message: {
+          message_id: 5,
+          chat: { id: -100, type: "supergroup" },
+        },
+        chat_instance: "chat-instance-1",
+        data: "confirm_pickup:pkg_42",
+      },
+    };
+
+    await processInboundTelegramUpdate(makeRequest(cbUpdate), deps);
+
+    expect(sendToAsh).toHaveBeenCalledTimes(1);
+    expect(setTriggerAttribute).toHaveBeenCalledWith(
+      "telegram.callback-confirm-pickup",
+    );
+  });
+
+  it("callback_query non-confirm-pickup actions → telegram.callback (generic bucket)", async () => {
+    const { deps, sendToAsh, setTriggerAttribute } = buildDeps();
+
+    const cbUpdate = {
+      update_id: 1,
+      callback_query: {
+        id: "cb1",
+        from: { id: 99, is_bot: false, first_name: "T" },
+        message: {
+          message_id: 5,
+          chat: { id: 1, type: "private" },
+        },
+        chat_instance: "chat-instance-1",
+        data: "remind_later:pkg_42",
+      },
+    };
+
+    await processInboundTelegramUpdate(makeRequest(cbUpdate), deps);
+
+    expect(sendToAsh).toHaveBeenCalledTimes(1);
+    expect(setTriggerAttribute).toHaveBeenCalledWith("telegram.callback");
+  });
+
+  it("volunteer-accept tap (channel-deterministic per #89/#96) → no attribute, no sendToAsh", async () => {
+    // The accept_reception_group callback runs its own deterministic
+    // flow (lib write + edit card + send 2 DMs) and NEVER calls
+    // `sendToAsh`. Therefore it must also never call
+    // `setTriggerAttribute` — there's no `ash.turn` row for it.
+    const { deps, sendToAsh, setTriggerAttribute } = buildDeps({
+      isRegisteredResident: true,
+    });
+
+    const cbUpdate = {
+      update_id: 1,
+      callback_query: {
+        id: "cb1",
+        from: { id: 300, is_bot: false, first_name: "Marlene", language_code: "de" },
+        message: {
+          message_id: 555,
+          chat: { id: -100123, type: "supergroup" },
+        },
+        chat_instance: "chat-instance-1",
+        data: "accept_reception_group:req_42",
+      },
+    };
+
+    await processInboundTelegramUpdate(makeRequest(cbUpdate), deps);
+
+    expect(sendToAsh).not.toHaveBeenCalled();
+    expect(setTriggerAttribute).not.toHaveBeenCalled();
+  });
+
+  it("registration DM (channel-deterministic per #97) → no attribute, no sendToAsh", async () => {
+    // `/register` is intercepted by the channel; the agent never runs,
+    // so no Trigger column entry should be created.
+    const { deps, sendToAsh, setTriggerAttribute } = buildDeps();
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 1,
+          text: "/register Diego de Miguel, Lutterothstrasse 69 Erdgeschoss",
+          fromUserId: 99,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(sendToAsh).not.toHaveBeenCalled();
+    expect(setTriggerAttribute).not.toHaveBeenCalled();
+  });
+
+  it("orchestrator tolerates an absent setTriggerAttribute dep (optional)", async () => {
+    // The spike webhook + tests that don't care about observability
+    // wiring shouldn't need to provide the dep. Optional-chaining at
+    // every call site keeps the channel running without it.
+    const { deps, sendToAsh } = buildDeps();
+    const depsWithoutTrigger: ProcessUpdateDeps = {
+      ...deps,
+      setTriggerAttribute: undefined,
+    };
+
+    const res = await processInboundTelegramUpdate(
+      makeRequest(dmUpdate({ chatId: 1, text: "hi", fromUserId: 99 })),
+      depsWithoutTrigger,
+    );
+
+    expect(res.status).toBe(204);
+    expect(sendToAsh).toHaveBeenCalledTimes(1);
   });
 });
