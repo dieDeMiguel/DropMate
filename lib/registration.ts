@@ -259,8 +259,8 @@ export async function registerResident(
 
 /**
  * Per-language confirmation DM template (de/en/es/tr — same set as
- * `FLOW_2_DONE_ACK_EXAMPLES` and `ACCEPT_RETRY_TOASTS` so a future
- * fifth language only touches one file per surface). Fields are
+ * `FLOW_2_ACK_DMS` in `flow-2-dms.ts` and `ACCEPT_RETRY_TOASTS` so a
+ * future fifth language only touches one file per surface). Fields are
  * substituted via plain replacement, not a template engine — keep the
  * placeholder set minimal.
  *

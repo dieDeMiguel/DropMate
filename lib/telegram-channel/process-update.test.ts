@@ -699,13 +699,22 @@ describe("processInboundTelegramUpdate", () => {
       };
     }
 
-    it("on high-confidence + absenceSignal:true + registered caller, writes a ReceptionRequest and hands [FLOW_2 DONE]", async () => {
+    // v2.1 #100: the DM photo path is now fully channel-deterministic.
+    // On every outcome (success ack OR vision-low-confidence recovery)
+    // the channel sends ONE localised DM via sendDirectMessage and does
+    // NOT invoke the agent. The agent text-leak surface that produced
+    // the welcome wall + duplicate registration confirmation + tripled
+    // ack on the live trace is closed structurally.
+
+    it("on high-confidence + absenceSignal:true + registered caller, writes a ReceptionRequest and sends the German ack DM (no agent invocation)", async () => {
       const fileUrl =
         "https://api.telegram.org/file/bot111:AAA/photos/file_77.jpg";
       const resident = dmRegisteredResident("de");
       const {
         deps,
         sendToAsh,
+        sendDirectMessage,
+        waitUntil,
         getFileUrl,
         parseLabel,
         parseTrackingPage,
@@ -746,13 +755,12 @@ describe("processInboundTelegramUpdate", () => {
       expect(parseArgs.caption).toBe("kann jemand annehmen? bin nicht da");
       expect(parseLabel).not.toHaveBeenCalled();
 
-      // Channel writes the ReceptionRequest BEFORE the agent runs.
+      // Channel writes the ReceptionRequest deterministically.
       expect(getRegisteredResident).toHaveBeenCalledWith(99);
       expect(createReceptionRequest).toHaveBeenCalledTimes(1);
       const [caller, input] = createReceptionRequest.mock.calls[0]!;
       expect(caller).toBe(resident);
       expect(input.carrier).toBe("DHL");
-      // ISO endpoints are converted to Unix ms before the lib call.
       expect(input.expectedWindowStartAt).toBe(
         Date.parse("2026-05-19T13:00:00Z"),
       );
@@ -760,39 +768,29 @@ describe("processInboundTelegramUpdate", () => {
         Date.parse("2026-05-19T16:00:00Z"),
       );
 
-      const [message, options] = sendToAsh.mock.calls[0]!;
-      expect(typeof message).toBe("string");
-      expect(message).toContain("[FLOW_2 DONE language=de]");
-      // The synthetic must close down further tool calls — same shape
-      // Slice 1 ships from the classifier path.
-      expect(message).toMatch(/do not call/i);
-      expect(message).toContain("post_to_group");
-      // Slice 5 (#90) hard-deleted create_reception_request, so the
-      // synthetic must NOT name it (the model has no such tool now).
-      expect(message).not.toContain("create_reception_request");
-      // No remnants of the v2 [tracking page parsed] synthetic.
-      expect(message).not.toContain("[tracking page parsed]");
-
-      expect(options.state).toEqual<TelegramChannelState>({
-        chatId: 42,
-        isGroup: false,
-        fromUserId: 99,
-        fromLanguageCode: "de",
-      });
+      // #100: agent NEVER runs on the DM photo success path. Channel
+      // sent the deterministic ack DM in the requester's language.
+      expect(sendToAsh).not.toHaveBeenCalled();
+      expect(waitUntil).not.toHaveBeenCalled();
+      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+      const [chatId, text] = sendDirectMessage.mock.calls[0]!;
+      expect(chatId).toBe(42);
+      expect(text).toBe(
+        "Habe in der Gruppe gefragt — ich melde mich, sobald jemand zusagt.",
+      );
     });
 
     it("treats absenceSignal:undefined as implicit absence (uploading a tracking page in DM is itself the absence signal)", async () => {
       const resident = dmRegisteredResident("de");
-      const { deps, sendToAsh, createReceptionRequest } = buildDeps({
-        parsedTrackingPage: {
-          carrier: "Hermes",
-          // No absenceSignal — the vision tool found no caption signal
-          // either way. Channel must treat this as Flow 2.
-          confidence: "high",
-          reason: "clean tracking page, empty caption",
-        },
-        registeredResident: resident,
-      });
+      const { deps, sendToAsh, sendDirectMessage, createReceptionRequest } =
+        buildDeps({
+          parsedTrackingPage: {
+            carrier: "Hermes",
+            confidence: "high",
+            reason: "clean tracking page, empty caption",
+          },
+          registeredResident: resident,
+        });
 
       await processInboundTelegramUpdate(
         makeRequest(dmPhotoUpdate({ fromUserId: 99, languageCode: "de" })),
@@ -805,24 +803,28 @@ describe("processInboundTelegramUpdate", () => {
       expect(input.expectedWindowStartAt).toBeUndefined();
       expect(input.expectedWindowEndAt).toBeUndefined();
 
-      const [message] = sendToAsh.mock.calls[0]!;
-      expect(message).toContain("[FLOW_2 DONE language=de]");
+      expect(sendToAsh).not.toHaveBeenCalled();
+      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+      expect(sendDirectMessage.mock.calls[0]![1]).toBe(
+        "Habe in der Gruppe gefragt — ich melde mich, sobald jemand zusagt.",
+      );
     });
 
-    it("on absenceSignal:false (explicit non-absence — search intent), hands [VISION_LOW_CONFIDENCE] and does NOT post the card", async () => {
+    it("on absenceSignal:false (explicit non-absence — search intent), sends the German recovery DM and does NOT post the card", async () => {
       const resident = dmRegisteredResident("de");
-      const { deps, sendToAsh, createReceptionRequest } = buildDeps({
-        parsedTrackingPage: {
-          carrier: "DHL",
-          trackingNumber: "00340434161094021899",
-          expectedWindowStartAt: "2026-05-19T13:00:00Z",
-          expectedWindowEndAt: "2026-05-19T16:00:00Z",
-          absenceSignal: false,
-          confidence: "high",
-          reason: "tracking page legible but caption is a search query",
-        },
-        registeredResident: resident,
-      });
+      const { deps, sendToAsh, sendDirectMessage, createReceptionRequest } =
+        buildDeps({
+          parsedTrackingPage: {
+            carrier: "DHL",
+            trackingNumber: "00340434161094021899",
+            expectedWindowStartAt: "2026-05-19T13:00:00Z",
+            expectedWindowEndAt: "2026-05-19T16:00:00Z",
+            absenceSignal: false,
+            confidence: "high",
+            reason: "tracking page legible but caption is a search query",
+          },
+          registeredResident: resident,
+        });
 
       await processInboundTelegramUpdate(
         makeRequest(
@@ -838,27 +840,25 @@ describe("processInboundTelegramUpdate", () => {
       // Critical privacy guarantee: no card posted when the caption
       // explicitly disclaims absence.
       expect(createReceptionRequest).not.toHaveBeenCalled();
-
-      const [message] = sendToAsh.mock.calls[0]!;
-      expect(message).toContain("[VISION_LOW_CONFIDENCE language=de]");
-      // The synthetic must embed the parsed fields so the agent can
-      // reason about the user's intent.
-      expect(message).toContain("carrier=DHL");
-      expect(message).toContain("absenceSignal=false");
-      // And it must direct the agent at /receive — Slice 2's recovery path.
-      expect(message).toMatch(/\/receive/);
+      // #100: agent never runs on the recovery path either.
+      expect(sendToAsh).not.toHaveBeenCalled();
+      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+      const [, text] = sendDirectMessage.mock.calls[0]!;
+      expect(text).toContain("Ich konnte den Beleg nicht eindeutig lesen");
+      expect(text).toContain("/receive");
     });
 
-    it("on confidence:low, hands [VISION_LOW_CONFIDENCE] with partial fields and does NOT post the card", async () => {
+    it("on confidence:low, sends the German recovery DM and does NOT post the card", async () => {
       const resident = dmRegisteredResident("de");
-      const { deps, sendToAsh, createReceptionRequest } = buildDeps({
-        parsedTrackingPage: {
-          carrier: "unknown",
-          confidence: "low",
-          reason: "carrier logo cropped",
-        },
-        registeredResident: resident,
-      });
+      const { deps, sendToAsh, sendDirectMessage, createReceptionRequest } =
+        buildDeps({
+          parsedTrackingPage: {
+            carrier: "unknown",
+            confidence: "low",
+            reason: "carrier logo cropped",
+          },
+          registeredResident: resident,
+        });
 
       await processInboundTelegramUpdate(
         makeRequest(dmPhotoUpdate({ fromUserId: 99, languageCode: "de" })),
@@ -866,24 +866,25 @@ describe("processInboundTelegramUpdate", () => {
       );
 
       expect(createReceptionRequest).not.toHaveBeenCalled();
-      const [message] = sendToAsh.mock.calls[0]!;
-      expect(message).toContain("[VISION_LOW_CONFIDENCE language=de]");
-      expect(message).toContain("carrier=unknown");
-      expect(message).toContain("confidence=low");
-      expect(message).toMatch(/\/receive/);
+      expect(sendToAsh).not.toHaveBeenCalled();
+      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+      expect(sendDirectMessage.mock.calls[0]![1]).toContain(
+        "Ich konnte den Beleg nicht eindeutig lesen",
+      );
     });
 
-    it("on confidence:medium (not high), hands [VISION_LOW_CONFIDENCE] and does NOT post the card", async () => {
+    it("on confidence:medium (not high), sends the German recovery DM and does NOT post the card", async () => {
       const resident = dmRegisteredResident("de");
-      const { deps, sendToAsh, createReceptionRequest } = buildDeps({
-        parsedTrackingPage: {
-          carrier: "DHL",
-          absenceSignal: true,
-          confidence: "medium",
-          reason: "carrier legible but window obscured",
-        },
-        registeredResident: resident,
-      });
+      const { deps, sendToAsh, sendDirectMessage, createReceptionRequest } =
+        buildDeps({
+          parsedTrackingPage: {
+            carrier: "DHL",
+            absenceSignal: true,
+            confidence: "medium",
+            reason: "carrier legible but window obscured",
+          },
+          registeredResident: resident,
+        });
 
       await processInboundTelegramUpdate(
         makeRequest(dmPhotoUpdate({ fromUserId: 99, languageCode: "de" })),
@@ -891,15 +892,22 @@ describe("processInboundTelegramUpdate", () => {
       );
 
       expect(createReceptionRequest).not.toHaveBeenCalled();
-      const [message] = sendToAsh.mock.calls[0]!;
-      expect(message).toContain("[VISION_LOW_CONFIDENCE language=de]");
-      expect(message).toContain("carrier=DHL");
-      expect(message).toContain("confidence=medium");
+      expect(sendToAsh).not.toHaveBeenCalled();
+      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+      expect(sendDirectMessage.mock.calls[0]![1]).toContain(
+        "Ich konnte den Beleg nicht eindeutig lesen",
+      );
     });
 
-    it("on parseTrackingPage returning null, hands [VISION_LOW_CONFIDENCE] with no partial fields", async () => {
-      const { deps, sendToAsh, parseLabel, parseTrackingPage, createReceptionRequest } =
-        buildDeps({ parsedTrackingPage: null });
+    it("on parseTrackingPage returning null, sends the German recovery DM", async () => {
+      const {
+        deps,
+        sendToAsh,
+        sendDirectMessage,
+        parseLabel,
+        parseTrackingPage,
+        createReceptionRequest,
+      } = buildDeps({ parsedTrackingPage: null });
 
       await processInboundTelegramUpdate(
         makeRequest(
@@ -915,16 +923,21 @@ describe("processInboundTelegramUpdate", () => {
       expect(parseTrackingPage).toHaveBeenCalledTimes(1);
       expect(parseLabel).not.toHaveBeenCalled();
       expect(createReceptionRequest).not.toHaveBeenCalled();
-      const [message] = sendToAsh.mock.calls[0]!;
-      expect(message).toContain("[VISION_LOW_CONFIDENCE language=de]");
-      expect(message).toContain("caption: kannst du das lesen?");
-      expect(message).toContain("No fields were extracted");
-      expect(message).toMatch(/\/receive/);
+      expect(sendToAsh).not.toHaveBeenCalled();
+      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+      expect(sendDirectMessage.mock.calls[0]![1]).toContain(
+        "Ich konnte den Beleg nicht eindeutig lesen",
+      );
     });
 
-    it("on parseTrackingPage throwing, hands [VISION_LOW_CONFIDENCE]", async () => {
-      const { deps, sendToAsh, parseTrackingPage, createReceptionRequest } =
-        buildDeps();
+    it("on parseTrackingPage throwing, sends the German recovery DM", async () => {
+      const {
+        deps,
+        sendToAsh,
+        sendDirectMessage,
+        parseTrackingPage,
+        createReceptionRequest,
+      } = buildDeps();
       parseTrackingPage.mockRejectedValueOnce(
         new Error("vision provider down"),
       );
@@ -935,13 +948,23 @@ describe("processInboundTelegramUpdate", () => {
       );
 
       expect(createReceptionRequest).not.toHaveBeenCalled();
-      const [message] = sendToAsh.mock.calls[0]!;
-      expect(message).toContain("[VISION_LOW_CONFIDENCE language=de]");
+      expect(sendToAsh).not.toHaveBeenCalled();
+      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+      expect(sendDirectMessage.mock.calls[0]![1]).toContain(
+        "Ich konnte den Beleg nicht eindeutig lesen",
+      );
     });
 
-    it("on getFileUrl throwing (DM photo), hands [VISION_LOW_CONFIDENCE] without invoking any vision tool", async () => {
-      const { deps, sendToAsh, parseLabel, parseTrackingPage, getFileUrl, createReceptionRequest } =
-        buildDeps();
+    it("on getFileUrl throwing (DM photo), sends the German recovery DM without invoking any vision tool", async () => {
+      const {
+        deps,
+        sendToAsh,
+        sendDirectMessage,
+        parseLabel,
+        parseTrackingPage,
+        getFileUrl,
+        createReceptionRequest,
+      } = buildDeps();
       getFileUrl.mockRejectedValueOnce(new Error("Bot API 404"));
 
       await processInboundTelegramUpdate(
@@ -952,58 +975,15 @@ describe("processInboundTelegramUpdate", () => {
       expect(parseTrackingPage).not.toHaveBeenCalled();
       expect(parseLabel).not.toHaveBeenCalled();
       expect(createReceptionRequest).not.toHaveBeenCalled();
-      const [message] = sendToAsh.mock.calls[0]!;
-      expect(message).toContain("[VISION_LOW_CONFIDENCE language=de]");
-    });
-
-    it("on high-confidence but unregistered caller, hands [VISION_LOW_CONFIDENCE] (no Resident to attach the request to)", async () => {
-      const { deps, sendToAsh, createReceptionRequest } = buildDeps({
-        parsedTrackingPage: {
-          carrier: "DHL",
-          absenceSignal: true,
-          confidence: "high",
-          reason: "clean tracking page",
-        },
-        registeredResident: null,
-      });
-
-      await processInboundTelegramUpdate(
-        makeRequest(dmPhotoUpdate({ fromUserId: 99, languageCode: "de" })),
-        deps,
+      expect(sendToAsh).not.toHaveBeenCalled();
+      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+      expect(sendDirectMessage.mock.calls[0]![1]).toContain(
+        "Ich konnte den Beleg nicht eindeutig lesen",
       );
-
-      expect(createReceptionRequest).not.toHaveBeenCalled();
-      const [message] = sendToAsh.mock.calls[0]!;
-      expect(message).toContain("[VISION_LOW_CONFIDENCE language=de]");
     });
 
-    it("on high-confidence + createReceptionRequest throwing (Redis hiccup), hands [VISION_LOW_CONFIDENCE]", async () => {
-      const resident = dmRegisteredResident("de");
-      const { deps, sendToAsh, createReceptionRequest } = buildDeps({
-        parsedTrackingPage: {
-          carrier: "DHL",
-          absenceSignal: true,
-          confidence: "high",
-          reason: "clean tracking page",
-        },
-        registeredResident: resident,
-      });
-      createReceptionRequest.mockRejectedValueOnce(new Error("redis down"));
-
-      await processInboundTelegramUpdate(
-        makeRequest(dmPhotoUpdate({ fromUserId: 99, languageCode: "de" })),
-        deps,
-      );
-
-      // The throw means no card was posted. The agent now gets the
-      // low-confidence prompt to ask the user to retry via /receive —
-      // the same shape as the classifier path on Redis failure.
-      const [message] = sendToAsh.mock.calls[0]!;
-      expect(message).toContain("[VISION_LOW_CONFIDENCE language=de]");
-    });
-
-    it("on anonymous DM photo (no fromUserId), hands [VISION_LOW_CONFIDENCE] without consulting the directory", async () => {
-      const { deps, sendToAsh, createReceptionRequest, getRegisteredResident } =
+    it("on high-confidence but unregistered caller, sends the German recovery DM (no Resident to attach the request to)", async () => {
+      const { deps, sendToAsh, sendDirectMessage, createReceptionRequest } =
         buildDeps({
           parsedTrackingPage: {
             carrier: "DHL",
@@ -1011,7 +991,66 @@ describe("processInboundTelegramUpdate", () => {
             confidence: "high",
             reason: "clean tracking page",
           },
+          registeredResident: null,
         });
+
+      await processInboundTelegramUpdate(
+        makeRequest(dmPhotoUpdate({ fromUserId: 99, languageCode: "de" })),
+        deps,
+      );
+
+      expect(createReceptionRequest).not.toHaveBeenCalled();
+      expect(sendToAsh).not.toHaveBeenCalled();
+      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+      // The recovery DM embeds the /register hint inline so an
+      // unregistered photo sender gets the right next step without a
+      // second turn.
+      expect(sendDirectMessage.mock.calls[0]![1]).toContain("/register");
+    });
+
+    it("on high-confidence + createReceptionRequest throwing (Redis hiccup), sends the German recovery DM", async () => {
+      const resident = dmRegisteredResident("de");
+      const { deps, sendToAsh, sendDirectMessage, createReceptionRequest } =
+        buildDeps({
+          parsedTrackingPage: {
+            carrier: "DHL",
+            absenceSignal: true,
+            confidence: "high",
+            reason: "clean tracking page",
+          },
+          registeredResident: resident,
+        });
+      createReceptionRequest.mockRejectedValueOnce(new Error("redis down"));
+
+      await processInboundTelegramUpdate(
+        makeRequest(dmPhotoUpdate({ fromUserId: 99, languageCode: "de" })),
+        deps,
+      );
+
+      // The throw means no card was posted. User gets the recovery
+      // prompt instead — better than an ack for a card that's not up.
+      expect(sendToAsh).not.toHaveBeenCalled();
+      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+      expect(sendDirectMessage.mock.calls[0]![1]).toContain(
+        "Ich konnte den Beleg nicht eindeutig lesen",
+      );
+    });
+
+    it("on anonymous DM photo (no fromUserId), sends the German recovery DM without consulting the directory", async () => {
+      const {
+        deps,
+        sendToAsh,
+        sendDirectMessage,
+        createReceptionRequest,
+        getRegisteredResident,
+      } = buildDeps({
+        parsedTrackingPage: {
+          carrier: "DHL",
+          absenceSignal: true,
+          confidence: "high",
+          reason: "clean tracking page",
+        },
+      });
 
       await processInboundTelegramUpdate(
         // No `from` field → fromUserId is null.
@@ -1021,13 +1060,16 @@ describe("processInboundTelegramUpdate", () => {
 
       expect(getRegisteredResident).not.toHaveBeenCalled();
       expect(createReceptionRequest).not.toHaveBeenCalled();
-      const [message] = sendToAsh.mock.calls[0]!;
-      expect(message).toContain("[VISION_LOW_CONFIDENCE");
+      expect(sendToAsh).not.toHaveBeenCalled();
+      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+      expect(sendDirectMessage.mock.calls[0]![1]).toContain(
+        "Ich konnte den Beleg nicht eindeutig lesen",
+      );
     });
 
-    it("uses the resident's stored language for the FLOW_2 DONE synthetic when present", async () => {
+    it("uses the resident's stored language for the ack DM when present (tr)", async () => {
       const resident = dmRegisteredResident("tr");
-      const { deps, sendToAsh } = buildDeps({
+      const { deps, sendToAsh, sendDirectMessage } = buildDeps({
         parsedTrackingPage: {
           carrier: "DHL",
           absenceSignal: true,
@@ -1042,16 +1084,18 @@ describe("processInboundTelegramUpdate", () => {
         deps,
       );
 
-      const [message] = sendToAsh.mock.calls[0]!;
-      expect(message).toContain("[FLOW_2 DONE language=tr]");
+      expect(sendToAsh).not.toHaveBeenCalled();
+      expect(sendDirectMessage.mock.calls[0]![1]).toBe(
+        "Gruba sordum — biri yanıt verince haber veririm.",
+      );
     });
 
-    it("falls back to the Telegram client language code when the resident has no stored language", async () => {
+    it("falls back to the Telegram client language code when the resident has no stored language (en)", async () => {
       const resident: Resident = {
         ...dmRegisteredResident("de"),
         language: undefined,
       };
-      const { deps, sendToAsh } = buildDeps({
+      const { deps, sendToAsh, sendDirectMessage } = buildDeps({
         parsedTrackingPage: {
           carrier: "DHL",
           absenceSignal: true,
@@ -1066,12 +1110,14 @@ describe("processInboundTelegramUpdate", () => {
         deps,
       );
 
-      const [message] = sendToAsh.mock.calls[0]!;
-      expect(message).toContain("[FLOW_2 DONE language=en]");
+      expect(sendToAsh).not.toHaveBeenCalled();
+      expect(sendDirectMessage.mock.calls[0]![1]).toBe(
+        "Asked in the group — I'll let you know as soon as someone says yes.",
+      );
     });
 
     it("falls back to 'de' when neither the resident nor Telegram supply a language code on the low-confidence path", async () => {
-      const { deps, sendToAsh } = buildDeps({
+      const { deps, sendToAsh, sendDirectMessage } = buildDeps({
         parsedTrackingPage: {
           carrier: "unknown",
           confidence: "low",
@@ -1085,12 +1131,14 @@ describe("processInboundTelegramUpdate", () => {
         deps,
       );
 
-      const [message] = sendToAsh.mock.calls[0]!;
-      expect(message).toContain("[VISION_LOW_CONFIDENCE language=de]");
+      expect(sendToAsh).not.toHaveBeenCalled();
+      expect(sendDirectMessage.mock.calls[0]![1]).toContain(
+        "Ich konnte den Beleg nicht eindeutig lesen",
+      );
     });
 
-    it("substitutes (no caption) when the DM photo arrives without text on the low-confidence path", async () => {
-      const { deps, sendToAsh } = buildDeps({
+    it("still sends the recovery DM (no agent fallback) even when the photo arrives without a caption on the low-confidence path", async () => {
+      const { deps, sendToAsh, sendDirectMessage } = buildDeps({
         parsedTrackingPage: {
           carrier: "unknown",
           confidence: "low",
@@ -1103,8 +1151,8 @@ describe("processInboundTelegramUpdate", () => {
         deps,
       );
 
-      const [message] = sendToAsh.mock.calls[0]!;
-      expect(message).toContain("caption: (no caption)");
+      expect(sendToAsh).not.toHaveBeenCalled();
+      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
     });
 
     it("does NOT invoke parseLabel on the DM path even when registered residents would otherwise short-circuit", async () => {
@@ -2685,9 +2733,15 @@ describe("processInboundTelegramUpdate — DM text → classify_dm_intent (v2.1 
     expect(createReceptionRequest).not.toHaveBeenCalled();
   });
 
-  it("on high-confidence Flow 2, calls createReceptionRequest and hands the agent a [FLOW_2 DONE] synthetic", async () => {
+  it("on high-confidence Flow 2, calls createReceptionRequest and sends the German ack DM (no agent invocation, #100)", async () => {
     const resident = dmRegisteredResident("de");
-    const { deps, sendToAsh, createReceptionRequest } = buildDeps({
+    const {
+      deps,
+      sendToAsh,
+      sendDirectMessage,
+      waitUntil,
+      createReceptionRequest,
+    } = buildDeps({
       classification: {
         isFlow2: true,
         absenceSignal: true,
@@ -2723,22 +2777,21 @@ describe("processInboundTelegramUpdate — DM text → classify_dm_intent (v2.1 
       expectedWindowEndAt: 1747922400000,
     });
 
-    const [message] = sendToAsh.mock.calls[0]!;
-    expect(message).toContain("[FLOW_2 DONE language=de]");
-    // The synthetic must explicitly tell the agent NOT to fire any tools.
-    expect(message).toMatch(/do not call/i);
-    // It still names post_to_group + register_expected_delivery (those
-    // tools still exist on the agent surface and the v2 regression at
-    // #85 had the agent firing them mid-flow). create_reception_request
-    // is gone after Slice 5 (#90) — the agent has no such tool, so the
-    // synthetic must NOT mention it.
-    expect(message).toContain("post_to_group");
-    expect(message).not.toContain("create_reception_request");
+    // #100: agent NEVER runs on the Flow 2 success path. The channel
+    // sent the deterministic ack DM in the requester's language.
+    expect(sendToAsh).not.toHaveBeenCalled();
+    expect(waitUntil).not.toHaveBeenCalled();
+    expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+    const [chatId, text] = sendDirectMessage.mock.calls[0]!;
+    expect(chatId).toBe(42);
+    expect(text).toBe(
+      "Habe in der Gruppe gefragt — ich melde mich, sobald jemand zusagt.",
+    );
   });
 
-  it("uses the resident's stored language for the FLOW_2 DONE synthetic when present", async () => {
+  it("uses the resident's stored language for the ack DM when present (es)", async () => {
     const resident = dmRegisteredResident("es");
-    const { deps, sendToAsh } = buildDeps({
+    const { deps, sendToAsh, sendDirectMessage } = buildDeps({
       classification: {
         isFlow2: true,
         absenceSignal: true,
@@ -2761,16 +2814,18 @@ describe("processInboundTelegramUpdate — DM text → classify_dm_intent (v2.1 
       deps,
     );
 
-    const [message] = sendToAsh.mock.calls[0]!;
-    expect(message).toContain("[FLOW_2 DONE language=es]");
+    expect(sendToAsh).not.toHaveBeenCalled();
+    expect(sendDirectMessage.mock.calls[0]![1]).toBe(
+      "Pregunté en el grupo — te aviso en cuanto alguien responda.",
+    );
   });
 
-  it("falls back to the Telegram client language code when the resident has no stored language", async () => {
+  it("falls back to the Telegram client language code when the resident has no stored language (en)", async () => {
     const resident: Resident = {
       ...dmRegisteredResident("de"),
       language: undefined,
     };
-    const { deps, sendToAsh } = buildDeps({
+    const { deps, sendToAsh, sendDirectMessage } = buildDeps({
       classification: {
         isFlow2: true,
         absenceSignal: true,
@@ -2793,8 +2848,10 @@ describe("processInboundTelegramUpdate — DM text → classify_dm_intent (v2.1 
       deps,
     );
 
-    const [message] = sendToAsh.mock.calls[0]!;
-    expect(message).toContain("[FLOW_2 DONE language=en]");
+    expect(sendToAsh).not.toHaveBeenCalled();
+    expect(sendDirectMessage.mock.calls[0]![1]).toBe(
+      "Asked in the group — I'll let you know as soon as someone says yes.",
+    );
   });
 
   it("falls through to raw text when the caller is unregistered (createReceptionRequest needs a Resident)", async () => {
@@ -2923,11 +2980,15 @@ describe("processInboundTelegramUpdate — /receive slash command (v2.1 Slice 2,
     };
   }
 
-  it("bare /receive writes a request with no carrier or window and hands [FLOW_2 DONE]", async () => {
+  it("bare /receive writes a request with no carrier or window and sends the German ack DM (no agent invocation, #100)", async () => {
     const resident = dmRegisteredResident("de");
-    const { deps, sendToAsh, createReceptionRequest } = buildDeps({
-      registeredResident: resident,
-    });
+    const {
+      deps,
+      sendToAsh,
+      sendDirectMessage,
+      waitUntil,
+      createReceptionRequest,
+    } = buildDeps({ registeredResident: resident });
 
     await processInboundTelegramUpdate(
       makeRequest(
@@ -2953,15 +3014,18 @@ describe("processInboundTelegramUpdate — /receive slash command (v2.1 Slice 2,
       expectedWindowEndAt: undefined,
     });
 
-    const [message] = sendToAsh.mock.calls[0]!;
-    expect(message).toContain("[FLOW_2 DONE language=de]");
+    expect(sendToAsh).not.toHaveBeenCalled();
+    expect(waitUntil).not.toHaveBeenCalled();
+    expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+    expect(sendDirectMessage.mock.calls[0]![1]).toBe(
+      "Habe in der Gruppe gefragt — ich melde mich, sobald jemand zusagt.",
+    );
   });
 
   it("`/receive DHL morgen 14-16` parses args and forwards them to createReceptionRequest", async () => {
     const resident = dmRegisteredResident("de");
-    const { deps, sendToAsh, createReceptionRequest } = buildDeps({
-      registeredResident: resident,
-    });
+    const { deps, sendToAsh, sendDirectMessage, createReceptionRequest } =
+      buildDeps({ registeredResident: resident });
 
     await processInboundTelegramUpdate(
       makeRequest(
@@ -2987,13 +3051,18 @@ describe("processInboundTelegramUpdate — /receive slash command (v2.1 Slice 2,
       2 * 60 * 60 * 1000,
     );
 
-    const [message] = sendToAsh.mock.calls[0]!;
-    expect(message).toContain("[FLOW_2 DONE language=de]");
+    expect(sendToAsh).not.toHaveBeenCalled();
+    expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+    expect(sendDirectMessage.mock.calls[0]![1]).toBe(
+      "Habe in der Gruppe gefragt — ich melde mich, sobald jemand zusagt.",
+    );
   });
 
-  it("uses the resident's stored language for the FLOW_2 DONE synthetic", async () => {
+  it("uses the resident's stored language for the ack DM (tr)", async () => {
     const resident = dmRegisteredResident("tr");
-    const { deps, sendToAsh } = buildDeps({ registeredResident: resident });
+    const { deps, sendToAsh, sendDirectMessage } = buildDeps({
+      registeredResident: resident,
+    });
 
     await processInboundTelegramUpdate(
       makeRequest(
@@ -3007,8 +3076,10 @@ describe("processInboundTelegramUpdate — /receive slash command (v2.1 Slice 2,
       deps,
     );
 
-    const [message] = sendToAsh.mock.calls[0]!;
-    expect(message).toContain("[FLOW_2 DONE language=tr]");
+    expect(sendToAsh).not.toHaveBeenCalled();
+    expect(sendDirectMessage.mock.calls[0]![1]).toBe(
+      "Gruba sordum — biri yanıt verince haber veririm.",
+    );
   });
 
   it("does NOT call the classifier when the inbound is /receive", async () => {
@@ -3128,138 +3199,15 @@ describe("processInboundTelegramUpdate — /receive slash command (v2.1 Slice 2,
   });
 });
 
-describe("FLOW_2 DONE synthetic shape (v2.1 Bug 2 regression, #94)", () => {
-  // Trace A failure (#92 / #94): with the previous synthetic ("Reply
-  // … with ONE short sentence confirming the group was asked. Do
-  // NOT call post_to_group …") the model interpreted the
-  // informative clauses as guidance it could ignore and emitted the
-  // card text verbatim ("📦 DHL-Paket erwartet heute 06:00–08:00.
-  // Kann jemand annehmen?") as the DM ack. The synthetic now has
-  // to be DIRECTIVE: it must (a) name every shape the ack must NOT
-  // take and (b) embed a known-good example sentence so the model
-  // mirrors it instead of inventing one. These cases pin those
-  // load-bearing constraints so future prompt tweaks can't silently
-  // delete them.
-
-  function dmRegisteredResident(language = "de"): Resident {
-    return {
-      id: "patricia",
-      name: "Patricia Höfer",
-      street: "Methfesselstraße",
-      houseNumber: "90",
-      platformId: "patricia",
-      platform: "telegram",
-      language,
-      availabilityPatterns: [],
-      registeredAt: Date.now(),
-      source: "explicit",
-      confirmed: true,
-    };
-  }
-
-  async function runFlow2Done(language: string): Promise<string> {
-    const resident = dmRegisteredResident(language);
-    const { deps, sendToAsh } = buildDeps({
-      classification: {
-        isFlow2: true,
-        absenceSignal: true,
-        carrier: "DHL",
-        expectedDate: "2026-05-22",
-        expectedWindowStartAt: 1747915200000,
-        expectedWindowEndAt: 1747922400000,
-        confidence: "high",
-        reason: "absence + DHL + window",
-      },
-      registeredResident: resident,
-    });
-
-    await processInboundTelegramUpdate(
-      makeRequest(
-        dmUpdate({
-          chatId: 42,
-          text: "Ich erwarte morgen 14-16 Uhr DHL und bin nicht zu Hause",
-          fromUserId: 99,
-          languageCode: language,
-        }),
-      ),
-      deps,
-    );
-
-    const [message] = sendToAsh.mock.calls[0]!;
-    if (typeof message !== "string") {
-      throw new Error("expected synthetic to be a string");
-    }
-    return message;
-  }
-
-  it("prohibits the card-shaped ack patterns the model regurgitated live (#94 trace)", async () => {
-    const message = await runFlow2Done("de");
-
-    // Carrier name — observed in the buggy ack ("DHL-Paket erwartet …").
-    expect(message).toMatch(/do not mention the carrier/i);
-    // Window/date — observed as "heute 06:00–08:00" in the bug report.
-    // The prohibition lives in the same `Do NOT mention …` clause that
-    // forbids the carrier; assert the date + time window words land
-    // inside that prohibition (rather than appearing accidentally in
-    // an example sentence).
-    expect(message).toMatch(/do not mention .*(date|window|time)/i);
-    // Package emoji — observed prefix on the buggy ack body.
-    expect(message).toContain("📦");
-    expect(message).toMatch(/do not include.+(emoji|📦)/i);
-    // The literal card question — observed as "Kann jemand
-    // annehmen?" in the buggy ack.
-    expect(message).toMatch(/do not (repeat|paraphrase).+card/i);
-    expect(message).toMatch(/do not ask whether anyone can help/i);
-  });
-
-  it("embeds a known-good German example for de-language requesters", async () => {
-    const message = await runFlow2Done("de");
-    expect(message).toContain('Example (de):');
-    expect(message).toContain(
-      "Habe in der Gruppe gefragt — ich melde mich, sobald jemand zusagt.",
-    );
-    // The example MUST NOT contain the card-shaped tokens — if it did
-    // the model would mirror the wrong shape.
-    const exampleSegment = message.slice(message.indexOf('Example (de):'));
-    expect(exampleSegment).not.toContain("📦");
-    expect(exampleSegment).not.toContain("DHL");
-    expect(exampleSegment).not.toContain("Kann jemand annehmen?");
-  });
-
-  it("embeds a known-good English example for en-language requesters", async () => {
-    const message = await runFlow2Done("en");
-    expect(message).toContain('Example (en):');
-    expect(message).toContain(
-      "Asked in the group — I'll let you know as soon as someone says yes.",
-    );
-  });
-
-  it("embeds a known-good Spanish example for es-language requesters", async () => {
-    const message = await runFlow2Done("es");
-    expect(message).toContain('Example (es):');
-    expect(message).toContain(
-      "Pregunté en el grupo — te aviso en cuanto alguien responda.",
-    );
-  });
-
-  it("embeds a known-good Turkish example for tr-language requesters", async () => {
-    const message = await runFlow2Done("tr");
-    expect(message).toContain('Example (tr):');
-    expect(message).toContain(
-      "Gruba sordum — biri yanıt verince haber veririm.",
-    );
-  });
-
-  it("omits the example line for unknown languages (falls back to instructions.md rules)", async () => {
-    const message = await runFlow2Done("ja");
-    // Still names the language…
-    expect(message).toContain("language=ja");
-    expect(message).toContain("in ja");
-    // …but the example block is omitted rather than emitting a German
-    // example that the model would mistakenly mirror in Japanese.
-    expect(message).not.toContain("Example (");
-  });
-});
+// v2.1 #100: the `[FLOW_2 DONE]` synthetic was deleted entirely along
+// with the agent's role in the Flow 2 success path. The directive-shape
+// constraints the previous "FLOW_2 DONE synthetic shape" describe block
+// pinned (no carrier, no emoji, embedded example) are no longer
+// necessary — the channel sends the deterministic ack DM itself via
+// `buildFlow2AckDm`. The known-good per-language ack strings are
+// asserted in `flow-2-dms.test.ts` and the per-language outcome of each
+// Flow 2 entry path is asserted above (DM photo + classifier +
+// /receive describe blocks).
 
 describe("processInboundTelegramUpdate — registration (v2.1 #97 — channel-deterministic DM onboarding)", () => {
   // Live trace 2026-05-22 (#97): a fresh user DM'd
