@@ -1170,21 +1170,19 @@ async function handleAcceptReceptionGroup(
         : undefined;
     const language = volunteer.language ?? cb.fromLanguageCode;
     if (errorCode === ACCEPT_SELF_NOT_ALLOWED_ERROR_CODE) {
-      // #98: permanent rejection — the tapper is the request's own
-      // requester. Strip the keyboard so a button mistap, autocomplete,
-      // or voice-to-text doesn't flip the request to a self-matched dead
-      // state on a re-tap. The constraint is permanent (the request's
-      // requester doesn't change), so there is no recovery path through
-      // this card; another resident may still claim it from a fresh card
-      // — but not from this tapper's surface.
+      // #101: rejection is permanent *for this tapper only* — the lib
+      // re-checks `requesterResidentId === caller.id` on every tap, so
+      // a re-tap by the requester just produces the same toast again.
+      // The button MUST stay live so other neighbours on the same street
+      // can still claim the card. (Contrast with the cross-street branch
+      // below, where the keyboard IS stripped because the constraint is
+      // street-wide — no resident on the volunteer's street will ever be
+      // able to claim that card.)
       await deps
         .answerCallback(
           cb.callbackId,
           selfAcceptToastForLanguage(language),
         )
-        .catch(() => undefined);
-      await deps
-        .stripKeyboard(cb.chatId, cb.messageId)
         .catch(() => undefined);
       return new Response(null, { status: 204 });
     }
