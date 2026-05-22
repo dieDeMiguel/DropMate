@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>DropMate — live diagram (v2.1)</title>
+  <style>
+    :root {
+      --bg: #07070d;
+      --idle: #2a2a3a;
+      --idle-fill: rgba(42, 42, 58, 0.18);
+      --text-accent: #00e5ff;
+      --photo-accent: #ffb547;
+      --callback-accent: #ff5cf2;
+      --error-accent: #ff3860;
+      --label: #6a6a8a;
+      --label-bright: #d8d8ff;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: #e6e6f0; font-family: ui-monospace, "SF Mono", Menlo, monospace; height: 100%; overflow: hidden; }
+    body { display: flex; flex-direction: column; align-items: center; gap: 1rem; padding: 1.25rem; }
+    h1 { font-size: 0.85rem; letter-spacing: 0.32em; text-transform: uppercase; color: var(--label); font-weight: 500; margin: 0; }
+    h1 span.version { color: var(--text-accent); margin-left: 0.6rem; }
+    .stage { width: 100%; max-width: 1240px; flex: 1; min-height: 0; display: flex; align-items: stretch; justify-content: center; gap: 1rem; }
+    .diagram { flex: 1 1 80%; display: flex; align-items: center; justify-content: center; min-width: 0; }
+    svg { width: 100%; height: 100%; max-height: 82vh; }
+
+    /* Right-side trace log — same shape as pre-v2.1 (#61). */
+    #trace-log {
+      flex: 0 0 22%;
+      min-width: 240px;
+      max-width: 320px;
+      display: flex;
+      flex-direction: column;
+      background: rgba(20, 20, 32, 0.55);
+      border: 1px solid var(--idle);
+      border-radius: 6px;
+      padding: 0.6rem 0.65rem;
+      font-size: 10px;
+      letter-spacing: 0.02em;
+      color: var(--label);
+      overflow: hidden;
+    }
+    #trace-log header {
+      font-size: 9px;
+      letter-spacing: 0.32em;
+      text-transform: uppercase;
+      color: var(--label);
+      opacity: 0.7;
+      padding-bottom: 0.45rem;
+      margin-bottom: 0.45rem;
+      border-bottom: 1px solid var(--idle);
+    }
+    #trace-log-body {
+      flex: 1;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      scrollbar-width: thin;
+      scrollbar-color: var(--idle) transparent;
+    }
+    #trace-log-body::-webkit-scrollbar { width: 6px; }
+    #trace-log-body::-webkit-scrollbar-thumb { background: var(--idle); border-radius: 3px; }
+    .log-entry { color: var(--label-bright); opacity: 0.85; line-height: 1.35; word-break: break-word; }
+    .log-entry .ts { color: var(--label); opacity: 0.6; margin-right: 0.4rem; }
+    .log-entry .stage-phase { color: var(--accent, var(--text-accent)); margin-right: 0.4rem; }
+    .log-entry.kind-text { --accent: var(--text-accent); }
+    .log-entry.kind-photo { --accent: var(--photo-accent); }
+    .log-entry.kind-callback { --accent: var(--callback-accent); }
+    .log-entry.flash-error-line { color: var(--error-accent); }
+
+    rect.box {
+      fill: var(--idle-fill);
+      stroke: var(--idle);
+      stroke-width: 2;
+      transition: stroke 200ms ease, fill 200ms ease, filter 200ms ease;
+    }
+    rect.box.ignite {
+      stroke: var(--accent, var(--text-accent));
+      fill: rgba(0, 229, 255, 0.06);
+      filter: drop-shadow(0 0 10px var(--accent, var(--text-accent)));
+    }
+    rect.box.hold {
+      stroke: var(--accent, var(--text-accent));
+      filter: drop-shadow(0 0 6px var(--accent, var(--text-accent)));
+    }
+    rect.box.heartbeat {
+      animation: heartbeat 3s ease-in-out infinite;
+    }
+    @keyframes heartbeat {
+      0%, 100% { stroke: var(--idle); filter: none; }
+      50% { stroke: #3d3d55; filter: drop-shadow(0 0 4px #3d3d55); }
+    }
+    rect.edge { stroke: #1f1f30; }
+    rect.edge.heartbeat { animation-duration: 4s; }
+    rect.edge.ignite { stroke: var(--accent, var(--text-accent)); fill: rgba(0, 229, 255, 0.04); }
+
+    rect.box.flash-error {
+      stroke: var(--error-accent);
+      fill: rgba(255, 56, 96, 0.08);
+      filter: drop-shadow(0 0 12px var(--error-accent));
+      animation: flash-error 400ms ease-out;
+    }
+    @keyframes flash-error {
+      0% { filter: drop-shadow(0 0 4px var(--error-accent)); }
+      40% { filter: drop-shadow(0 0 16px var(--error-accent)); }
+      100% { filter: drop-shadow(0 0 8px var(--error-accent)); }
+    }
+
+    text.label {
+      fill: var(--label);
+      font-size: 12px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      text-anchor: middle;
+      font-weight: 500;
+      transition: fill 200ms ease;
+      pointer-events: none;
+    }
+    text.label.ignite { fill: var(--label-bright); }
+    text.label.hold { fill: var(--label-bright); }
+    text.sub {
+      fill: var(--label);
+      font-size: 9px;
+      letter-spacing: 0.12em;
+      text-anchor: middle;
+      opacity: 0.55;
+      pointer-events: none;
+    }
+
+    path.cable {
+      fill: none;
+      stroke: var(--idle);
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      transition: stroke 200ms ease, filter 200ms ease;
+    }
+    path.cable.run {
+      stroke: var(--accent, var(--text-accent));
+      filter: drop-shadow(0 0 6px var(--accent, var(--text-accent)));
+      stroke-dasharray: 8 6;
+      animation: flow 600ms linear forwards;
+    }
+    path.cable.hold {
+      stroke: var(--accent, var(--text-accent));
+      filter: drop-shadow(0 0 4px var(--accent, var(--text-accent)));
+    }
+    @keyframes flow {
+      from { stroke-dashoffset: 28; }
+      to { stroke-dashoffset: 0; }
+    }
+
+    text.zone {
+      fill: #3d3d55;
+      font-size: 10px;
+      letter-spacing: 0.42em;
+      text-transform: uppercase;
+      text-anchor: start;
+      pointer-events: none;
+      opacity: 0.7;
+    }
+
+    footer { display: flex; justify-content: space-between; align-items: center; width: 100%; max-width: 1240px; font-size: 0.7rem; letter-spacing: 0.18em; text-transform: uppercase; color: var(--label); }
+    .status { color: var(--label); }
+    .status.connected { color: var(--text-accent); }
+    .status.connected::before { content: "● "; }
+    .legend { display: flex; gap: 1.5rem; }
+    .legend-item { display: flex; align-items: center; gap: 0.4rem; }
+    .swatch { width: 10px; height: 10px; border-radius: 2px; }
+    .swatch-text { background: var(--text-accent); box-shadow: 0 0 6px var(--text-accent); }
+    .swatch-photo { background: var(--photo-accent); box-shadow: 0 0 6px var(--photo-accent); }
+    .swatch-callback { background: var(--callback-accent); box-shadow: 0 0 6px var(--callback-accent); }
+  </style>
+</head>
+<body>
+  <h1>DropMate · live diagram<span class="version">v2.1 channel-deterministic</span></h1>
+  <div class="stage">
+    <div class="diagram">
+    <!--
+      v2.1 box layout (#102): five branch boxes hang off CHANNEL.
+      The narrative is "the agent is a sidekick, not the star" —
+      registration / classifier / vision / flow 2 lib all land DMs
+      without invoking the agent. AGENT (lower right) only lights on
+      true fallthrough: Flow 1, Flow 3, language/pickup/delete, cron
+      synthetics.
+    -->
+    <svg viewBox="0 0 1000 720" role="img" aria-label="trace pipeline v2.1" preserveAspectRatio="xMidYMid meet">
+      <text class="zone" x="20" y="40">Telegram</text>
+      <text class="zone" x="20" y="200">Vercel</text>
+      <text class="zone" x="20" y="640">External</text>
+
+      <!--
+        Cables drawn BEFORE boxes so endpoints overlay cleanly.
+
+        Inbound:
+          TELEGRAM (500,80) → CHANNEL (500,180)
+        Branches (channel at 500,250):
+          CHANNEL → REGISTRATION (120,400)
+          CHANNEL → CLASSIFIER  (310,400)
+          CHANNEL → VISION      (500,400)
+          CHANNEL → FLOW 2 LIB  (690,400)
+          CHANNEL → AGENT       (880,400)
+        Outbound:
+          CHANNEL → TELEGRAM (return; channel-deterministic DMs)
+          AGENT → TELEGRAM (return; drain after ash.turn)
+        External:
+          VISION → AI GATEWAY (920,680)
+          AGENT → AI GATEWAY
+          FLOW 2 LIB → REDIS (80,680)
+          REGISTRATION → REDIS
+      -->
+
+      <!-- TELEGRAM → CHANNEL -->
+      <path class="cable" id="cable-telegram-channel" d="M500 80 L500 180" />
+      <!-- CHANNEL → branches -->
+      <path class="cable" id="cable-channel-registration" d="M440 270 L200 270 L200 400" />
+      <path class="cable" id="cable-channel-classifier"   d="M460 290 L350 290 L350 400" />
+      <path class="cable" id="cable-channel-vision"       d="M500 320 L500 400" />
+      <path class="cable" id="cable-channel-flow2"        d="M540 290 L650 290 L650 400" />
+      <path class="cable" id="cable-channel-agent"        d="M560 270 L840 270 L840 400" />
+      <!-- CHANNEL → TELEGRAM (deterministic DM return path) -->
+      <path class="cable" id="cable-channel-telegram"     d="M440 200 L80 200 L80 90 L400 90" />
+      <!-- AGENT → TELEGRAM (agent drain) -->
+      <path class="cable" id="cable-agent-telegram"       d="M840 400 L840 90 L600 90" />
+      <!-- VISION → AI GATEWAY -->
+      <path class="cable" id="cable-vision-gateway"       d="M500 480 L500 540 L840 540 L840 660" />
+      <!-- AGENT → AI GATEWAY -->
+      <path class="cable" id="cable-agent-gateway"        d="M840 480 L840 660" />
+      <!-- FLOW2 → REDIS -->
+      <path class="cable" id="cable-flow2-redis"          d="M650 480 L650 540 L160 540 L160 660" />
+      <!-- REGISTRATION → REDIS -->
+      <path class="cable" id="cable-registration-redis"   d="M200 480 L200 660" />
+
+      <!-- TELEGRAM (origin + destination, top edge) -->
+      <rect class="box edge heartbeat" id="box-telegram" x="400" y="30" width="200" height="50" rx="6" />
+      <text class="label" id="label-telegram" x="500" y="60">Telegram</text>
+
+      <!-- CHANNEL (orchestrator, the v2.1 star) -->
+      <rect class="box heartbeat" id="box-channel" x="400" y="180" width="200" height="120" rx="6" />
+      <text class="label" id="label-channel" x="500" y="225">Channel</text>
+      <text class="sub" id="sub-channel" x="500" y="244">process-update</text>
+      <text class="sub" id="sub-channel-2" x="500" y="260">verify · parse · route</text>
+
+      <!-- REGISTRATION branch -->
+      <rect class="box heartbeat" id="box-registration" x="120" y="400" width="160" height="80" rx="6" />
+      <text class="label" id="label-registration" x="200" y="438">Registration</text>
+      <text class="sub" id="sub-registration" x="200" y="456">/register · free-text</text>
+      <text class="sub" id="sub-registration-2" x="200" y="470">channel-deterministic</text>
+
+      <!-- CLASSIFIER branch -->
+      <rect class="box heartbeat" id="box-classifier" x="290" y="400" width="120" height="80" rx="6" />
+      <text class="label" id="label-classifier" x="350" y="438">Classifier</text>
+      <text class="sub" id="sub-classifier" x="350" y="456">classify_dm_intent</text>
+      <text class="sub" id="sub-classifier-2" x="350" y="470">vision-free DM</text>
+
+      <!-- VISION branch -->
+      <rect class="box heartbeat" id="box-vision" x="440" y="400" width="120" height="80" rx="6" />
+      <text class="label" id="label-vision" x="500" y="438">Vision</text>
+      <text class="sub" id="sub-vision" x="500" y="456">parse_tracking_page</text>
+      <text class="sub" id="sub-vision-2" x="500" y="470">parse_label (Flow 1)</text>
+
+      <!-- FLOW 2 LIB branch -->
+      <rect class="box heartbeat" id="box-flow2" x="590" y="400" width="120" height="80" rx="6" />
+      <text class="label" id="label-flow2" x="650" y="438">Flow 2 Lib</text>
+      <text class="sub" id="sub-flow2" x="650" y="456">create · accept</text>
+      <text class="sub" id="sub-flow2-2" x="650" y="470">reject · vlc</text>
+
+      <!-- AGENT branch (only lit on fallthrough) -->
+      <rect class="box heartbeat" id="box-agent" x="740" y="400" width="200" height="80" rx="6" />
+      <text class="label" id="label-agent" x="840" y="438">Agent</text>
+      <text class="sub" id="sub-agent" x="840" y="456">ash.turn</text>
+      <text class="sub" id="sub-agent-2" x="840" y="470">flow 1 · flow 3 · cron</text>
+
+      <!-- REDIS (bottom-left edge) -->
+      <rect class="box edge heartbeat" id="box-redis" x="80" y="660" width="160" height="50" rx="6" />
+      <text class="label" id="label-redis" x="160" y="690">Upstash · Redis</text>
+
+      <!-- AI GATEWAY (bottom-right edge) -->
+      <rect class="box edge heartbeat" id="box-ai-gateway" x="760" y="660" width="160" height="50" rx="6" />
+      <text class="label" id="label-ai-gateway" x="840" y="690">AI Gateway</text>
+    </svg>
+    </div>
+    <aside id="trace-log" aria-label="trace log">
+      <header>Trace log</header>
+      <div id="trace-log-body"></div>
+    </aside>
+  </div>
+  <footer>
+    <div class="status" id="status">connecting…</div>
+    <div class="legend">
+      <div class="legend-item"><span class="swatch swatch-text"></span> text</div>
+      <div class="legend-item"><span class="swatch swatch-photo"></span> photo</div>
+      <div class="legend-item"><span class="swatch swatch-callback"></span> callback</div>
+    </div>
+    <div id="trace-id" class="status">—</div>
+  </footer>
+  <script type="module" src="/diagram.js"></script>
+</body>
+</html>
