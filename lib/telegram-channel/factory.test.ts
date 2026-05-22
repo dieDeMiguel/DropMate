@@ -26,7 +26,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { telegramChannel, type TelegramChannelConfig } from "./factory.js";
+import { detectTraceKind, telegramChannel, type TelegramChannelConfig } from "./factory.js";
 
 describe("telegramChannel", () => {
   const config: TelegramChannelConfig = {

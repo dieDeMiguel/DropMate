@@ -48,6 +48,7 @@ import {
   getResident,
   upsertKnownTelegramUser,
 } from "../redis.js";
+import { runWithTrace, type TraceKind } from "../trace.js";
 import {
   buildFileProxyUrl,
   handleFileProxyRequest,
@@ -63,6 +64,8 @@ import {
   type TelegramChannelState,
 } from "./process-update.js";
 import { sendTelegramMessage } from "./send.js";
+import { handleTraceSseRequest } from "./trace-routes.js";
+import { setTelegramTriggerAttribute } from "./trigger-attribute.js";
 
 /**
  * Factory inputs. Both fields are required strings — the spike's
@@ -103,9 +106,27 @@ export function telegramChannel(config: TelegramChannelConfig) {
     TelegramChannelState,
     { chatId: number; fromUserId: number | null }
   >({
+    // Framework-canonical channel attribution (#99). Vercel's Agent Runs
+    // view and the dashboard's project-overview card both read this;
+    // without it every row shows `—` in the Trigger column (`unknown`
+    // adapter bucket). The finer-grained per-shape values
+    // (`telegram.text-dm`, `telegram.callback-confirm-pickup`, …) are
+    // layered on top in process-update.ts via `setTriggerAttribute` so
+    // downstream filters can tell text DMs apart from button taps and
+    // photo uploads.
+    kindHint: "telegram",
     state: undefined as unknown as TelegramChannelState,
     context: (state) => ({ chatId: state.chatId, fromUserId: state.fromUserId }),
     routes: [
+      // Live-diagram SSE feed (#99 re-apply; originally #58). Subscribes
+      // to the trace bus and forwards every event to the connected
+      // browser. The webhook handler downstream emits trace events
+      // inside the `runWithTrace` scope set up by the POST route; the
+      // booth-demo page (#102) renders each box accordingly.
+      GET<TelegramChannelState>("/api/trace", async (req) =>
+        handleTraceSseRequest(req),
+      ),
+
       // GET proxy for shipping-label photos. The Gateway server fetches
       // this URL (instead of Telegram's CDN directly) so we can override
       // the content-type that the CDN sometimes mis-reports as
@@ -129,7 +150,18 @@ export function telegramChannel(config: TelegramChannelConfig) {
           // production (`drop-mate-delta.vercel.app`) and preview
           // deploys without an explicit env var.
           const origin = new URL(req.url).origin;
-          return processInboundTelegramUpdate(req, {
+
+          // Live-diagram tracer (#99): every inbound webhook gets a fresh
+          // trace scope. Peek at the payload via `req.clone()` so we can
+          // set the right `kind` (photo → amber; callback → magenta)
+          // BEFORE processInboundTelegramUpdate runs. A clone is cheap
+          // and it avoids re-entering `runWithTrace` mid-pipeline, which
+          // would mean any orchestrator entry-point emit landed with the
+          // wrong kind.
+          const traceId = crypto.randomUUID().slice(0, 8);
+          const kind = await detectTraceKind(req);
+          return runWithTrace({ traceId, kind }, () =>
+          processInboundTelegramUpdate(req, {
             expectedSecret: webhookSecret,
             sendToAsh: send,
             waitUntil,
@@ -247,9 +279,45 @@ export function telegramChannel(config: TelegramChannelConfig) {
               await sendTelegramMessage(token, chatId, text, undefined, entities);
             },
             registerResident: (input) => registerResident(input),
-          });
+            setTriggerAttribute: setTelegramTriggerAttribute,
+          }),
+          );
         },
       ),
     ],
   });
+}
+
+/**
+ * Best-effort trace-kind detection from a Telegram webhook payload.
+ * Drives the booth-diagram colour palette (#99 / #102):
+ *
+ *   - `callback_query` present     → "callback" (magenta)
+ *   - `message.photo[]` non-empty  → "photo"    (amber)
+ *   - anything else                → "text"     (default cyan)
+ *
+ * Reads the body via `req.clone().json()` so the downstream
+ * `processInboundTelegramUpdate` call still gets a fresh, unconsumed
+ * body to parse. Any error (malformed JSON, missing fields, network
+ * read failure on the clone) falls through to "text" — the diagram
+ * just renders the trace in the default colour and the orchestrator's
+ * own validation handles the bad-input case.
+ *
+ * Exported only for tests; production callers go through the POST
+ * route which uses it internally.
+ */
+export async function detectTraceKind(req: Request): Promise<TraceKind> {
+  try {
+    const peek = (await req.clone().json()) as {
+      callback_query?: unknown;
+      message?: { photo?: ReadonlyArray<unknown> };
+    };
+    if (peek && peek.callback_query) return "callback";
+    if (peek && peek.message?.photo && peek.message.photo.length > 0) {
+      return "photo";
+    }
+    return "text";
+  } catch {
+    return "text";
+  }
 }
