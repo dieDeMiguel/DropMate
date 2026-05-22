@@ -4,20 +4,27 @@
  * Trigger column.
  *
  * Why this lives separately from `process-update.ts`: the orchestrator
- * doesn't need to know whether OTel is loadable at runtime — it just
- * calls `deps.setTriggerAttribute?.("telegram.text-dm")` and trusts
- * the factory to wire a real implementation. This module is that wire.
+ * doesn't need to know how the attribute lands on the span — it just
+ * calls `deps.setTriggerAttribute?.("telegram.text-dm")` and trusts the
+ * factory to wire a real implementation. This module is that wire.
  *
- * Production wiring resolves the OTel `trace` namespace lazily through
- * `experimental-ash`'s bundled `@opentelemetry/api` (the framework's
- * own instrumentation runtime registers the global provider, so by the
- * time inbound webhooks fire there's always an active span). When the
- * peer dependency is missing — unit tests, the spike webhook before
- * Ash is fully wired — the resolver returns `undefined` and the helper
- * is a no-op. The orchestrator's optional-chaining at every call site
- * (`deps.setTriggerAttribute?.(...)`) gives callers a second layer of
- * defence, but the no-op behaviour here is what makes it safe to
- * inject the real helper unconditionally from the factory.
+ * Synchronous setAttribute on the active span is the canonical OTel
+ * pattern. Earlier revisions of this helper resolved the API via
+ * dynamic import + fire-and-forget `.then(...)`, which created a
+ * timing ambiguity: the microtask could drain after `sendToAsh` had
+ * already advanced past the span-open synchronous block, landing the
+ * attribute on a sibling rather than the parent of the `ash.turn`
+ * span. With a static import the call site sets the attribute on the
+ * span that's active at the precise point of invocation — no
+ * microtask delay, no fire-and-forget race.
+ *
+ * `@opentelemetry/api` is declared as a direct dependency (it's
+ * already pulled in transitively via `experimental-ash`'s
+ * instrumentation runtime + `@vercel/otel`; declaring it explicitly
+ * pins the version we compile against and lets us drop the dynamic-
+ * specifier indirection). Failures still propagate as silent no-ops:
+ * `setAttribute` throws on some bundler shims and we never want
+ * observability metadata to crash an inbound webhook delivery.
  *
  * The attribute key `trigger` matches #74's working name. If a
  * framework-canonical alternative key surfaces in `experimental-ash`
@@ -30,79 +37,30 @@
  * button taps and photo uploads.
  */
 
+import { trace } from "@opentelemetry/api";
+
 import type { TelegramTriggerKind } from "./process-update.js";
 
 type SetAttributeFn = (key: string, value: string) => void;
 
-interface MinimalSpan {
-  setAttribute(key: string, value: string): unknown;
-}
-
-interface MinimalTraceApi {
-  getActiveSpan(): MinimalSpan | undefined;
-}
-
 /**
- * Cached OTel `trace` namespace. `null` means "tried and failed to
- * resolve" — we don't retry on every call. `undefined` means "haven't
- * tried yet". Lazy first-use avoids paying the dynamic-import cost
- * during cold start when no inbound webhook has arrived yet.
- */
-let cachedTraceApi: MinimalTraceApi | null | undefined;
-
-async function resolveTraceApi(): Promise<MinimalTraceApi | null> {
-  if (cachedTraceApi !== undefined) return cachedTraceApi;
-  try {
-    // `@opentelemetry/api` is an optional peer dependency of
-    // `experimental-ash`. In production deployments it's pulled in
-    // transitively through the framework's instrumentation runtime
-    // and resolved by the bundler. In unit tests and the spike
-    // webhook the import throws; we cache `null` and become a no-op
-    // for the rest of the process lifetime.
-    //
-    // The dynamic-specifier indirection hides the module name from
-    // TypeScript's resolver so typecheck passes without declaring
-    // `@opentelemetry/api` as a direct dep. The bundler resolves the
-    // real module at build time when it's present and gracefully
-    // reports a runtime resolution error when it isn't — the `catch`
-    // block below absorbs both cases identically.
-    const moduleName = "@opentelemetry/api";
-    const otel = (await import(moduleName)) as {
-      trace?: MinimalTraceApi;
-    };
-    cachedTraceApi = otel.trace ?? null;
-  } catch {
-    cachedTraceApi = null;
-  }
-  return cachedTraceApi;
-}
-
-/**
- * Production wiring for `ProcessUpdateDeps.setTriggerAttribute`. The
- * resolver fires lazily on the first inbound webhook, then every
- * subsequent call is a cheap cached lookup.
+ * Production wiring for `ProcessUpdateDeps.setTriggerAttribute`. Reads
+ * the active span synchronously via the OTel global trace API and
+ * stamps the `trigger` attribute on it. No-op if there's no active
+ * span (e.g. unit tests, the spike webhook before Ash's
+ * instrumentation runtime registers a global provider).
  *
- * Best-effort: any failure to find the OTel API or the active span
- * is silently swallowed. The attribute is observability metadata —
- * losing it must never crash a webhook delivery.
+ * Best-effort: any failure (no active span, span shim that throws on
+ * setAttribute) is silently swallowed. Losing the attribute is
+ * acceptable; crashing the inbound delivery is not.
  */
 export function setTelegramTriggerAttribute(trigger: TelegramTriggerKind): void {
-  // Fire-and-forget — we don't await the resolver because the resolver
-  // is a microtask-cheap cached lookup after the first call, and the
-  // span is needed synchronously inside the inbound handler. The first
-  // delivery on a cold start may race the import; subsequent deliveries
-  // hit the cache. A miss on the first delivery is acceptable — the
-  // dashboard's other observability signals (turn count, tokens) still
-  // populate.
-  void resolveTraceApi().then((api) => {
-    if (api === null) return;
-    try {
-      api.getActiveSpan()?.setAttribute("trigger", trigger);
-    } catch {
-      // setAttribute on a no-op span throws on some bundler shims —
-      // swallow rather than crash an inbound delivery.
-    }
-  });
+  try {
+    trace.getActiveSpan()?.setAttribute("trigger", trigger);
+  } catch {
+    // setAttribute on a no-op span throws on some bundler shims —
+    // swallow rather than crash an inbound delivery.
+  }
 }
 
 // Exported only for test injection: lets callers compose their own
