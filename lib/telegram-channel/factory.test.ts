@@ -83,3 +83,75 @@ describe("telegramChannel", () => {
     ).not.toThrow();
   });
 });
+
+describe("detectTraceKind (v2.1 #99 — live-diagram colour driver)", () => {
+  // Drives the booth-diagram accent (text=cyan, photo=amber,
+  // callback=magenta). Reads the payload via `req.clone().json()` so
+  // the orchestrator gets a fresh body to consume.
+
+  function jsonRequest(body: unknown): Request {
+    return new Request("http://localhost/api/telegram", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it("returns \"callback\" when callback_query is present", async () => {
+    const req = jsonRequest({
+      update_id: 1,
+      callback_query: { id: "cb1", data: "confirm_pickup:pkg_42" },
+    });
+    expect(await detectTraceKind(req)).toBe("callback");
+  });
+
+  it("returns \"photo\" when message.photo is a non-empty array", async () => {
+    const req = jsonRequest({
+      update_id: 1,
+      message: {
+        message_id: 1,
+        chat: { id: 1, type: "private" },
+        photo: [{ file_id: "f", width: 90, height: 90, file_size: 100 }],
+      },
+    });
+    expect(await detectTraceKind(req)).toBe("photo");
+  });
+
+  it("returns \"text\" for plain text DMs", async () => {
+    const req = jsonRequest({
+      update_id: 1,
+      message: {
+        message_id: 1,
+        chat: { id: 1, type: "private" },
+        text: "Hallo",
+      },
+    });
+    expect(await detectTraceKind(req)).toBe("text");
+  });
+
+  it("returns \"text\" on malformed JSON (no throw)", async () => {
+    const req = new Request("http://localhost/api/telegram", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "not json {{{",
+    });
+    expect(await detectTraceKind(req)).toBe("text");
+  });
+
+  it("does not consume the original request body (clone semantics)", async () => {
+    // The clone must leave the original body available for the
+    // downstream orchestrator to read via `req.json()`.
+    const req = jsonRequest({
+      update_id: 1,
+      message: {
+        message_id: 1,
+        chat: { id: 1, type: "private" },
+        text: "Hallo",
+      },
+    });
+    await detectTraceKind(req);
+
+    const body = await req.json();
+    expect(body).toMatchObject({ update_id: 1 });
+  });
+});
