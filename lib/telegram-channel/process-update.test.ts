@@ -4407,6 +4407,53 @@ describe("processInboundTelegramUpdate — registration (v2.1 #97 — channel-de
     expect(text).toContain("<Name>");
   });
 
+  it("`/start` (Telegram tap-to-start) → usage-hint DM, no agent invocation, no Resident write", async () => {
+    const { deps, sendToAsh, sendDirectMessage, registerResident } = buildDeps();
+
+    const res = await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 99,
+          text: "/start",
+          fromUserId: 99,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(res.status).toBe(204);
+    expect(sendToAsh).not.toHaveBeenCalled();
+    expect(registerResident).not.toHaveBeenCalled();
+    expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+    const [, text] = sendDirectMessage.mock.calls[0]!;
+    expect(text).toContain("/register");
+    expect(text).toContain("<Name>");
+  });
+
+  it("`/start <deeplink-token>` is also caught — the token is ignored", async () => {
+    const { deps, sendToAsh, sendDirectMessage } = buildDeps();
+
+    const res = await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 99,
+          text: "/start ref_abc123",
+          fromUserId: 99,
+          languageCode: "en",
+        }),
+      ),
+      deps,
+    );
+
+    expect(res.status).toBe(204);
+    expect(sendToAsh).not.toHaveBeenCalled();
+    expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+    const [, text] = sendDirectMessage.mock.calls[0]!;
+    // English usage hint.
+    expect(text).toContain("Please write: /register");
+  });
+
   it("uses the resident's stored language for the confirmation DM after re-registration", async () => {
     // Re-registration: lib returns updated:true with the existing
     // resident.language. Confirmation DM should render in that

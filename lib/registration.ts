@@ -85,6 +85,18 @@ export function isRegisterCommand(text: string): boolean {
 }
 
 /**
+ * `/start` matcher. Telegram emits `/start` when a user taps the
+ * "Start" button on a new conversation. The bot has no useful response
+ * other than the same `/register Name, Street Number` usage hint we
+ * already send for a bare `/register` — handing this to the agent
+ * produces a welcome wall (live trace 2026-05-22 post-Redis-flush).
+ * `/start <deeplink-token>` is also matched; the token is ignored.
+ */
+export function isStartCommand(text: string): boolean {
+  return /^\/start(?:@[A-Za-z0-9_]+)?(?:\s|$)/.test(text.trim());
+}
+
+/**
  * Structured shape of a parsed `/register …` or matching free-text
  * inbound. `null` when the text does not parse — the caller then either
  * shows the user a "try `/register Name, Street Number`" prompt (slash

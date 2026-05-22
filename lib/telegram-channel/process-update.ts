@@ -113,6 +113,7 @@ import { emitTrace } from "../trace.js";
 import {
   buildRegistrationConfirmationDm,
   isRegisterCommand,
+  isStartCommand,
   parseFreeTextRegistration,
   parseRegisterCommand,
   type ParsedRegistration,
@@ -2810,6 +2811,34 @@ async function handleRegistrationDm(
   deps: ProcessUpdateDeps,
 ): Promise<Response | null> {
   if (inbound.fromUserId === null) return null;
+
+  // `/start` is Telegram's standard first-contact command (tap-to-start
+  // emits it). The deterministic response is the same one-sentence
+  // `/register …` usage hint we already send for a bare `/register`.
+  // Without this hard-route the inbound falls through to the agent,
+  // which (live trace 2026-05-22) emits a welcome wall against
+  // instructions.
+  if (isStartCommand(inbound.text)) {
+    const language = inbound.fromLanguageCode;
+    emitTrace("registration", "start", { phase: "start-command" });
+    const prompt = buildRegisterUsageHint(language);
+    try {
+      emitTrace("dm", "start");
+      await deps.sendDirectMessage(inbound.chatId, prompt);
+      emitTrace("dm", "end");
+    } catch (err) {
+      console.error(
+        "[handleRegistrationDm] /start usage-hint DM failed for chatId",
+        inbound.chatId,
+        "error:",
+        err instanceof Error
+          ? { name: err.name, message: err.message, stack: err.stack }
+          : err,
+      );
+    }
+    emitTrace("registration", "end");
+    return new Response(null, { status: 204 });
+  }
 
   const isSlash = isRegisterCommand(inbound.text);
   const parsed: ParsedRegistration | null = isSlash
