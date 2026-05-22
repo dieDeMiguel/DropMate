@@ -363,3 +363,60 @@ describe("registerPackage (v2.1 #106 — channel-deterministic Flow 1)", () => {
     expect(result.package.receptionRequestId).toBeUndefined();
   });
 });
+
+describe("resolveRecipient (v2.1 #109 — pure recipient-resolution lookup)", () => {
+  beforeEach(() => {
+    residentStore.clear();
+    knownTgStore.clear();
+    requestStore.clear();
+    packageStore.clear();
+  });
+
+  it("returns kind:'resident' when name+house resolve to a registered Resident", async () => {
+    seedResident({
+      platformId: "200",
+      name: "Marlene Hartmann",
+      houseNumber: "88",
+    });
+    const { resolveRecipient } = await loadLib();
+    const resolution = await resolveRecipient("Marlene Hartmann", "88");
+    expect(resolution.kind).toBe("resident");
+    if (resolution.kind === "resident") {
+      expect(resolution.resident.id).toBe("200");
+      expect(resolution.resident.name).toBe("Marlene Hartmann");
+      expect(resolution.resident.houseNumber).toBe("88");
+    }
+  });
+
+  it("falls back to kind:'known_telegram' when the name matches a known TG user (no Resident match)", async () => {
+    seedKnownTg({
+      userId: 999,
+      firstName: "Foo",
+      lastName: "Bar",
+    });
+    const { resolveRecipient } = await loadLib();
+    const resolution = await resolveRecipient("Foo Bar", "12");
+    expect(resolution.kind).toBe("known_telegram");
+    if (resolution.kind === "known_telegram") {
+      expect(resolution.telegram.userId).toBe(999);
+      expect(resolution.telegram.firstName).toBe("Foo");
+    }
+  });
+
+  it("returns kind:'unknown' when the name matches neither a Resident nor a known TG user", async () => {
+    const { resolveRecipient } = await loadLib();
+    const resolution = await resolveRecipient("Stranger", "999");
+    expect(resolution.kind).toBe("unknown");
+  });
+
+  it("does NOT write a Package row (pure read-only lookup)", async () => {
+    seedResident({
+      platformId: "200",
+      name: "Marlene Hartmann",
+      houseNumber: "88",
+    });
+    const { resolveRecipient } = await loadLib();
+    await resolveRecipient("Marlene Hartmann", "88");
+    expect(packageStore.size).toBe(0);
+  });
+});

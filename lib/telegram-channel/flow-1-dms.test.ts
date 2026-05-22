@@ -6,10 +6,13 @@ import {
   buildDmTextPickupMultiplePackagesText,
   buildDmTextPickupNoOpenPackagesText,
   buildDmTextPickupRetryText,
+  buildFlow1ClarificationSynthetic,
   buildGroupAckText,
   buildHolderNotRegisteredNudge,
   buildPickupKeyboard,
   buildRecipientDmText,
+  buildUnknownRecipientGroupQuestion,
+  captionLooksLikeMultiRecipient,
 } from "./flow-1-dms.js";
 import type { HolderSummary, ResidentRecipientSummary } from "../package.js";
 
@@ -215,6 +218,145 @@ describe("flow-1-dms", () => {
       expect(buildDmTextPickupRetryText("en")).toBe(
         "Something went wrong. Please try again in a moment.",
       );
+    });
+  });
+
+  describe("buildUnknownRecipientGroupQuestion (v2.1 #109)", () => {
+    it("renders the German question by default", () => {
+      expect(buildUnknownRecipientGroupQuestion("Foo", null)).toBe(
+        "📦 Paket für Foo – kennt jemand Foo?",
+      );
+    });
+    it("renders English / Spanish / Turkish variants", () => {
+      expect(buildUnknownRecipientGroupQuestion("Foo", "en")).toBe(
+        "📦 Package for Foo – does anyone know Foo?",
+      );
+      expect(buildUnknownRecipientGroupQuestion("Foo", "es")).toBe(
+        "📦 Paquete para Foo – ¿alguien conoce a Foo?",
+      );
+      expect(buildUnknownRecipientGroupQuestion("Foo", "tr")).toBe(
+        "📦 Foo için paket – Foo adında birini tanıyan var mı?",
+      );
+    });
+    it("falls back to German on unknown language codes", () => {
+      expect(buildUnknownRecipientGroupQuestion("Foo", "ja")).toBe(
+        "📦 Paket für Foo – kennt jemand Foo?",
+      );
+    });
+  });
+
+  describe("buildFlow1ClarificationSynthetic (v2.1 #109)", () => {
+    it("renders the required header line + the agent's hard prohibitions", () => {
+      const synthetic = buildFlow1ClarificationSynthetic({
+        language: "de",
+        reason: "low-conf",
+        source: "photo",
+        carrier: "DHL",
+        recipientName: "Foo",
+        confidence: "low",
+        caption: "Paket für jemanden",
+        holderName: "Diego",
+        holderHouseNumber: "69",
+      });
+      expect(synthetic).toContain(
+        "[FLOW_1 CLARIFICATION language=de reason=low-conf]",
+      );
+      expect(synthetic).toContain(
+        "The channel parsed: carrier=DHL recipientName=Foo confidence=low.",
+      );
+      expect(synthetic).toContain("Caption: Paket für jemanden.");
+      expect(synthetic).toContain("Holder: Diego (house 69).");
+      expect(synthetic).toContain("ONE short clarifying question in de");
+      // Hard prohibitions
+      expect(synthetic).toContain("Do NOT call any tools");
+      expect(synthetic).toContain("Do NOT post to the group");
+      expect(synthetic).toContain("Do NOT mention finding");
+    });
+
+    it("uses 'Text:' for the source label on the text path (vs 'Caption:' for photo)", () => {
+      const photoSynthetic = buildFlow1ClarificationSynthetic({
+        language: "de",
+        reason: "missing-recipient",
+        source: "photo",
+        caption: "Hi",
+      });
+      const textSynthetic = buildFlow1ClarificationSynthetic({
+        language: "de",
+        reason: "missing-recipient",
+        source: "text",
+        caption: "Hi",
+      });
+      expect(photoSynthetic).toContain("Caption: Hi.");
+      expect(textSynthetic).toContain("Text: Hi.");
+    });
+
+    it("renders '(no caption)' when caption is empty or absent", () => {
+      const synthetic = buildFlow1ClarificationSynthetic({
+        language: "de",
+        reason: "parse-failed",
+        source: "photo",
+      });
+      expect(synthetic).toContain("Caption: (no caption).");
+    });
+
+    it("renders '(unknown)' / '?' placeholders when holder fields are absent", () => {
+      const synthetic = buildFlow1ClarificationSynthetic({
+        language: "de",
+        reason: "parse-failed",
+        source: "photo",
+      });
+      expect(synthetic).toContain("Holder: (unknown) (house ?).");
+    });
+
+    it("renders 'none' for recipientName when absent", () => {
+      const synthetic = buildFlow1ClarificationSynthetic({
+        language: "de",
+        reason: "missing-recipient",
+        source: "photo",
+        confidence: "high",
+      });
+      expect(synthetic).toContain("recipientName=none");
+    });
+
+    it("forwards the language code to the agent prompt verbatim (en/es/tr)", () => {
+      for (const language of ["en", "es", "tr"]) {
+        const synthetic = buildFlow1ClarificationSynthetic({
+          language,
+          reason: "low-conf",
+          source: "text",
+        });
+        expect(synthetic).toContain(
+          `[FLOW_1 CLARIFICATION language=${language} reason=low-conf]`,
+        );
+        expect(synthetic).toContain(
+          `ONE short clarifying question in ${language}`,
+        );
+      }
+    });
+  });
+
+  describe("captionLooksLikeMultiRecipient (v2.1 #109 ambiguous-multi heuristic)", () => {
+    it("detects 'Anna und Beate' style German conjunction", () => {
+      expect(captionLooksLikeMultiRecipient("Paket für Anna und Beate")).toBe(
+        true,
+      );
+    });
+    it("detects 'Anna and Beate' style English conjunction", () => {
+      expect(captionLooksLikeMultiRecipient("Package for Anna and Beate")).toBe(
+        true,
+      );
+    });
+    it("detects 'Anna, Beate' comma-separated names", () => {
+      expect(captionLooksLikeMultiRecipient("Paket für Anna, Beate")).toBe(
+        true,
+      );
+    });
+    it("returns false for single-recipient captions", () => {
+      expect(captionLooksLikeMultiRecipient("Paket für Anna")).toBe(false);
+    });
+    it("returns false on empty / absent caption", () => {
+      expect(captionLooksLikeMultiRecipient(undefined)).toBe(false);
+      expect(captionLooksLikeMultiRecipient("")).toBe(false);
     });
   });
 });

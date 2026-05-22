@@ -85,6 +85,7 @@ interface BuiltDeps {
   createReceptionRequest: ReturnType<typeof vi.fn>;
   acceptReceptionRequest: ReturnType<typeof vi.fn>;
   registerPackage: ReturnType<typeof vi.fn>;
+  resolveRecipient: ReturnType<typeof vi.fn>;
   confirmPickup: ReturnType<typeof vi.fn>;
   listOpenPackagesForRecipient: ReturnType<typeof vi.fn>;
   editGroupCard: ReturnType<typeof vi.fn>;
@@ -114,6 +115,10 @@ function buildDeps(overrides: {
   registerResult?: { resident: Resident; updated: boolean };
   registerPackageResult?: RegisterPackageResult;
   registerPackageError?: Error;
+  resolveRecipientResult?: Awaited<
+    ReturnType<ProcessUpdateDeps["resolveRecipient"]>
+  >;
+  resolveRecipientError?: Error;
   confirmPickupResult?: ConfirmPickupResult;
   confirmPickupError?: Error;
   openPackagesForRecipient?: readonly Package[];
@@ -247,6 +252,22 @@ function buildDeps(overrides: {
         .fn()
         .mockResolvedValue(
           overrides.registerPackageResult ?? defaultRegisterPackageResult,
+        );
+  // v2.1 #109 (Slice 3 of #105): default resolveRecipient verdict —
+  // "unknown" so any medium-conf classifier verdict that runs in
+  // tests without an explicit override falls through (the safe
+  // default that matches the "no Resident found" behaviour in
+  // production). Tests exercising the medium-conf + resident branch
+  // override this explicitly with `resolveRecipientResult`.
+  const defaultResolveRecipientResult: Awaited<
+    ReturnType<ProcessUpdateDeps["resolveRecipient"]>
+  > = { kind: "unknown" };
+  const resolveRecipient = overrides.resolveRecipientError
+    ? vi.fn().mockRejectedValue(overrides.resolveRecipientError)
+    : vi
+        .fn()
+        .mockResolvedValue(
+          overrides.resolveRecipientResult ?? defaultResolveRecipientResult,
         );
   // v2.1 #108: default confirmPickup verdict — the recipient is
   // closing their own held package (the Flow 1 happy path). Tests
@@ -400,6 +421,7 @@ function buildDeps(overrides: {
     createReceptionRequest,
     acceptReceptionRequest,
     registerPackage,
+    resolveRecipient,
     confirmPickup,
     listOpenPackagesForRecipient,
     editGroupCard,
@@ -425,6 +447,7 @@ function buildDeps(overrides: {
       createReceptionRequest,
       acceptReceptionRequest,
       registerPackage,
+      resolveRecipient,
       confirmPickup,
       listOpenPackagesForRecipient,
       editGroupCard,
@@ -705,12 +728,12 @@ describe("processInboundTelegramUpdate", () => {
       });
     });
 
-    it("stays silent + does NOT invoke the agent when parseLabel returns low confidence (Slice 3 / #109 will introduce the clarification synthetic)", async () => {
+    it("hands the agent a [FLOW_1 CLARIFICATION reason=low-conf] synthetic when parseLabel returns low confidence (v2.1 #109 Slice 3 of #105)", async () => {
       const { deps, sendToAsh, registerPackage, sendDirectMessage } = buildDeps({
         registeredResident: holderResident(),
         parsedLabel: {
           carrier: "DHL",
-          recipientName: "Müller",
+          recipientName: "Foo",
           recipientHouseNumber: "12",
           confidence: "low",
           reason: "blurry label",
@@ -723,37 +746,122 @@ describe("processInboundTelegramUpdate", () => {
       );
 
       expect(res.status).toBe(204);
+      // No Package write on the fallthrough path — the agent asks the
+      // holder to clarify; the holder's restated reply gets a fresh
+      // classification run.
       expect(registerPackage).not.toHaveBeenCalled();
+      // No group post / DM on fallthrough either.
       expect(sendDirectMessage).not.toHaveBeenCalled();
-      expect(sendToAsh).not.toHaveBeenCalled();
+      // The agent IS invoked with the clarification synthetic.
+      expect(sendToAsh).toHaveBeenCalledTimes(1);
+      const [syntheticMessage] = sendToAsh.mock.calls[0]!;
+      expect(syntheticMessage).toContain("[FLOW_1 CLARIFICATION");
+      expect(syntheticMessage).toContain("reason=low-conf");
+      expect(syntheticMessage).toContain("Do NOT call any tools");
     });
 
-    it("stays silent when parseLabel returns medium confidence", async () => {
-      const { deps, sendToAsh, registerPackage, sendDirectMessage } = buildDeps({
+    it("hands the agent reason=ambiguous-multi when the caption clearly names 2+ recipients at low confidence", async () => {
+      const { deps, sendToAsh, registerPackage } = buildDeps({
         registeredResident: holderResident(),
         parsedLabel: {
-          carrier: "Hermes",
-          recipientName: "Müller",
-          confidence: "medium",
-          reason: "partial label",
+          carrier: "DHL",
+          recipientName: "Foo",
+          confidence: "low",
+          reason: "label only shows one name; caption suggests two",
         },
       });
 
       await processInboundTelegramUpdate(
-        makeRequest(groupPhotoUpdate({ caption: "Maybe for Müller" })),
+        makeRequest(groupPhotoUpdate({ caption: "Paket für Anna und Beate" })),
         deps,
       );
 
       expect(registerPackage).not.toHaveBeenCalled();
-      expect(sendDirectMessage).not.toHaveBeenCalled();
+      expect(sendToAsh).toHaveBeenCalledTimes(1);
+      const [syntheticMessage] = sendToAsh.mock.calls[0]!;
+      expect(syntheticMessage).toContain("reason=ambiguous-multi");
+    });
+
+    it("on medium-conf + recipient resolves to a Resident: registers deterministically (treats medium as high when the second signal converges, v2.1 #109)", async () => {
+      const {
+        deps,
+        sendToAsh,
+        parseLabel,
+        resolveRecipient,
+        registerPackage,
+        sendDirectMessage,
+      } = buildDeps({
+        registeredResident: holderResident(),
+        parsedLabel: {
+          carrier: "Hermes",
+          recipientName: "Foo",
+          confidence: "medium",
+          reason: "partial label, name legible",
+        },
+        // resolveRecipient finds the recipient as a registered Resident
+        resolveRecipientResult: {
+          kind: "resident",
+          resident: {
+            id: "200",
+            name: "Foo",
+            houseNumber: "88",
+            language: "de",
+            floor: null,
+            buzzerName: null,
+          },
+        },
+      });
+
+      await processInboundTelegramUpdate(
+        makeRequest(groupPhotoUpdate({ caption: "Paket für Foo" })),
+        deps,
+      );
+
+      // Resolve first, then register.
+      expect(parseLabel).toHaveBeenCalledTimes(1);
+      expect(resolveRecipient).toHaveBeenCalledTimes(1);
+      expect(registerPackage).toHaveBeenCalledTimes(1);
+      // Group ack + recipient DM, no agent invocation.
+      expect(sendDirectMessage).toHaveBeenCalledTimes(2);
       expect(sendToAsh).not.toHaveBeenCalled();
     });
 
-    it("stays silent when parseLabel omits recipientName even at high confidence", async () => {
-      // The label is legible enough to identify the carrier, but the
-      // recipient name is uncertain — the channel must not register
-      // without a name to avoid a misrouted DM. Slice 3 (#109) will
-      // route this to the clarification synthetic.
+    it("on medium-conf + recipient does NOT resolve to a Resident: falls through to clarification synthetic, NO Package write (v2.1 #109)", async () => {
+      const {
+        deps,
+        sendToAsh,
+        resolveRecipient,
+        registerPackage,
+        sendDirectMessage,
+      } = buildDeps({
+        registeredResident: holderResident(),
+        parsedLabel: {
+          carrier: "Hermes",
+          recipientName: "Stranger",
+          confidence: "medium",
+          reason: "partial label",
+        },
+        // Default resolveRecipient returns unknown — explicit for clarity.
+        resolveRecipientResult: { kind: "unknown" },
+      });
+
+      await processInboundTelegramUpdate(
+        makeRequest(groupPhotoUpdate({ caption: "Paket für Stranger" })),
+        deps,
+      );
+
+      expect(resolveRecipient).toHaveBeenCalledTimes(1);
+      // No Package write — clarification first.
+      expect(registerPackage).not.toHaveBeenCalled();
+      // No group / DM post.
+      expect(sendDirectMessage).not.toHaveBeenCalled();
+      // Clarification synthetic to the agent.
+      expect(sendToAsh).toHaveBeenCalledTimes(1);
+      const [synthetic] = sendToAsh.mock.calls[0]!;
+      expect(synthetic).toContain("reason=low-conf");
+    });
+
+    it("hands the agent reason=missing-recipient when parseLabel omits recipientName even at high confidence (v2.1 #109)", async () => {
       const { deps, sendToAsh, registerPackage, sendDirectMessage } = buildDeps({
         registeredResident: holderResident(),
         parsedLabel: {
@@ -771,30 +879,39 @@ describe("processInboundTelegramUpdate", () => {
 
       expect(registerPackage).not.toHaveBeenCalled();
       expect(sendDirectMessage).not.toHaveBeenCalled();
-      expect(sendToAsh).not.toHaveBeenCalled();
+      expect(sendToAsh).toHaveBeenCalledTimes(1);
+      const [synthetic] = sendToAsh.mock.calls[0]!;
+      expect(synthetic).toContain("reason=missing-recipient");
     });
 
-    it("stays silent when parseLabel throws (vision outage, both primary + fallback errored)", async () => {
+    it("hands the agent reason=parse-failed when parseLabel throws (vision outage, both primary + fallback errored) (v2.1 #109)", async () => {
       const { deps, sendToAsh, registerPackage, sendDirectMessage } = buildDeps({
         registeredResident: holderResident(),
         parsedLabelError: new Error("vision outage"),
       });
 
       await processInboundTelegramUpdate(
-        makeRequest(groupPhotoUpdate({ caption: "Paket für Marlene" })),
+        makeRequest(groupPhotoUpdate({ caption: "Paket für jemand" })),
         deps,
       );
 
       expect(registerPackage).not.toHaveBeenCalled();
       expect(sendDirectMessage).not.toHaveBeenCalled();
-      expect(sendToAsh).not.toHaveBeenCalled();
+      expect(sendToAsh).toHaveBeenCalledTimes(1);
+      const [synthetic] = sendToAsh.mock.calls[0]!;
+      expect(synthetic).toContain("reason=parse-failed");
     });
 
-    it("stays silent when getFileUrl throws (cannot resolve the photo to a URL)", async () => {
-      const { deps, sendToAsh, getFileUrl, parseLabel, registerPackage } =
-        buildDeps({
-          registeredResident: holderResident(),
-        });
+    it("hands the agent reason=parse-failed when getFileUrl throws (cannot resolve the photo to a URL) (v2.1 #109)", async () => {
+      const {
+        deps,
+        sendToAsh,
+        getFileUrl,
+        parseLabel,
+        registerPackage,
+      } = buildDeps({
+        registeredResident: holderResident(),
+      });
       getFileUrl.mockRejectedValueOnce(new Error("Bot API 404"));
 
       await processInboundTelegramUpdate(
@@ -802,9 +919,12 @@ describe("processInboundTelegramUpdate", () => {
         deps,
       );
 
+      // parse_label never runs without a URL.
       expect(parseLabel).not.toHaveBeenCalled();
       expect(registerPackage).not.toHaveBeenCalled();
-      expect(sendToAsh).not.toHaveBeenCalled();
+      expect(sendToAsh).toHaveBeenCalledTimes(1);
+      const [synthetic] = sendToAsh.mock.calls[0]!;
+      expect(synthetic).toContain("reason=parse-failed");
     });
 
     it("DMs the unregistered holder a /register nudge when registerPackage throws REGISTER_PACKAGE_HOLDER_NOT_REGISTERED — silent in the group", async () => {
@@ -837,8 +957,8 @@ describe("processInboundTelegramUpdate", () => {
       expect(sendToAsh).not.toHaveBeenCalled();
     });
 
-    it("stays silent when the recipient resolution is 'unknown' (Slice 3 / #109 introduces the group question)", async () => {
-      const { deps, sendToAsh, sendDirectMessage } = buildDeps({
+    it("on high-conf + recipient resolution 'unknown': posts the deterministic group question (📦 Paket für X – kennt jemand X?), no agent invocation (v2.1 #109)", async () => {
+      const { deps, sendToAsh, registerPackage, sendDirectMessage } = buildDeps({
         registeredResident: holderResident(),
         parsedLabel: {
           carrier: "DHL",
@@ -881,7 +1001,13 @@ describe("processInboundTelegramUpdate", () => {
         deps,
       );
 
-      expect(sendDirectMessage).not.toHaveBeenCalled();
+      // Package is still registered (the cron sweep ages it out if
+      // nobody claims), AND the group question is posted.
+      expect(registerPackage).toHaveBeenCalledTimes(1);
+      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+      const [chatId, text] = sendDirectMessage.mock.calls[0]!;
+      expect(chatId).toBe(-100);
+      expect(text).toBe("📦 Paket für Stranger – kennt jemand Stranger?");
       expect(sendToAsh).not.toHaveBeenCalled();
     });
 
@@ -4907,24 +5033,162 @@ describe("processInboundTelegramUpdate — Flow 1 group text (v2.1 #106 Slice 1 
     expect(sendToAsh).not.toHaveBeenCalled();
   });
 
-  it("stays silent when classifier confidence is medium (Slice 3 / #109 will introduce the clarification synthetic)", async () => {
-    const { deps, sendToAsh, registerPackage, sendDirectMessage } = buildDeps({
+  it("on medium-conf + recipient resolves to a Resident: registers deterministically (treats medium as high when second signal converges, v2.1 #109)", async () => {
+    const {
+      deps,
+      sendToAsh,
+      resolveRecipient,
+      registerPackage,
+      sendDirectMessage,
+    } = buildDeps({
+      registeredResident: holderResident(),
       groupClassification: {
         isPackageRegistration: true,
-        recipients: [{ name: "Müller" }],
+        recipients: [{ name: "Foo", houseNumber: "88" }],
         confidence: "medium",
-        reason: "name ambiguous",
+        reason: "phrasing slightly ambiguous",
+      },
+      resolveRecipientResult: {
+        kind: "resident",
+        resident: {
+          id: "200",
+          name: "Foo",
+          houseNumber: "88",
+          language: "de",
+          floor: null,
+          buzzerName: null,
+        },
       },
     });
 
     await processInboundTelegramUpdate(
-      makeRequest(groupRegistrationUpdate({ text: "Vielleicht Paket für Müller?" })),
+      makeRequest(groupRegistrationUpdate({ text: "Vielleicht Paket für Foo?" })),
+      deps,
+    );
+
+    expect(resolveRecipient).toHaveBeenCalledTimes(1);
+    expect(registerPackage).toHaveBeenCalledTimes(1);
+    // Group ack + recipient DM, no agent invocation.
+    expect(sendDirectMessage).toHaveBeenCalledTimes(2);
+    expect(sendToAsh).not.toHaveBeenCalled();
+  });
+
+  it("on medium-conf + recipient does NOT resolve to a Resident: falls through with [FLOW_1 CLARIFICATION reason=low-conf], no Package write (v2.1 #109)", async () => {
+    const {
+      deps,
+      sendToAsh,
+      resolveRecipient,
+      registerPackage,
+      sendDirectMessage,
+    } = buildDeps({
+      registeredResident: holderResident(),
+      groupClassification: {
+        isPackageRegistration: true,
+        recipients: [{ name: "Foo", houseNumber: "88" }],
+        confidence: "medium",
+        reason: "phrasing ambiguous",
+      },
+      resolveRecipientResult: { kind: "unknown" },
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(groupRegistrationUpdate({ text: "Vielleicht Paket für Foo?" })),
+      deps,
+    );
+
+    expect(resolveRecipient).toHaveBeenCalledTimes(1);
+    // No Package write at medium-conf + non-resident.
+    expect(registerPackage).not.toHaveBeenCalled();
+    expect(sendDirectMessage).not.toHaveBeenCalled();
+    // Clarification synthetic to the agent.
+    expect(sendToAsh).toHaveBeenCalledTimes(1);
+    const [synthetic] = sendToAsh.mock.calls[0]!;
+    expect(synthetic).toContain("[FLOW_1 CLARIFICATION");
+    expect(synthetic).toContain("reason=low-conf");
+  });
+
+  it("on medium-conf + 2+ recipients: falls through with reason=ambiguous-multi, no Package writes (v2.1 #109)", async () => {
+    const {
+      deps,
+      sendToAsh,
+      resolveRecipient,
+      registerPackage,
+      sendDirectMessage,
+    } = buildDeps({
+      registeredResident: holderResident(),
+      groupClassification: {
+        isPackageRegistration: true,
+        recipients: [
+          { name: "Foo", houseNumber: "88" },
+          { name: "Bar", houseNumber: "90" },
+        ],
+        confidence: "medium",
+        reason: "two recipients, partial confidence",
+      },
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        groupRegistrationUpdate({
+          text: "Pakete für Foo und Bar?",
+        }),
+      ),
+      deps,
+    );
+
+    // No per-recipient resolve, no register.
+    expect(resolveRecipient).not.toHaveBeenCalled();
+    expect(registerPackage).not.toHaveBeenCalled();
+    expect(sendDirectMessage).not.toHaveBeenCalled();
+    expect(sendToAsh).toHaveBeenCalledTimes(1);
+    const [synthetic] = sendToAsh.mock.calls[0]!;
+    expect(synthetic).toContain("reason=ambiguous-multi");
+  });
+
+  it("on isPackageRegistration:true + 0 recipients: falls through with reason=missing-recipient (v2.1 #109)", async () => {
+    const { deps, sendToAsh, registerPackage } = buildDeps({
+      registeredResident: holderResident(),
+      groupClassification: {
+        isPackageRegistration: true,
+        recipients: [],
+        confidence: "high",
+        reason: "looks like a registration but no recipient parsed",
+      },
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(groupRegistrationUpdate({ text: "Paket angekommen" })),
       deps,
     );
 
     expect(registerPackage).not.toHaveBeenCalled();
-    expect(sendDirectMessage).not.toHaveBeenCalled();
-    expect(sendToAsh).not.toHaveBeenCalled();
+    expect(sendToAsh).toHaveBeenCalledTimes(1);
+    const [synthetic] = sendToAsh.mock.calls[0]!;
+    expect(synthetic).toContain("reason=missing-recipient");
+  });
+
+  it("on low-conf + isPackageRegistration:true: falls through with reason=low-conf (v2.1 #109)", async () => {
+    const { deps, sendToAsh, registerPackage } = buildDeps({
+      registeredResident: holderResident(),
+      groupClassification: {
+        isPackageRegistration: true,
+        recipients: [{ name: "Foo", houseNumber: "88" }],
+        confidence: "low",
+        reason: "weak package signal",
+      },
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        groupRegistrationUpdate({ text: "vielleicht Paket für Foo, weiß nicht" }),
+      ),
+      deps,
+    );
+
+    expect(registerPackage).not.toHaveBeenCalled();
+    expect(sendToAsh).toHaveBeenCalledTimes(1);
+    const [synthetic] = sendToAsh.mock.calls[0]!;
+    expect(synthetic).toContain("reason=low-conf");
   });
 
   it("stays silent on classifier outage (both primary + fallback errored)", async () => {
@@ -4983,8 +5247,8 @@ describe("processInboundTelegramUpdate — Flow 1 group text (v2.1 #106 Slice 1 
     expect(sendToAsh).not.toHaveBeenCalled();
   });
 
-  it("stays silent when the recipient resolution is 'unknown' (Slice 3 / #109 introduces the group question)", async () => {
-    const { deps, sendToAsh, sendDirectMessage } = buildDeps({
+  it("on high-conf + recipient resolution 'unknown': posts the deterministic group question (📦 Paket für X – kennt jemand X?), no agent invocation (v2.1 #109)", async () => {
+    const { deps, sendToAsh, registerPackage, sendDirectMessage } = buildDeps({
       registeredResident: holderResident(),
       groupClassification: {
         isPackageRegistration: true,
@@ -5026,7 +5290,12 @@ describe("processInboundTelegramUpdate — Flow 1 group text (v2.1 #106 Slice 1 
       deps,
     );
 
-    expect(sendDirectMessage).not.toHaveBeenCalled();
+    // Package row is still written (cron sweep handles staleness).
+    expect(registerPackage).toHaveBeenCalledTimes(1);
+    expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+    const [chatId, text] = sendDirectMessage.mock.calls[0]!;
+    expect(chatId).toBe(-100);
+    expect(text).toBe("📦 Paket für Stranger – kennt jemand Stranger?");
     expect(sendToAsh).not.toHaveBeenCalled();
   });
 

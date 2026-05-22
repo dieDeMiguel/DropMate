@@ -173,6 +173,86 @@ describe("agent/instructions.md Flow 2 channel-driven contract (v2.1 #100)", () 
   });
 });
 
+// v2.1 #109 (Slice 3 of #105): the Flow 1 stanza was re-introduced
+// after Slices 1+2+4 deleted the prior v1 5-step prose. The new stanza
+// describes ONLY the clarification synthetic the channel hands the
+// agent on disambiguation cases — every other Flow 1 path (text
+// registration, photo registration, pickup tap, DM-text pickup) is
+// channel-driven and the agent never sees the inbound. This block
+// pins the new stanza shape so a future regression that re-introduces
+// the v1 5-step procedure (or removes the hard prohibitions) fails
+// loud.
+describe("agent/instructions.md Flow 1 channel-driven contract (v2.1 #109)", () => {
+  function extractFlow1Stanza(contents: string): string {
+    const start = contents.indexOf("# Flow 1 — package received (channel-driven)");
+    if (start === -1) {
+      throw new Error(
+        "could not locate the Flow 1 stanza header in instructions.md; if it was renamed, update this test",
+      );
+    }
+    const after = contents.indexOf("\n# ", start + 1);
+    return after === -1 ? contents.slice(start) : contents.slice(start, after);
+  }
+
+  it("states Flow 1 is fully channel-driven (text, photo, pickup all bypass the agent)", async () => {
+    const contents = await readFile(instructionsPath, "utf8");
+    const stanza = extractFlow1Stanza(contents);
+    expect(stanza).toMatch(/channel-driven/i);
+    expect(stanza).toMatch(/classify_group_message/);
+    expect(stanza).toMatch(/parse_label/);
+    // The agent must NOT decide whether a group message is a package
+    // registration.
+    expect(stanza).toMatch(/You do \*\*not\*\* decide/i);
+  });
+
+  it("names the [FLOW_1 CLARIFICATION] synthetic and lists every reason", async () => {
+    const contents = await readFile(instructionsPath, "utf8");
+    const stanza = extractFlow1Stanza(contents);
+    expect(stanza).toMatch(/\[FLOW_1 CLARIFICATION/);
+    expect(stanza).toMatch(/low-conf/);
+    expect(stanza).toMatch(/missing-recipient/);
+    expect(stanza).toMatch(/ambiguous-multi/);
+    expect(stanza).toMatch(/parse-failed/);
+  });
+
+  it("hard-prohibits tool calls + group posts + neighbour-availability prose on the clarification turn", async () => {
+    const contents = await readFile(instructionsPath, "utf8");
+    const stanza = extractFlow1Stanza(contents);
+    // Lifted from the synthetic's own prohibition block; the agent
+    // and the synthetic must stay in lockstep. \s+ allows the prose
+    // to wrap across lines.
+    expect(stanza).toMatch(/Do NOT call any tools/);
+    expect(stanza).toMatch(/Do NOT post to the group/);
+    expect(stanza).toMatch(/Do NOT mention\s+finding/i);
+    // ONE short clarifying question — no multi-step procedures.
+    expect(stanza).toMatch(/ONE short clarifying question/i);
+  });
+
+  it("does NOT reintroduce references to deleted find_available_neighbors / classify_message tools", async () => {
+    const contents = await readFile(instructionsPath, "utf8");
+    const stanza = extractFlow1Stanza(contents);
+    expect(stanza).not.toMatch(/find_available_neighbors/);
+    expect(stanza).not.toMatch(/classify_message\b/);
+    // register_package may appear ONLY in a sentence whose subject is
+    // a negation ("Do not call …", "register_package was removed",
+    // etc.). Walk every match, slice ±200 chars around it, and
+    // confirm a negation sits within that window — this tolerates the
+    // long-form prose where the "do **not**" lives a couple of lines
+    // above the tool name.
+    const matches = [...stanza.matchAll(/register_package/g)];
+    expect(matches.length).toBeGreaterThan(0);
+    for (const match of matches) {
+      const start = Math.max(0, match.index! - 200);
+      const end = Math.min(stanza.length, match.index! + 200);
+      const window = stanza.slice(start, end);
+      expect(
+        window,
+        `register_package mention near "${stanza.slice(match.index!, match.index! + 80)}…" has no NOT/removed/deleted qualifier within 200 chars`,
+      ).toMatch(/do\s*\*?\*?\s*not|don't|never|removed|deleted/i);
+    }
+  });
+});
+
 // Regression for v2.1 #97 — observed live 2026-05-22: a fresh /register
 // inbound produced TEN bot messages — a freely-generated welcome wall,
 // a German reintroduction, a trilingual /language brochure, AND a Flow 2

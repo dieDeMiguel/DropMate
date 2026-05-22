@@ -99,6 +99,7 @@ import {
 import { normaliseLanguageCode } from "../language.js";
 import {
   REGISTER_PACKAGE_HOLDER_NOT_REGISTERED_ERROR_CODE,
+  type RecipientResolution,
   type RegisterPackageInput,
   type RegisterPackageResult,
 } from "../package.js";
@@ -130,10 +131,14 @@ import {
   buildDmTextPickupMultiplePackagesText,
   buildDmTextPickupNoOpenPackagesText,
   buildDmTextPickupRetryText,
+  buildFlow1ClarificationSynthetic,
   buildGroupAckText,
   buildHolderNotRegisteredNudge,
   buildPickupKeyboard,
   buildRecipientDmText,
+  buildUnknownRecipientGroupQuestion,
+  captionLooksLikeMultiRecipient,
+  type Flow1ClarificationReason,
 } from "./flow-1-dms.js";
 import {
   extractInboundCallback,
@@ -415,6 +420,25 @@ export interface ProcessUpdateDeps {
     holder: Resident | null,
     input: RegisterPackageInput,
   ) => Promise<RegisterPackageResult>;
+  /**
+   * v2.1 #109 (Slice 3 of #105): pure recipient-resolution lookup, no
+   * Package write. The channel calls this at medium-conf classifier or
+   * vision verdicts to decide whether to register (if resolution is
+   * `resident`) or fall through to the agent's `[FLOW_1 CLARIFICATION]`
+   * synthetic (if the recipient doesn't resolve to a registered
+   * Resident). At high-conf the channel calls `registerPackage`
+   * directly — which calls `resolveRecipient` internally — so the
+   * high-conf path keeps its single-round-trip shape; this dep only
+   * fires on the medium-conf branch.
+   *
+   * Implemented in the factory via `lib/package.ts::resolveRecipient`.
+   * Throws bubble up; the channel's catch treats a thrown lookup as
+   * "unknown" and falls through with `reason=low-conf`.
+   */
+  readonly resolveRecipient: (
+    recipientName: string,
+    recipientHouseNumber: string,
+  ) => Promise<RecipientResolution>;
   /**
    * v2.1 #108 (Slice 4 of #105): channel-side handle for the
    * lib-level `confirmPickup`. The channel calls this directly when
@@ -957,27 +981,39 @@ async function handleCallbackQuery(
  *
  * Same architectural shape as `routeGroupTextThroughClassifier` — the
  * channel resolves the photo URL, calls `parse_label` itself (partial
- * revert of #79 for parse_label specifically), and on a high-confidence
- * parse with a registered recipient calls `registerPackage` directly,
- * posts the deterministic group ack + DMs the recipient, and returns
- * `{ kind: "handled" }` so the orchestrator skips `sendToAsh`.
+ * revert of #79 for parse_label specifically), and decides whether to
+ * register the Package, post a deterministic group question
+ * (`kennt jemand X?`), or fall through to the agent with a
+ * `[FLOW_1 CLARIFICATION]` synthetic. `sendToAsh` is only invoked on
+ * the fallthrough branch — and the synthetic constrains the agent to
+ * a single short clarifying question with no tool calls + no group
+ * output, so the v1-style 20+-message wall the live trace 2026-05-22
+ * (#105) produced stays structurally impossible.
  *
- * Why this is "silent" on every disambiguation case (low-conf,
- * missing recipientName, vision throws, getFileUrl throws,
- * known_telegram / unknown recipient): Slice 2's job is the
- * happy-path, and the trade-off the issue calls out is "silently
- * logged for now ... did nothing is acceptable interim behaviour
- * until Slice 3 ships" (#107 / #109). Closing the agent text-leak
- * surface structurally — the live trace 2026-05-22 (#105) showed a
- * single group photo producing 20+ free-form German messages — means
- * the channel must never re-engage the agent on a Flow 1 photo until
- * Slice 3 introduces the proper `[FLOW_1 CLARIFICATION]` synthetic
- * with hard prohibitions on free-form output.
+ * Branch table (v2.1 #109 Slice 3 of #105):
  *
- * Unregistered holder is the one exception: `registerPackage` throws
- * `REGISTER_PACKAGE_HOLDER_NOT_REGISTERED` and we send a localised
- * `/register` nudge DM (matching the text path's behaviour, #106).
- * Group still stays silent.
+ *   - getFileUrl throws            → `fallthrough reason=parse-failed`
+ *                                    (no URL, can't surface anything
+ *                                    more specific to the agent)
+ *   - parseLabel throws            → `fallthrough reason=parse-failed`
+ *   - confidence: "low"            → `fallthrough reason=low-conf`
+ *                                    (or `ambiguous-multi` when the
+ *                                    caption mentions 2+ names)
+ *   - high/medium + no recipient   → `fallthrough reason=missing-recipient`
+ *                                    (or `ambiguous-multi`)
+ *   - high-conf + resident         → register + group ack + recipient DM
+ *   - high-conf + known_telegram   → register (Package row landed for
+ *                                    later cron sweeps) + silent
+ *   - high-conf + unknown          → register + group question
+ *                                    (`📦 Paket für X – kennt jemand X?`)
+ *   - medium-conf + resident       → register (treat as high-conf when
+ *                                    the second signal converges)
+ *   - medium-conf + non-resident   → `fallthrough reason=low-conf`
+ *                                    (no Package write — holder
+ *                                    clarifies, classifier reruns,
+ *                                    Slice 1/2 handles deterministically)
+ *   - unregistered holder          → `/register` nudge DM, silent in
+ *                                    group (matches text path / #106)
  */
 async function routeGroupPhoto(
   inbound: TelegramInboundMessage,
@@ -991,6 +1027,44 @@ async function routeGroupPhoto(
   }
 
   const captionText = inbound.text.length > 0 ? inbound.text : undefined;
+  const holderLanguage = inbound.fromLanguageCode
+    ? (normaliseLanguageCode(inbound.fromLanguageCode) ?? "de")
+    : "de";
+
+  function fallthroughClarification(args: {
+    reason: Flow1ClarificationReason;
+    parsed?: { carrier?: string; recipientName?: string; confidence?: "low" | "medium" | "high" };
+    holder: Resident | null;
+  }): Flow1RouteResult {
+    emitTrace("flow1", "fallthrough", {
+      reason: args.reason,
+      source: "photo",
+    });
+    return {
+      kind: "fallthrough",
+      toAgent: buildFlow1ClarificationSynthetic({
+        language: args.holder?.language ?? holderLanguage,
+        reason: args.reason,
+        source: "photo",
+        carrier: args.parsed?.carrier,
+        recipientName: args.parsed?.recipientName,
+        confidence: args.parsed?.confidence,
+        caption: captionText,
+        holderName: args.holder?.name,
+        holderHouseNumber: args.holder?.houseNumber,
+      }),
+    };
+  }
+
+  // Resolve the holder eagerly — every fallthrough branch needs the
+  // holder name + house in the synthetic so the agent's clarifying
+  // question can address them by name. A null holder still lets us
+  // emit a fallthrough (synthetic embeds "(unknown)") but the
+  // unregistered-holder branch below short-circuits to the /register
+  // nudge before that case is reachable.
+  const holder = await deps
+    .getRegisteredResident(inbound.fromUserId)
+    .catch(() => null);
 
   let imageUrl: string;
   try {
@@ -1004,9 +1078,7 @@ async function routeGroupPhoto(
         ? { name: err.name, message: err.message, stack: err.stack }
         : err,
     );
-    // Slice 2 deferral: silent until Slice 3 (#109) introduces the
-    // [FLOW_1 CLARIFICATION] synthetic with reason=parse-failed.
-    return { kind: "silent" };
+    return fallthroughClarification({ reason: "parse-failed", holder });
   }
 
   let parsed: Awaited<ReturnType<ProcessUpdateDeps["parseLabel"]>>;
@@ -1027,39 +1099,67 @@ async function routeGroupPhoto(
         : err,
     );
     emitTrace("vision", "error", { tool: "parse_label" });
-    // Slice 2 deferral: silent.
-    return { kind: "silent" };
+    return fallthroughClarification({ reason: "parse-failed", holder });
   }
 
-  if (parsed.confidence !== "high" || !parsed.recipientName) {
-    // Slice 2 deferral: low/medium-conf parses and missing recipient
-    // names stay silent. Slice 3 (#109) introduces the clarification
-    // synthetic for these cases.
-    emitTrace("flow1", "silent", {
-      reason:
-        parsed.confidence !== "high" ? "low-confidence" : "missing-recipient",
-      source: "photo",
+  // Disambiguation branches that don't depend on resolution. The
+  // ambiguous-multi heuristic upgrades a low-conf / missing-recipient
+  // reason when the caption clearly names two recipients — the
+  // agent's clarifying question can then ask about the second label
+  // directly.
+  const multi = captionLooksLikeMultiRecipient(captionText);
+  if (parsed.confidence === "low") {
+    return fallthroughClarification({
+      reason: multi ? "ambiguous-multi" : "low-conf",
+      parsed,
+      holder,
     });
-    return { kind: "silent" };
   }
-
-  // Resolve the holder before calling registerPackage so the
-  // unregistered-holder branch can be detected without inspecting
-  // `RegisterPackageError`'s message string.
-  const holder = await deps
-    .getRegisteredResident(inbound.fromUserId)
-    .catch(() => null);
+  if (!parsed.recipientName) {
+    return fallthroughClarification({
+      reason: multi ? "ambiguous-multi" : "missing-recipient",
+      parsed,
+      holder,
+    });
+  }
 
   const recipientHouseNumber =
     parsed.recipientHouseNumber ?? holder?.houseNumber ?? "";
   if (recipientHouseNumber === "") {
-    // Defensive: no recipient house number AND no holder house
-    // number to default to. Slice 3 disambig.
-    emitTrace("flow1", "silent", {
-      reason: "missing-house-number",
-      source: "photo",
+    return fallthroughClarification({
+      reason: "missing-recipient",
+      parsed,
+      holder,
     });
-    return { kind: "silent" };
+  }
+
+  // Medium-conf: only register when the recipient resolves to a
+  // registered Resident. Otherwise fall through so the agent can ask
+  // the holder to disambiguate (no Package write — the holder's
+  // restated reply will be re-classified at high confidence and
+  // register cleanly).
+  if (parsed.confidence === "medium") {
+    let resolution: RecipientResolution;
+    try {
+      resolution = await deps.resolveRecipient(
+        parsed.recipientName,
+        recipientHouseNumber,
+      );
+    } catch (err) {
+      console.error(
+        "[resolveRecipient] (photo, medium-conf) failed for recipient",
+        parsed.recipientName,
+        "error:",
+        err instanceof Error
+          ? { name: err.name, message: err.message, stack: err.stack }
+          : err,
+      );
+      return fallthroughClarification({ reason: "low-conf", parsed, holder });
+    }
+    if (resolution.kind !== "resident") {
+      return fallthroughClarification({ reason: "low-conf", parsed, holder });
+    }
+    // Resolution converges; continue to register below.
   }
 
   let registered: RegisterPackageResult;
@@ -1116,10 +1216,37 @@ async function routeGroupPhoto(
     return { kind: "silent" };
   }
 
+  if (registered.recipientResolution.kind === "unknown") {
+    // High-conf unknown recipient: post the deterministic group
+    // question. The Package row is already in Redis so the cron
+    // sweep can age it out if nobody claims (#109 acceptance: no
+    // change to the cron schedule).
+    const question = buildUnknownRecipientGroupQuestion(
+      parsed.recipientName,
+      holder?.language ?? holderLanguage,
+    );
+    try {
+      emitTrace("dm", "start", { kind: "flow1-unknown-recipient" });
+      await deps.sendDirectMessage(inbound.chatId, question);
+      emitTrace("dm", "end", { kind: "flow1-unknown-recipient" });
+    } catch (err) {
+      console.error(
+        "[flow1] unknown-recipient group question (photo) failed for chatId",
+        inbound.chatId,
+        "error:",
+        err instanceof Error ? err.message : err,
+      );
+      emitTrace("dm", "error", { kind: "flow1-unknown-recipient" });
+    }
+    return { kind: "handled" };
+  }
+
   if (registered.recipientResolution.kind !== "resident") {
-    // Slice 2: only the "registered resident" branch posts. Other
-    // branches (known_telegram, unknown) stay silent — Slice 3
-    // introduces the clarification synthetic / group question.
+    // known_telegram: the recipient has posted in the group but
+    // hasn't /register'd. The Package row landed; we don't have a
+    // DM channel to them yet. Stay silent (deferred — Slice 4 of a
+    // future iteration could text_mention them in the group ack
+    // without leaking the holder's buzzer/floor).
     emitTrace("flow1", "silent", {
       reason: registered.recipientResolution.kind,
       source: "photo",
@@ -1709,47 +1836,44 @@ async function routeDmTextPickupConfirmation(
 }
 
 /**
- * v2.1 #106 Slice 1: route a group text message through the Flow 1
- * classifier. On a high-confidence verdict + a recipient that
- * resolves to a registered Resident, the channel deterministically:
+ * v2.1 #106 Slice 1 + #109 Slice 3: route a group text message through
+ * the Flow 1 classifier. The channel decides — outside the model — what
+ * to do with each inbound:
  *
- *   1. Calls `registerPackage(holder, { recipientName, ... })` via
- *      the lib. The function writes the Package, links to any open
- *      Flow 2 request, and returns the resident-recipient summary.
- *   2. Posts ONE group ack + sends ONE recipient DM via
- *      `sendDirectMessage` (the dep is chat-id-agnostic — it sends
- *      to a group chat or a 1:1 chat identically; the `[Abgeholt]`
- *      keyboard rides along on both).
- *   3. Returns `{ kind: "handled" }` so the orchestrator skips
- *      `sendToAsh` — closing the agent text-leak surface the live
- *      trace 2026-05-22 produced (#105).
+ *   1. High-conf + resident      → register + group ack + recipient DM
+ *                                  (#106 Slice 1)
+ *   2. High-conf + unknown       → register + post the deterministic
+ *                                  group question ("kennt jemand X?")
+ *                                  (#109 Slice 3)
+ *   3. High-conf + known_telegram → register + silent (no DM channel
+ *                                   to a non-Resident; later iteration
+ *                                   could mention them in the ack)
+ *   4. Medium-conf + resident    → register (treat as high-conf when
+ *                                  the second signal converges) (#109)
+ *   5. Medium-conf + non-resident → `fallthrough reason=low-conf`
+ *                                   (no Package write — holder
+ *                                   clarifies, classifier reruns) (#109)
+ *   6. Medium-conf + multi-recipient → `fallthrough reason=ambiguous-multi`
+ *                                       (rejecting bulk register at
+ *                                       reduced confidence) (#109)
+ *   7. Low-conf + isPkgReg       → `fallthrough reason=low-conf` or
+ *                                  `ambiguous-multi` (#109)
+ *   8. isPkgReg + 0 recipients   → `fallthrough reason=missing-recipient`
+ *                                  (#109)
+ *   9. Unregistered holder       → `/register` nudge DM, silent in group
+ *                                  (#106 Slice 1)
+ *  10. Classifier outage         → silent (we can't even tell whether
+ *                                  the inbound was package-related;
+ *                                  emitting a synthetic for every
+ *                                  classifier failure on every group
+ *                                  message would be noise)
+ *  11. isPkgReg: false           → silent (off-topic, social chat)
  *
- * Failure / disambiguation cases that this slice does NOT handle (Slice
- * 3 / #109 introduces the proper clarification synthetic):
- *
- *   - Classifier outage / both models error → stay silent. Logged so
- *     ops can see it; the group is not the right place to surface an
- *     internal hiccup, and the agent would just produce noise.
- *   - `isPackageRegistration === false` → stay silent. Off-topic chat,
- *     pickup confirmations, social posts.
- *   - `confidence !== "high"` → stay silent for now. Slice 3 will
- *     route this to a clarification synthetic.
- *   - 0 recipients on a high-conf positive → stay silent (defensive —
- *     the classifier prompt rules this out, but the schema permits it).
- *   - 2+ recipients → register only the registered-resident matches;
- *     post one combined group ack covering them. Unknown recipients in
- *     the same message stay silent (Slice 3 will handle).
- *   - Recipient resolves to known_telegram (not yet a Resident) → stay
- *     silent. Slice 3's clarification synthetic asks the holder for
- *     more info.
- *   - Recipient resolves to unknown → stay silent. Slice 3 will post
- *     the "kennt jemand X?" group question.
- *   - Unregistered holder (`registerPackage` throws with
- *     `REGISTER_PACKAGE_HOLDER_NOT_REGISTERED`) → send ONE best-effort
- *     DM to the holder pointing at `/register`. Stay silent in the
- *     group.
- *   - Any other `registerPackage` throw → stay silent (Redis hiccup,
- *     transient). Logged.
+ * `sendToAsh` is invoked only on the fallthrough branches, and the
+ * synthetic constrains the agent to a single short clarifying question
+ * with no tool calls + no group output — so the v1-style 20+-message
+ * wall the live trace 2026-05-22 (#105) produced stays structurally
+ * impossible.
  */
 async function routeGroupTextThroughClassifier(
   inbound: TelegramInboundMessage,
@@ -1760,6 +1884,10 @@ async function routeGroupTextThroughClassifier(
     // resolve the holder, so stay silent.
     return { kind: "silent" };
   }
+
+  const holderLanguage = inbound.fromLanguageCode
+    ? (normaliseLanguageCode(inbound.fromLanguageCode) ?? "de")
+    : "de";
 
   let classification: ClassifyGroupMessageResult;
   emitTrace("classifier", "start", { flow: "flow1" });
@@ -1783,38 +1911,119 @@ async function routeGroupTextThroughClassifier(
         : err,
     );
     emitTrace("classifier", "error", { flow: "flow1" });
-    // Stay silent. Slice 3 (#109) introduces a clarification synthetic
-    // for the agent; until then, a classifier outage means we miss the
-    // routing — better than emitting a wall of free-form agent text.
+    // Stay silent on a classifier outage. The text path has no
+    // upstream signal that this inbound is package-related (unlike
+    // the photo path where the user uploading a photo IS the
+    // signal). Emitting a clarification synthetic for every random
+    // off-topic group message would be louder than v2's text leak.
     return { kind: "silent" };
   }
 
-  if (
-    !classification.isPackageRegistration ||
-    classification.confidence !== "high" ||
-    classification.recipients.length === 0
-  ) {
+  if (!classification.isPackageRegistration) {
     return { kind: "silent" };
   }
 
-  // Resolve the holder (the user who posted in the group). They must
-  // be a registered Resident — `registerPackage` throws otherwise.
+  // Resolve the holder eagerly — every register / fallthrough branch
+  // below uses the holder name + house. A null holder is the
+  // unregistered-holder case (handled when registerPackage throws).
   const holder = await deps
     .getRegisteredResident(inbound.fromUserId)
     .catch(() => null);
 
-  // For each named recipient: register a package + (when the recipient
-  // resolves to a registered Resident) post ONE group ack + ONE DM.
-  // Unknown / known_telegram recipients in the same message stay
-  // silent (Slice 3 covers those).
-  let anyRegistered = false;
+  function fallthroughClarification(
+    reason: Flow1ClarificationReason,
+  ): Flow1RouteResult {
+    emitTrace("flow1", "fallthrough", { reason, source: "text" });
+    return {
+      kind: "fallthrough",
+      toAgent: buildFlow1ClarificationSynthetic({
+        language: holder?.language ?? holderLanguage,
+        reason,
+        source: "text",
+        carrier: classification.carrier,
+        recipientName: classification.recipients[0]?.name,
+        confidence: classification.confidence,
+        caption: inbound.text,
+        holderName: holder?.name,
+        holderHouseNumber: holder?.houseNumber,
+      }),
+    };
+  }
+
+  // Positive registration but no recipients in the parsed payload —
+  // ask the holder to name them.
+  if (classification.recipients.length === 0) {
+    return fallthroughClarification("missing-recipient");
+  }
+
+  // Low-conf positive: fall through (caption multi-name heuristic
+  // bumps to ambiguous-multi when the model under-counted recipients).
+  if (classification.confidence === "low") {
+    return fallthroughClarification(
+      classification.recipients.length >= 2 ||
+        captionLooksLikeMultiRecipient(inbound.text)
+        ? "ambiguous-multi"
+        : "low-conf",
+    );
+  }
+
+  // Medium-conf + 2+ recipients is too risky to bulk-register — fall
+  // through with ambiguous-multi so the agent asks the holder to
+  // confirm each recipient.
+  if (
+    classification.confidence === "medium" &&
+    classification.recipients.length > 1
+  ) {
+    return fallthroughClarification("ambiguous-multi");
+  }
+
+  // Medium-conf single recipient: resolve first WITHOUT writing the
+  // Package. Only register when the resolution converges on a known
+  // Resident; otherwise fall through to the agent so the holder can
+  // disambiguate (and the next inbound's classifier run can hit the
+  // high-conf path cleanly).
+  if (classification.confidence === "medium") {
+    const namedRecipient = classification.recipients[0]!;
+    const houseNumber =
+      namedRecipient.houseNumber ?? holder?.houseNumber ?? "";
+    if (houseNumber === "") {
+      return fallthroughClarification("missing-recipient");
+    }
+    let resolution: RecipientResolution;
+    try {
+      resolution = await deps.resolveRecipient(namedRecipient.name, houseNumber);
+    } catch (err) {
+      console.error(
+        "[resolveRecipient] (text, medium-conf) failed for recipient",
+        namedRecipient.name,
+        "error:",
+        err instanceof Error
+          ? { name: err.name, message: err.message, stack: err.stack }
+          : err,
+      );
+      return fallthroughClarification("low-conf");
+    }
+    if (resolution.kind !== "resident") {
+      return fallthroughClarification("low-conf");
+    }
+    // Resolution converges on resident — fall through to the register
+    // loop below by treating this as the high-conf path. The loop
+    // already handles the 1-recipient case correctly.
+  }
+
+  // High-conf (or medium-conf-converged-to-resident): for each
+  // recipient, register a Package and dispatch on resolution:
+  //   - resident       → group ack + recipient DM
+  //   - unknown        → group question (#109)
+  //   - known_telegram → silent (Package landed for cron sweep)
+  let anyHandled = false;
   for (const namedRecipient of classification.recipients) {
     const recipientHouseNumber =
       namedRecipient.houseNumber ?? holder?.houseNumber ?? "";
     if (recipientHouseNumber === "") {
-      // Defensive: no recipient house number AND no holder house
-      // number to default to. Skip — the schema admits this only when
-      // both are absent, which is a Slice-3 disambiguation case.
+      // Defensive: schema admits both absent. Single-recipient case
+      // was already caught above; in the multi-recipient loop, skip
+      // this entry — partial outcome beats abandoning the whole turn.
       continue;
     }
 
@@ -1838,7 +2047,6 @@ async function routeGroupTextThroughClassifier(
           ? (err as { code?: string }).code
           : undefined;
       if (errorCode === REGISTER_PACKAGE_HOLDER_NOT_REGISTERED_ERROR_CODE) {
-        // Best-effort DM nudge to the holder. The group stays silent.
         const language =
           inbound.fromLanguageCode &&
           normaliseLanguageCode(inbound.fromLanguageCode);
@@ -1846,8 +2054,6 @@ async function routeGroupTextThroughClassifier(
         try {
           await deps.sendDirectMessage(inbound.fromUserId, nudge);
         } catch (dmErr) {
-          // Bot-initiated DMs to users who haven't started a private
-          // chat are forbidden by the Bot API. Log + move on.
           console.error(
             "[flow1] holder-not-registered nudge DM failed for userId",
             inbound.fromUserId,
@@ -1855,8 +2061,6 @@ async function routeGroupTextThroughClassifier(
             dmErr instanceof Error ? dmErr.message : dmErr,
           );
         }
-        // The holder isn't a Resident — no further registrations are
-        // possible on this turn. Break the loop.
         emitTrace("flow1", "reject.holder-not-registered");
         return { kind: "handled" };
       }
@@ -1871,18 +2075,40 @@ async function routeGroupTextThroughClassifier(
           : err,
       );
       emitTrace("flow1", "register.error");
-      // Skip this recipient; try the next one. Better partial outcome
-      // than abandoning the whole turn.
+      continue;
+    }
+
+    if (registered.recipientResolution.kind === "unknown") {
+      // High-conf unknown: post the deterministic group question.
+      const question = buildUnknownRecipientGroupQuestion(
+        namedRecipient.name,
+        holder?.language ?? holderLanguage,
+      );
+      try {
+        emitTrace("dm", "start", { kind: "flow1-unknown-recipient" });
+        await deps.sendDirectMessage(inbound.chatId, question);
+        emitTrace("dm", "end", { kind: "flow1-unknown-recipient" });
+      } catch (err) {
+        console.error(
+          "[flow1] unknown-recipient group question failed for chatId",
+          inbound.chatId,
+          "error:",
+          err instanceof Error ? err.message : err,
+        );
+        emitTrace("dm", "error", { kind: "flow1-unknown-recipient" });
+      }
+      anyHandled = true;
       continue;
     }
 
     if (registered.recipientResolution.kind !== "resident") {
-      // Slice 1: only the "registered resident" branch posts. Other
-      // branches (known_telegram, unknown) stay silent — Slice 3
-      // introduces the clarification synthetic for those.
+      // known_telegram: Package row is in Redis for the cron sweep
+      // but we have no DM channel to a non-Resident. Stay silent
+      // for this recipient.
       emitTrace("flow1", "silent", {
         reason: registered.recipientResolution.kind,
       });
+      anyHandled = true;
       continue;
     }
 
@@ -1896,9 +2122,6 @@ async function routeGroupTextThroughClassifier(
     });
     const keyboard = buildPickupKeyboard(registered.package.id);
 
-    // Group ack. `sendDirectMessage` is chat-id-agnostic — sending to
-    // `inbound.chatId` posts to the group when the inbound came from
-    // a group.
     try {
       emitTrace("dm", "start", { kind: "flow1-group-ack" });
       await deps.sendDirectMessage(
@@ -1920,9 +2143,6 @@ async function routeGroupTextThroughClassifier(
       emitTrace("dm", "error", { kind: "flow1-group-ack" });
     }
 
-    // Recipient DM. Chat id for a 1:1 Telegram chat equals the
-    // recipient's user id — same mapping the volunteer-accept path
-    // relies on.
     const recipientChatId = Number(registered.recipientResolution.resident.id);
     if (Number.isFinite(recipientChatId)) {
       try {
@@ -1952,10 +2172,10 @@ async function routeGroupTextThroughClassifier(
       );
     }
 
-    anyRegistered = true;
+    anyHandled = true;
   }
 
-  return { kind: anyRegistered ? "handled" : "silent" };
+  return { kind: anyHandled ? "handled" : "silent" };
 }
 
 /**

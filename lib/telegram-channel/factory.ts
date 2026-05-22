@@ -43,7 +43,7 @@ import {
   acceptReceptionRequest,
   createReceptionRequest,
 } from "../reception-request.js";
-import { registerPackage } from "../package.js";
+import { registerPackage, resolveRecipient } from "../package.js";
 import { confirmPickup } from "../pickup.js";
 import { registerResident } from "../registration.js";
 import {
@@ -301,6 +301,8 @@ export function telegramChannel(config: TelegramChannelConfig) {
               });
             },
             registerPackage: (holder, input) => registerPackage(holder, input),
+            resolveRecipient: (recipientName, recipientHouseNumber) =>
+              resolveRecipient(recipientName, recipientHouseNumber),
             confirmPickup: (caller, packageId) =>
               confirmPickup(caller, packageId),
             listOpenPackagesForRecipient: async (caller) => {
