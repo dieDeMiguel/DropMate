@@ -36,11 +36,13 @@
 import { defineChannel, GET, POST } from "experimental-ash/channels";
 
 import classifyDmIntentTool from "../../agent/tools/classify_dm_intent.js";
+import classifyGroupMessageTool from "../../agent/tools/classify_group_message.js";
 import parseTrackingPageTool from "../../agent/tools/parse_tracking_page.js";
 import {
   acceptReceptionRequest,
   createReceptionRequest,
 } from "../reception-request.js";
+import { registerPackage } from "../package.js";
 import { registerResident } from "../registration.js";
 import {
   getPackage,
@@ -242,6 +244,34 @@ export function telegramChannel(config: TelegramChannelConfig) {
                 messages: [],
               });
             },
+            classifyGroupMessage: async (input) => {
+              // v2.1 #106 Slice 1: same shape as classifyDmIntent —
+              // surface the error, no silent fallback. The channel's
+              // catch logs and stays silent in the group rather than
+              // emitting a wall of free-form agent text.
+              const execute = classifyGroupMessageTool.execute as (
+                input: unknown,
+                options: unknown,
+              ) => Promise<{
+                isPackageRegistration: boolean;
+                recipients: ReadonlyArray<{ name: string; houseNumber?: string }>;
+                carrier?:
+                  | "DHL"
+                  | "Hermes"
+                  | "DPD"
+                  | "GLS"
+                  | "UPS"
+                  | "Amazon"
+                  | "unknown";
+                confidence: "high" | "medium" | "low";
+                reason: string;
+              }>;
+              return execute(input, {
+                toolCallId: `classify_group_message:${Date.now()}`,
+                messages: [],
+              });
+            },
+            registerPackage: (holder, input) => registerPackage(holder, input),
             getRegisteredResident: async (userId) =>
               getResident(String(userId)),
             createReceptionRequest: (caller, input) =>
@@ -250,8 +280,8 @@ export function telegramChannel(config: TelegramChannelConfig) {
               acceptReceptionRequest(caller, input),
             editGroupCard: (chatId, messageId, text) =>
               editGroupCard(token, chatId, messageId, text),
-            sendDirectMessage: async (chatId, text, entities) => {
-              await sendTelegramMessage(token, chatId, text, undefined, entities);
+            sendDirectMessage: async (chatId, text, entities, replyMarkup) => {
+              await sendTelegramMessage(token, chatId, text, replyMarkup, entities);
             },
             registerResident: (input) => registerResident(input),
             setTriggerAttribute: setTelegramTriggerAttribute,

@@ -6,12 +6,14 @@ import type { AcceptReceptionRequestResult } from "../reception-request.js";
 
 import {
   processInboundTelegramUpdate,
+  type ClassifyGroupMessageResult,
   type Flow2ClassificationResult,
   type ProcessUpdateDeps,
   type TelegramChannelState,
   type TelegramSessionAuth,
 } from "./process-update.js";
-import type { ReceptionRequest, Resident } from "../redis.js";
+import type { Package, ReceptionRequest, Resident } from "../redis.js";
+import type { RegisterPackageResult } from "../package.js";
 
 const SECRET = "expected-secret";
 
@@ -73,9 +75,11 @@ interface BuiltDeps {
   recordTelegramObservation: ReturnType<typeof vi.fn>;
   isRegisteredResident: ReturnType<typeof vi.fn>;
   classifyDmIntent: ReturnType<typeof vi.fn>;
+  classifyGroupMessage: ReturnType<typeof vi.fn>;
   getRegisteredResident: ReturnType<typeof vi.fn>;
   createReceptionRequest: ReturnType<typeof vi.fn>;
   acceptReceptionRequest: ReturnType<typeof vi.fn>;
+  registerPackage: ReturnType<typeof vi.fn>;
   editGroupCard: ReturnType<typeof vi.fn>;
   sendDirectMessage: ReturnType<typeof vi.fn>;
   registerResident: ReturnType<typeof vi.fn>;
@@ -94,9 +98,13 @@ function buildDeps(overrides: {
   packageRecipientId?: string | null;
   isRegisteredResident?: boolean;
   classification?: Flow2ClassificationResult;
+  groupClassification?: ClassifyGroupMessageResult;
+  groupClassificationError?: Error;
   registeredResident?: Resident | null;
   acceptResult?: AcceptReceptionRequestResult;
   registerResult?: { resident: Resident; updated: boolean };
+  registerPackageResult?: RegisterPackageResult;
+  registerPackageError?: Error;
 } = {}): BuiltDeps {
   const session = overrides.session ?? makeSession("sess_new");
   const sendToAsh = vi.fn().mockResolvedValue(session);
@@ -151,6 +159,66 @@ function buildDeps(overrides: {
   const classifyDmIntent = vi
     .fn()
     .mockResolvedValue(overrides.classification ?? defaultClassification);
+
+  // v2.1 #106: default group classifier verdict — not a package
+  // registration. Tests exercising the Flow 1 route override this
+  // with `groupClassification`. Group-text cases that pre-date #106
+  // (off-topic chat, social posts) inherit the default and stay
+  // silent (no agent invocation either) — that's the new structural
+  // invariant the channel-deterministic path enforces.
+  const defaultGroupClassification: ClassifyGroupMessageResult = {
+    isPackageRegistration: false,
+    recipients: [],
+    confidence: "low",
+    reason: "default test stub: not a package registration",
+  };
+  const classifyGroupMessage = overrides.groupClassificationError
+    ? vi.fn().mockRejectedValue(overrides.groupClassificationError)
+    : vi
+        .fn()
+        .mockResolvedValue(overrides.groupClassification ?? defaultGroupClassification);
+  const defaultRegisterPackageResult: RegisterPackageResult = {
+    package: {
+      id: "pkg_test",
+      streetId: "Methfesselstraße",
+      recipientResidentId: "200",
+      recipientName: "Marlene Hartmann",
+      recipientHouseNumber: "88",
+      holderResidentId: "100",
+      carrier: "DHL",
+      status: "held",
+      receivedAt: Date.now(),
+      pickedUpAt: null,
+      reminded: false,
+    } satisfies Package,
+    holder: {
+      id: "100",
+      name: "Diego de Miguel",
+      houseNumber: "69",
+      floor: "Erdgeschoss",
+      buzzerName: null,
+      language: "de",
+    },
+    recipientResolution: {
+      kind: "resident",
+      resident: {
+        id: "200",
+        name: "Marlene Hartmann",
+        houseNumber: "88",
+        language: "de",
+        floor: null,
+        buzzerName: null,
+      },
+    },
+    receptionRequestFulfilled: null,
+  };
+  const registerPackage = overrides.registerPackageError
+    ? vi.fn().mockRejectedValue(overrides.registerPackageError)
+    : vi
+        .fn()
+        .mockResolvedValue(
+          overrides.registerPackageResult ?? defaultRegisterPackageResult,
+        );
   const getRegisteredResident = vi
     .fn()
     .mockResolvedValue(
@@ -250,9 +318,11 @@ function buildDeps(overrides: {
     recordTelegramObservation,
     isRegisteredResident,
     classifyDmIntent,
+    classifyGroupMessage,
     getRegisteredResident,
     createReceptionRequest,
     acceptReceptionRequest,
+    registerPackage,
     editGroupCard,
     sendDirectMessage,
     registerResident,
@@ -271,9 +341,11 @@ function buildDeps(overrides: {
       recordTelegramObservation,
       isRegisteredResident,
       classifyDmIntent,
+      classifyGroupMessage,
       getRegisteredResident,
       createReceptionRequest,
       acceptReceptionRequest,
+      registerPackage,
       editGroupCard,
       sendDirectMessage,
       registerResident,
@@ -3035,6 +3107,12 @@ describe("processInboundTelegramUpdate — /receive slash command (v2.1 Slice 2,
   });
 
   it("does NOT trigger on /receive in a group chat (group is not a Flow 2 entry point)", async () => {
+    // v2.1 #106 Slice 1: group text now routes through the Flow 1
+    // classifier instead of falling straight to the agent. `/receive`
+    // in a group is off-topic (the classifier returns
+    // `isPackageRegistration: false` by default in this test setup),
+    // so the channel stays silent — both `createReceptionRequest`
+    // (Flow 2) and `sendToAsh` (agent) are bypassed.
     const { deps, createReceptionRequest, sendToAsh } = buildDeps();
 
     await processInboundTelegramUpdate(
@@ -3052,9 +3130,7 @@ describe("processInboundTelegramUpdate — /receive slash command (v2.1 Slice 2,
     );
 
     expect(createReceptionRequest).not.toHaveBeenCalled();
-    // Raw text passes through to the agent in groups.
-    const [message] = sendToAsh.mock.calls[0]!;
-    expect(message).toBe("/receive DHL morgen");
+    expect(sendToAsh).not.toHaveBeenCalled();
   });
 
   it("accepts /receive followed by a bot @-mention", async () => {
@@ -3343,7 +3419,13 @@ describe("processInboundTelegramUpdate — registration (v2.1 #97 — channel-de
     expect(sendDirectMessage).not.toHaveBeenCalled();
   });
 
-  it("group `/register` does NOT fire the channel-deterministic path (only DMs trigger registration)", async () => {
+  it("group `/register` does NOT fire the channel-deterministic registration path", async () => {
+    // v2.1 #106 Slice 1: post-#106 a group `/register` goes through
+    // the Flow 1 classifier (default mock verdict: not a package
+    // registration → silent). Both `registerResident` (Slice 0
+    // registration path) and `sendToAsh` (agent) are bypassed —
+    // registration is still a 1:1 DM-only onboarding flow, just now
+    // the group text path is also fully channel-handled.
     const { deps, sendToAsh, registerResident } = buildDeps();
 
     await processInboundTelegramUpdate(
@@ -3360,11 +3442,8 @@ describe("processInboundTelegramUpdate — registration (v2.1 #97 — channel-de
       deps,
     );
 
-    // Registration lib NOT called from a group message — registration
-    // is a 1:1 onboarding flow.
     expect(registerResident).not.toHaveBeenCalled();
-    // Group inbound still reaches the agent (same as legacy).
-    expect(sendToAsh).toHaveBeenCalledTimes(1);
+    expect(sendToAsh).not.toHaveBeenCalled();
   });
 
   it("confirmation DM language coverage — en/es/tr also render in their locale", async () => {
@@ -3467,7 +3546,16 @@ describe("processInboundTelegramUpdate — setTriggerAttribute (v2.1 #99)", () =
     );
   });
 
-  it("group text message → telegram.group", async () => {
+  it("group text message → channel-deterministic; agent is NOT invoked on the default-silent classifier verdict (v2.1 #106)", async () => {
+    // v2.1 #106 Slice 1: group text always goes through the Flow 1
+    // classifier first. With the default `isPackageRegistration:
+    // false` verdict the channel stays silent — `sendToAsh` is NOT
+    // called, and `setTriggerAttribute("telegram.group")` is NOT
+    // set (the attribute is only stamped on inbounds the channel
+    // hands to the agent, per #99). The previous "every group text
+    // becomes a `telegram.group` Agent Runs row" behaviour is gone
+    // and that's the point — group chat noise no longer burns Ash
+    // turns.
     const { deps, sendToAsh, setTriggerAttribute } = buildDeps();
 
     const groupUpdate = {
@@ -3483,8 +3571,8 @@ describe("processInboundTelegramUpdate — setTriggerAttribute (v2.1 #99)", () =
 
     await processInboundTelegramUpdate(makeRequest(groupUpdate), deps);
 
-    expect(sendToAsh).toHaveBeenCalledTimes(1);
-    expect(setTriggerAttribute).toHaveBeenCalledWith("telegram.group");
+    expect(sendToAsh).not.toHaveBeenCalled();
+    expect(setTriggerAttribute).not.toHaveBeenCalled();
   });
 
   it("group photo (Flow 1 / parse_label) → telegram.photo", async () => {
@@ -3695,5 +3783,267 @@ describe("processInboundTelegramUpdate — setTriggerAttribute (v2.1 #99)", () =
 
     expect(res.status).toBe(204);
     expect(sendToAsh).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("processInboundTelegramUpdate — Flow 1 group text (v2.1 #106 Slice 1 — channel-deterministic register-package)", () => {
+  function groupRegistrationUpdate(opts: {
+    text: string;
+    chatId?: number;
+    fromUserId?: number;
+    languageCode?: string;
+  }): Record<string, unknown> {
+    return {
+      update_id: 300,
+      message: {
+        message_id: 1,
+        date: 1,
+        text: opts.text,
+        chat: { id: opts.chatId ?? -100, type: "supergroup" },
+        from: {
+          id: opts.fromUserId ?? 100,
+          is_bot: false,
+          first_name: "Holder",
+          language_code: opts.languageCode ?? "de",
+        },
+      },
+    };
+  }
+
+  function holderResident(): Resident {
+    return {
+      id: "100",
+      name: "Diego Demiguel",
+      street: "Lutterothstrasse",
+      houseNumber: "69",
+      platformId: "100",
+      platform: "telegram",
+      language: "de",
+      availabilityPatterns: [],
+      registeredAt: Date.now(),
+      source: "explicit",
+      confirmed: true,
+    };
+  }
+
+  it("on high-confidence classifier verdict + registered-resident recipient: calls registerPackage + posts group ack + DMs recipient with [Abgeholt] keyboard, no agent invocation", async () => {
+    const {
+      deps,
+      sendToAsh,
+      classifyGroupMessage,
+      registerPackage,
+      sendDirectMessage,
+    } = buildDeps({
+      registeredResident: holderResident(),
+      groupClassification: {
+        isPackageRegistration: true,
+        recipients: [{ name: "Marlene Hartmann", houseNumber: "88" }],
+        carrier: "DHL",
+        confidence: "high",
+        reason: "explicit package registration",
+      },
+      // Default registerPackageResult resolves to a registered Resident
+      // (the recipient summary in buildDeps's default).
+    });
+
+    const res = await processInboundTelegramUpdate(
+      makeRequest(
+        groupRegistrationUpdate({ text: "Paket für Marlene Hartmann (Hs.88)" }),
+      ),
+      deps,
+    );
+
+    expect(res.status).toBe(204);
+    expect(classifyGroupMessage).toHaveBeenCalledTimes(1);
+    expect(registerPackage).toHaveBeenCalledTimes(1);
+    // Two sendDirectMessage calls: one to the group, one to the recipient.
+    expect(sendDirectMessage).toHaveBeenCalledTimes(2);
+    // Agent is NEVER invoked on this path.
+    expect(sendToAsh).not.toHaveBeenCalled();
+
+    // Group ack: posted to the inbound chat id (the group) with the
+    // pickup keyboard.
+    const [groupChatId, groupText, groupEntities, groupKeyboard] =
+      sendDirectMessage.mock.calls[0]!;
+    expect(groupChatId).toBe(-100);
+    expect(groupText).toContain("📦 Paket von Diego de Miguel (69)");
+    expect(groupText).toContain("an Marlene Hartmann (88)");
+    expect(groupEntities).toBeUndefined();
+    expect(groupKeyboard).toBeDefined();
+    expect((groupKeyboard as { inline_keyboard: ReadonlyArray<unknown> }).inline_keyboard).toHaveLength(1);
+
+    // Recipient DM: sent to the recipient's chat id (numeric of the
+    // platformId), same pickup keyboard.
+    const [recipientChatId, recipientText] = sendDirectMessage.mock.calls[1]!;
+    expect(recipientChatId).toBe(200);
+    expect(recipientText).toContain("Hi Marlene Hartmann!");
+    expect(recipientText).toContain("Diego de Miguel hat ein Paket");
+    expect(recipientText).toContain("[Abgeholt]");
+  });
+
+  it("stays silent + does NOT invoke the agent when the classifier returns isPackageRegistration: false (off-topic group chat)", async () => {
+    const { deps, sendToAsh, registerPackage, sendDirectMessage } = buildDeps({
+      groupClassification: {
+        isPackageRegistration: false,
+        recipients: [],
+        confidence: "low",
+        reason: "not a registration",
+      },
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(groupRegistrationUpdate({ text: "Wer hat Lust auf Pizza?" })),
+      deps,
+    );
+
+    expect(registerPackage).not.toHaveBeenCalled();
+    expect(sendDirectMessage).not.toHaveBeenCalled();
+    expect(sendToAsh).not.toHaveBeenCalled();
+  });
+
+  it("stays silent when classifier confidence is medium (Slice 3 / #109 will introduce the clarification synthetic)", async () => {
+    const { deps, sendToAsh, registerPackage, sendDirectMessage } = buildDeps({
+      groupClassification: {
+        isPackageRegistration: true,
+        recipients: [{ name: "Müller" }],
+        confidence: "medium",
+        reason: "name ambiguous",
+      },
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(groupRegistrationUpdate({ text: "Vielleicht Paket für Müller?" })),
+      deps,
+    );
+
+    expect(registerPackage).not.toHaveBeenCalled();
+    expect(sendDirectMessage).not.toHaveBeenCalled();
+    expect(sendToAsh).not.toHaveBeenCalled();
+  });
+
+  it("stays silent on classifier outage (both primary + fallback errored)", async () => {
+    const { deps, sendToAsh, registerPackage, sendDirectMessage } = buildDeps({
+      groupClassificationError: new Error("model outage"),
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(groupRegistrationUpdate({ text: "Paket für jemanden" })),
+      deps,
+    );
+
+    expect(registerPackage).not.toHaveBeenCalled();
+    expect(sendDirectMessage).not.toHaveBeenCalled();
+    expect(sendToAsh).not.toHaveBeenCalled();
+  });
+
+  it("DMs the unregistered holder a /register nudge when registerPackage throws REGISTER_PACKAGE_HOLDER_NOT_REGISTERED — silent in the group", async () => {
+    const error = Object.assign(new Error("not registered"), {
+      code: "REGISTER_PACKAGE_HOLDER_NOT_REGISTERED",
+    });
+    const {
+      deps,
+      sendToAsh,
+      registerPackage,
+      sendDirectMessage,
+    } = buildDeps({
+      registeredResident: null, // holder not registered
+      groupClassification: {
+        isPackageRegistration: true,
+        recipients: [{ name: "Marlene", houseNumber: "88" }],
+        confidence: "high",
+        reason: "looks like a registration",
+      },
+      registerPackageError: error,
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        groupRegistrationUpdate({
+          text: "Paket für Marlene (Hs.88)",
+          fromUserId: 999,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(registerPackage).toHaveBeenCalledTimes(1);
+    // One DM goes out — the localised /register nudge to the holder.
+    // Group stays silent (no group ack on this branch).
+    expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+    const [nudgeChatId, nudgeText] = sendDirectMessage.mock.calls[0]!;
+    expect(nudgeChatId).toBe(999);
+    expect(nudgeText).toContain("/register");
+    expect(sendToAsh).not.toHaveBeenCalled();
+  });
+
+  it("stays silent when the recipient resolution is 'unknown' (Slice 3 / #109 introduces the group question)", async () => {
+    const { deps, sendToAsh, sendDirectMessage } = buildDeps({
+      registeredResident: holderResident(),
+      groupClassification: {
+        isPackageRegistration: true,
+        recipients: [{ name: "Stranger", houseNumber: "999" }],
+        confidence: "high",
+        reason: "high-conf registration",
+      },
+      registerPackageResult: {
+        package: {
+          id: "pkg_unknown",
+          streetId: "Lutterothstrasse",
+          recipientResidentId: null,
+          recipientName: "Stranger",
+          recipientHouseNumber: "999",
+          holderResidentId: "100",
+          carrier: "unknown",
+          status: "held",
+          receivedAt: Date.now(),
+          pickedUpAt: null,
+          reminded: false,
+        } satisfies Package,
+        holder: {
+          id: "100",
+          name: "Diego Demiguel",
+          houseNumber: "69",
+          floor: null,
+          buzzerName: null,
+          language: "de",
+        },
+        recipientResolution: { kind: "unknown" },
+        receptionRequestFulfilled: null,
+      },
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        groupRegistrationUpdate({ text: "Paket für Stranger (Hs.999)" }),
+      ),
+      deps,
+    );
+
+    expect(sendDirectMessage).not.toHaveBeenCalled();
+    expect(sendToAsh).not.toHaveBeenCalled();
+  });
+
+  it("anonymous group post (no fromUserId) stays silent — classifier is not even called", async () => {
+    const { deps, sendToAsh, classifyGroupMessage, sendDirectMessage } =
+      buildDeps();
+
+    await processInboundTelegramUpdate(
+      makeRequest({
+        update_id: 400,
+        message: {
+          message_id: 1,
+          date: 1,
+          text: "Paket für jemanden",
+          chat: { id: -100, type: "supergroup" },
+          // No `from` — anonymous group post.
+        },
+      }),
+      deps,
+    );
+
+    expect(classifyGroupMessage).not.toHaveBeenCalled();
+    expect(sendDirectMessage).not.toHaveBeenCalled();
+    expect(sendToAsh).not.toHaveBeenCalled();
   });
 });
