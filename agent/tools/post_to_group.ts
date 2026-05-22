@@ -103,7 +103,7 @@ const buttonSchema = z.object({
     .max(64)
     .describe(
       'Encoded action to fire when the button is tapped. Convention: ' +
-        '"<action>:<id>" — e.g. "confirm_pickup:pkg_42". Max 64 bytes ' +
+        '"<action>:<id>" — e.g. "remind_later:pkg_42". Max 64 bytes ' +
         "per Bot API spec.",
     ),
 });

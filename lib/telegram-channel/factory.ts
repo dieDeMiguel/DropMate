@@ -44,12 +44,9 @@ import {
   createReceptionRequest,
 } from "../reception-request.js";
 import { registerPackage } from "../package.js";
+import { confirmPickup } from "../pickup.js";
 import { registerResident } from "../registration.js";
-import {
-  getPackage,
-  getResident,
-  upsertKnownTelegramUser,
-} from "../redis.js";
+import { getResident, upsertKnownTelegramUser } from "../redis.js";
 import { runWithTrace, type TraceKind } from "../trace.js";
 import {
   buildFileProxyUrl,
@@ -112,10 +109,9 @@ export function telegramChannel(config: TelegramChannelConfig) {
     // view and the dashboard's project-overview card both read this;
     // without it every row shows `—` in the Trigger column (`unknown`
     // adapter bucket). The finer-grained per-shape values
-    // (`telegram.text-dm`, `telegram.callback-confirm-pickup`, …) are
-    // layered on top in process-update.ts via `setTriggerAttribute` so
-    // downstream filters can tell text DMs apart from button taps and
-    // photo uploads.
+    // (`telegram.text-dm`, `telegram.callback`, …) are layered on top in
+    // process-update.ts via `setTriggerAttribute` so downstream filters
+    // can tell text DMs apart from button taps and photo uploads.
     kindHint: "telegram",
     state: undefined as unknown as TelegramChannelState,
     context: (state) => ({ chatId: state.chatId, fromUserId: state.fromUserId }),
@@ -232,10 +228,6 @@ export function telegramChannel(config: TelegramChannelConfig) {
               answerCallbackQuery(token, callbackId, text),
             stripKeyboard: (chatId, messageId) =>
               editMessageReplyMarkup(token, chatId, messageId),
-            getPackageRecipientId: async (packageId) => {
-              const pkg = await getPackage(packageId);
-              return pkg?.recipientResidentId ?? null;
-            },
             recordTelegramObservation: async (input) => {
               await upsertKnownTelegramUser(input);
             },
@@ -301,6 +293,8 @@ export function telegramChannel(config: TelegramChannelConfig) {
               });
             },
             registerPackage: (holder, input) => registerPackage(holder, input),
+            confirmPickup: (caller, packageId) =>
+              confirmPickup(caller, packageId),
             getRegisteredResident: async (userId) =>
               getResident(String(userId)),
             createReceptionRequest: (caller, input) =>

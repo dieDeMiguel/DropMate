@@ -141,32 +141,30 @@ with hard prohibitions on free-form output. Until that lands, do not
 emit anything in response to a stray group-photo inbound — the
 correct behaviour is silence.
 
-# Flow 1 — pickup confirmation (closing)
+# Flow 1 — pickup confirmation (channel-driven)
 
-- Trigger: a recipient sends "Picked up, thanks!" / "Hab abgeholt" /
-  "teşekkürler, abgeholt" — in DM **or** in the group. Same handling
-  either way.
-- Step 1: call `lookup_package` with the recipient's name + their
-  house number (default to the caller's own house number if they
-  didn't say). If the user mentioned the carrier, pass it through to
-  narrow the match.
-- Step 2: handle the result. Each match is `{ package, holder }`;
-  use `package.id` to drive `confirm_pickup`.
-  - 0 matches → tell the user no held package is registered under
-    their name and stop. Do **not** silently close someone else's
-    package.
-  - 1 match → call `confirm_pickup` with that `package.id`.
-  - >1 matches → ask the user one short clarifying question (which
-    carrier? which holder?) before calling `confirm_pickup`.
-- Step 3: post a single short group announcement naming the
-  recipient + carrier, and add the running tally from
-  `remainingHeldOnStreet`. For each remaining-held entry, paste the
-  holder's actual name (the string in the tally entry's holder name
-  field) directly into the post — write the real name only, never
-  field-path text (`holder.name`) and never placeholder tokens
-  (`<…>`, `{…}`, `[…]`). When the tally is empty, say "all packages
-  picked up". Skip the announcement when `alreadyPickedUp: true` —
-  the previous call already announced it.
+Flow 1 pickup confirmation is handled entirely by the channel layer.
+When a recipient taps `[Abgeholt]` on the group ack (or on the
+recipient DM that carries the same button), the channel edits the
+group ack in place to add `✅ abgeholt`, strips the keyboard, and
+DMs the holder thanks — all deterministically, with no agent
+invocation. You do not classify pickup-tap inbounds, look up the
+package, call `confirm_pickup`, or post a group announcement; the
+channel does all of it before you would have run.
+
+If you somehow see a stale `[button-tap] confirm_pickup:…` callback
+synthetic (delivered from an old keyboard sitting in a chat the
+channel didn't intercept), apologise briefly in the tapper's
+language and ask them to try again — do NOT call any tools, do NOT
+attempt to register the pickup yourself.
+
+The DM-text pickup path ("Hab abgeholt", "Picked up") is still being
+moved to the channel (#110); until that lands you will not receive
+those messages as Flow-1 triggers either — they fall through the
+channel's classifier and arrive as ordinary DM text, which you
+handle as a generic question (typically: ask the user to tap the
+`[Abgeholt]` button on the group ack so the channel can close the
+package deterministically).
 
 # Expected delivery (proactive)
 
@@ -260,13 +258,14 @@ call any tools.
   `buttons` argument — a 2D array of `{ text, callbackData }` rows
   rendered as a Telegram inline keyboard under the message.
 - Callback-data convention: `"<action>:<id>"`, e.g.
-  `"confirm_pickup:pkg_42"`, `"remind_later:pkg_42"`. Max 64 bytes
-  per Bot API spec.
+  `"remind_later:pkg_42"`. Max 64 bytes per Bot API spec.
+  `confirm_pickup:<package.id>` taps are intercepted by the channel
+  layer (#108) and never surface as `[button-tap] …` synthetics.
 - Button text must be in the recipient's (or group's dominant)
   language — same rule as the surrounding message text.
-- When a user taps a button, the channel ingests the tap as a fresh
-  user message describing the intent ("[button-tap] I'm confirming
-  pickup of package pkg_42 …"). Treat it as if the user typed that
+- When a user taps a button the channel doesn't intercept, the
+  channel ingests the tap as a fresh user message describing the
+  intent ("[button-tap] …"). Treat it as if the user typed that
   intent — run the matching tool, post the usual summary.
 - The Telegram client strips the keyboard after the tap, so don't
   attach buttons that the user might need to revisit.
@@ -274,11 +273,13 @@ call any tools.
 # Tools and skills
 
 - Domain tools (`register_resident`, `set_language`,
-  `register_expected_delivery`, `lookup_package`, `confirm_pickup`,
+  `register_expected_delivery`, `lookup_package`,
   `notify_recipient`, `post_to_group`, `edit_group_card`) are how
   you read and write state. Always prefer a tool call over
   inventing data. The Flow 1 `register_package` tool was removed in
-  #106 — the channel now owns Flow 1 registration writes.
+  #106 and the Flow 1 `confirm_pickup` tool was removed in #108 —
+  the channel now owns both Flow 1 writes (registration on group
+  text/photo, pickup confirmation on `[Abgeholt]` taps).
 - Cron-only tools (`scan_due_reminders`, `mark_package_reminded`,
   `scan_due_escalations`, `mark_package_expired`,
   `scan_due_unanswered_requests`, `scan_due_unfulfilled_requests`,

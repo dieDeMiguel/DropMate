@@ -102,6 +102,11 @@ import {
   type RegisterPackageInput,
   type RegisterPackageResult,
 } from "../package.js";
+import {
+  PICKUP_ALREADY_DONE_ERROR_CODE,
+  PICKUP_NOT_RECIPIENT_ERROR_CODE,
+  type ConfirmPickupResult,
+} from "../pickup.js";
 import type { PackageCarrier, Resident } from "../redis.js";
 import { emitTrace } from "../trace.js";
 import {
@@ -134,6 +139,13 @@ import {
 } from "./inbound.js";
 import type { InlineKeyboardMarkup, TelegramMessageEntity } from "./send.js";
 import { verifyTelegramSecretHeader } from "./verify.js";
+import {
+  buildGroupAckPickedUpText,
+  buildHolderThanksDmText,
+  pickupAlreadyDoneToast,
+  pickupNotRecipientToast,
+  pickupRetryToast,
+} from "./pickup-dms.js";
 import {
   buildRequesterAcceptDm,
   buildVolunteerAcceptDmText,
@@ -317,19 +329,6 @@ export interface ProcessUpdateDeps {
    */
   readonly stripKeyboard: (chatId: number, messageId: number) => Promise<void>;
   /**
-   * Recipient-scope guard for group `confirm_pickup` taps. Returns
-   * the package's `recipientResidentId` (the Resident id we expect
-   * the tapper to match), or `null` if the package is unknown or
-   * unlinked. Implemented in the factory via `getPackage(packageId)`.
-   *
-   * Only consulted for callbacks with action `confirm_pickup` that
-   * arrive in a group chat — DMs are already 1:1 scoped to the
-   * tapper, no further check needed.
-   */
-  readonly getPackageRecipientId: (
-    packageId: string,
-  ) => Promise<string | null>;
-  /**
    * Passive recording of every Telegram identity the bot sees. Fired
    * once per inbound update (message OR callback) before the agent
    * runs so even taps from previously-unseen users are captured.
@@ -411,6 +410,29 @@ export interface ProcessUpdateDeps {
     holder: Resident | null,
     input: RegisterPackageInput,
   ) => Promise<RegisterPackageResult>;
+  /**
+   * v2.1 #108 (Slice 4 of #105): channel-side handle for the
+   * lib-level `confirmPickup`. The channel calls this directly when
+   * a registered resident taps `[Abgeholt]` on the group ack or
+   * recipient DM posted by Slice 1 (#106) so the status flip + the
+   * group-edit + the holder thanks DM all land BEFORE — and
+   * INSTEAD of — any agent invocation. Mirrors the v2.1 #96 Part A
+   * volunteer-accept shape exactly: throws typed `ConfirmPickupError`
+   * with codes the orchestrator branches on, no Ash-context
+   * dependency so tests can stub the dep without spinning up Redis.
+   *
+   * Implemented in the factory via the lib-level `confirmPickup` from
+   * `lib/pickup.ts`. Throwing with `PICKUP_NOT_RECIPIENT` →
+   * dedicated toast + keyboard stripped. Throwing with
+   * `PICKUP_ALREADY_DONE` → dedicated toast (keyboard already
+   * stripped from the previous success). Any other throw →
+   * generic retry toast + keyboard stays live so the recipient can
+   * re-tap once the underlying hiccup clears.
+   */
+  readonly confirmPickup: (
+    caller: Resident,
+    packageId: string,
+  ) => Promise<ConfirmPickupResult>;
   /**
    * Resolves a Telegram `user_id` to the full `Resident` record (or
    * `null` if unregistered). Consumed by the Flow 2 v2 channel path:
@@ -554,19 +576,22 @@ export interface ProcessUpdateDeps {
  *   - `telegram.slash-receive`         — `/receive` slash command that
  *                                        fell through to the agent
  *                                        (typically unregistered caller).
- *   - `telegram.callback-confirm-pickup` — confirm_pickup button tap.
- *   - `telegram.callback`              — other callback actions that
- *                                        still reach the agent (stale
+ *   - `telegram.callback`              — callback actions that still
+ *                                        reach the agent (stale
  *                                        `accept_reception_request`,
  *                                        `decline_reception_request`,
  *                                        `remind_later`, unknown).
+ *                                        `confirm_pickup` no longer
+ *                                        reaches the agent after v2.1
+ *                                        #108 (Slice 4 of #105) —
+ *                                        the channel handles those
+ *                                        taps deterministically.
  */
 export type TelegramTriggerKind =
   | "telegram.text-dm"
   | "telegram.group"
   | "telegram.photo"
   | "telegram.slash-receive"
-  | "telegram.callback-confirm-pickup"
   | "telegram.callback";
 
 /**
@@ -694,10 +719,6 @@ function parseCallbackData(data: string): ParsedCallbackData {
  */
 function synthesizeCallbackMessage(parsed: ParsedCallbackData): string {
   switch (parsed.action) {
-    case "confirm_pickup":
-      return parsed.id
-        ? `[button-tap] I'm confirming pickup of package ${parsed.id}. Please run confirm_pickup with that id and post the usual short group announcement.`
-        : "[button-tap] I'm confirming pickup but no package id was attached to the button — ignore.";
     case "accept_reception_request":
       // Legacy DM-3 button callback. The agent tool that used to back
       // this branch was hard-deleted by v2.1 Slice 5 (#90); the channel
@@ -782,17 +803,19 @@ async function handleCallbackQuery(
     chatId: cb.chatId,
   });
 
-  // Group `confirm_pickup` taps: only the recipient may close the
-  // package. DMs are inherently 1:1 so no check needed.
-  if (cb.isGroup && parsed.action === "confirm_pickup" && parsed.id) {
-    const recipientId = await deps.getPackageRecipientId(parsed.id).catch(() => null);
-    if (recipientId === null || recipientId !== String(cb.fromUserId)) {
-      await deps
-        .answerCallback(cb.callbackId, "Only the recipient can confirm pickup.")
-        .catch(() => undefined);
-      // Leave the keyboard intact — the actual recipient may still tap.
-      return new Response(null, { status: 204 });
-    }
+  // v2.1 #108 (Slice 4 of #105): channel-deterministic pickup tap.
+  // The `[Abgeholt]` callback is handled here end-to-end (status flip
+  // via `confirmPickup`, edit the group ack in place, DM the holder)
+  // and `sendToAsh` is NEVER called on this path. Mirrors the
+  // volunteer-accept callback architecture (#96) one-for-one.
+  //
+  // The pre-#108 path was: gate-on-recipient-scope + ack + strip +
+  // hand the agent a `[button-tap] confirm_pickup` synthetic. The
+  // model then ran the deleted `confirm_pickup` tool. Pulling the
+  // decision OUT of the model closes the same v1-style text-leak
+  // surface #100 closed for Flow 2 acks.
+  if (parsed.action === "confirm_pickup" && parsed.id) {
+    return handleConfirmPickup(cb, parsed.id, deps);
   }
 
   // Flow 2 v2 (#68) group-card accept: only registered residents can
@@ -858,17 +881,15 @@ async function handleCallbackQuery(
   };
 
   // v2.1 #99: attribute the post-routing inbound shape onto the active
-  // OTel span so Agent Runs shows what fired this turn. `confirm_pickup`
-  // is the only callback the channel still hands to the agent on the
-  // happy path; the rest (legacy `accept_reception_request`,
-  // `decline_reception_request`, `remind_later`, unknown actions) get
-  // the generic `telegram.callback` bucket so we can still distinguish
-  // them from text/photo/slash triggers in dashboard filters.
-  const callbackTrigger: TelegramTriggerKind =
-    parsed.action === "confirm_pickup"
-      ? "telegram.callback-confirm-pickup"
-      : "telegram.callback";
-  deps.setTriggerAttribute?.(callbackTrigger);
+  // OTel span so Agent Runs shows what fired this turn. After v2.1
+  // #108 (Slice 4 of #105) channel-handles `confirm_pickup` taps
+  // deterministically without invoking the agent, the only callbacks
+  // that still reach this synthetic path are the legacy ones
+  // (`accept_reception_request`, `decline_reception_request`,
+  // `remind_later`, unknown actions) — they all share the generic
+  // `telegram.callback` bucket so we can still distinguish them from
+  // text/photo/slash triggers in dashboard filters.
+  deps.setTriggerAttribute?.("telegram.callback");
 
   const session = await deps.sendToAsh(syntheticMessage, {
     auth,
@@ -2012,6 +2033,225 @@ async function handleAcceptReceptionGroup(
       "[accept_reception_group] requester.id is not a finite number — skipping requester DM",
       { requesterId: accepted.requester.id },
     );
+  }
+
+  return new Response(null, { status: 204 });
+}
+
+/**
+ * v2.1 #108 (Slice 4 of #105) — channel-deterministic pickup tap.
+ *
+ * Mirrors the v2.1 #96 Part A `handleAcceptReceptionGroup` shape
+ * one-for-one: resolve the caller via `getRegisteredResident`,
+ * dispatch to the lib-level `confirmPickup`, then on success edit
+ * the group ack in place (the same message that carried the
+ * `[Abgeholt]` keyboard) + DM the holder thanks in their stored
+ * language. `sendToAsh` is NEVER called on this path — the agent
+ * does not run on the pickup-tap surface.
+ *
+ * Error class → toast / keyboard treatment:
+ *
+ *   - getRegisteredResident throws / returns null (race vs
+ *     directory): generic retry toast, keyboard stays live.
+ *   - confirmPickup throws `PICKUP_NOT_RECIPIENT`: dedicated
+ *     toast + strip keyboard (caller will never become the
+ *     recipient; permanent rejection).
+ *   - confirmPickup throws `PICKUP_ALREADY_DONE`: dedicated toast
+ *     only; keyboard already stripped from the previous success.
+ *   - other throw (Redis hiccup): generic retry toast, keyboard
+ *     stays live.
+ *
+ * Ack + strip happen AFTER the lib call (vs before it) so the
+ * failure path leaves the keyboard intact on recoverable errors.
+ * Same #95 invariant the volunteer-accept handler relies on.
+ *
+ * editGroupCard / sendDirectMessage failures after the lib call
+ * succeeded are logged but never raised: the canonical state in
+ * Redis is correct, and any DM / group-edit retry can land
+ * separately without re-flipping the package status.
+ */
+async function handleConfirmPickup(
+  cb: TelegramInboundCallback,
+  packageId: string,
+  deps: ProcessUpdateDeps,
+): Promise<Response> {
+  if (cb.fromUserId === null) {
+    // Defensive: the callback parser populates fromUserId from
+    // `callback_query.from.id` which is required by the Bot API.
+    // If it's somehow null, the caller can't be scoped — keep the
+    // keyboard live and toast generic.
+    await deps
+      .answerCallback(cb.callbackId, pickupRetryToast(cb.fromLanguageCode))
+      .catch(() => undefined);
+    return new Response(null, { status: 204 });
+  }
+
+  let caller: Resident | null;
+  try {
+    caller = await deps.getRegisteredResident(cb.fromUserId);
+  } catch (err) {
+    console.error(
+      "[confirm_pickup] getRegisteredResident threw for userId",
+      cb.fromUserId,
+      "— failing loud (no agent fallback)",
+      err instanceof Error
+        ? { name: err.name, message: err.message, stack: err.stack }
+        : err,
+    );
+    await deps
+      .answerCallback(cb.callbackId, pickupRetryToast(cb.fromLanguageCode))
+      .catch(() => undefined);
+    return new Response(null, { status: 204 });
+  }
+  if (!caller) {
+    // Pickup taps from unregistered users get the not-recipient
+    // toast — an unregistered user is by definition not the
+    // recipient of any Package (recipientResidentId would never
+    // match). Strip the keyboard so they don't keep tapping.
+    await deps
+      .answerCallback(
+        cb.callbackId,
+        pickupNotRecipientToast(cb.fromLanguageCode),
+      )
+      .catch(() => undefined);
+    await deps.stripKeyboard(cb.chatId, cb.messageId).catch(() => undefined);
+    return new Response(null, { status: 204 });
+  }
+
+  let result: ConfirmPickupResult;
+  emitTrace("flow1", "pickup.start", { packageId });
+  try {
+    result = await deps.confirmPickup(caller, packageId);
+    emitTrace("flow1", "pickup.end", { packageId });
+  } catch (err) {
+    const errorCode =
+      err && typeof err === "object" && "code" in err
+        ? (err as { code?: string }).code
+        : undefined;
+    const language = caller.language ?? cb.fromLanguageCode;
+    if (errorCode === PICKUP_NOT_RECIPIENT_ERROR_CODE) {
+      emitTrace("flow1", "pickup.reject.not-recipient", { packageId });
+      await deps
+        .answerCallback(cb.callbackId, pickupNotRecipientToast(language))
+        .catch(() => undefined);
+      // Permanent rejection — non-recipient never becomes the
+      // recipient by re-tapping. Strip the keyboard so they don't
+      // keep hammering it.
+      await deps.stripKeyboard(cb.chatId, cb.messageId).catch(() => undefined);
+      return new Response(null, { status: 204 });
+    }
+    if (errorCode === PICKUP_ALREADY_DONE_ERROR_CODE) {
+      emitTrace("flow1", "pickup.reject.already-done", { packageId });
+      await deps
+        .answerCallback(cb.callbackId, pickupAlreadyDoneToast(language))
+        .catch(() => undefined);
+      // Keyboard already stripped from the previous success — no
+      // further keyboard action needed.
+      return new Response(null, { status: 204 });
+    }
+    console.error(
+      "[confirm_pickup] confirmPickup failed for userId",
+      cb.fromUserId,
+      "packageId",
+      packageId,
+      err instanceof Error
+        ? { name: err.name, message: err.message, stack: err.stack }
+        : err,
+    );
+    emitTrace("flow1", "pickup.reject.redis-hiccup", { packageId });
+    await deps
+      .answerCallback(cb.callbackId, pickupRetryToast(language))
+      .catch(() => undefined);
+    return new Response(null, { status: 204 });
+  }
+
+  // Happy path: status flipped. Ack + strip the keyboard, then edit
+  // the group ack in place + DM the holder thanks. Doing this AFTER
+  // the lib call (vs before) is what makes the failure path above
+  // leave the keyboard intact on recoverable errors.
+  await deps.answerCallback(cb.callbackId).catch(() => undefined);
+  await deps.stripKeyboard(cb.chatId, cb.messageId).catch(() => undefined);
+
+  // Edit the in-group ack message to add the ✅ abgeholt marker.
+  // We need both holder and recipient names to render the full new
+  // text; the recipient name is always frozen on the Package, but
+  // the holder name only exists on the loaded Resident record. If
+  // the holder lookup failed (e.g. the holder de-registered between
+  // Slice 1's write and the recipient tapping), skip the edit —
+  // the keyboard is already stripped, so the user-facing effect is
+  // just that the original ack stays visible without the ✅ marker.
+  // That's better than rendering an edit with a missing name.
+  if (result.holder) {
+    try {
+      await deps.editGroupCard(
+        cb.chatId,
+        cb.messageId,
+        buildGroupAckPickedUpText({
+          holder: {
+            name: result.holder.name,
+            houseNumber: result.holder.houseNumber,
+          },
+          recipient: {
+            name: result.recipient?.name ?? result.package.recipientName,
+            houseNumber:
+              result.recipient?.houseNumber ??
+              result.package.recipientHouseNumber,
+          },
+        }),
+      );
+    } catch (err) {
+      console.error(
+        "[confirm_pickup] editGroupCard failed for chatId",
+        cb.chatId,
+        "messageId",
+        cb.messageId,
+        "error:",
+        err instanceof Error
+          ? { name: err.name, message: err.message, stack: err.stack }
+          : err,
+      );
+    }
+  }
+
+  // DM the holder thanks (when we can resolve a chat id for them).
+  // The holder's `platformId` equals their Telegram user id, which
+  // is also the 1:1 chat id for DMs. Skipped when the holder record
+  // is unresolvable (de-registered between Slice 1's write and the
+  // recipient tapping) — better to omit the thanks than to spam
+  // someone else's chat.
+  if (result.holder) {
+    const holderChatId = Number(result.holder.platformId);
+    if (Number.isFinite(holderChatId)) {
+      try {
+        emitTrace("dm", "start", { kind: "pickup-holder-thanks" });
+        await deps.sendDirectMessage(
+          holderChatId,
+          buildHolderThanksDmText({
+            holder: result.holder,
+            recipient: result.recipient ?? {
+              id: result.package.recipientResidentId ?? "",
+              name: result.package.recipientName,
+              houseNumber: result.package.recipientHouseNumber,
+              language: null,
+            },
+          }),
+        );
+        emitTrace("dm", "end", { kind: "pickup-holder-thanks" });
+      } catch (err) {
+        console.error(
+          "[confirm_pickup] holder thanks DM failed for platformId",
+          result.holder.platformId,
+          "error:",
+          err instanceof Error ? err.message : err,
+        );
+        emitTrace("dm", "error", { kind: "pickup-holder-thanks" });
+      }
+    } else {
+      console.error(
+        "[confirm_pickup] holder.platformId is not a finite number — skipping thanks DM",
+        { platformId: result.holder.platformId },
+      );
+    }
   }
 
   return new Response(null, { status: 204 });

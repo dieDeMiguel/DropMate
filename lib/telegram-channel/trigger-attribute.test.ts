@@ -21,7 +21,6 @@ describe("makeTriggerAttributeSetter", () => {
     setter("telegram.group");
     setter("telegram.photo");
     setter("telegram.slash-receive");
-    setter("telegram.callback-confirm-pickup");
     setter("telegram.callback");
 
     expect(setAttribute.mock.calls).toEqual([
@@ -29,7 +28,6 @@ describe("makeTriggerAttributeSetter", () => {
       ["trigger", "telegram.group"],
       ["trigger", "telegram.photo"],
       ["trigger", "telegram.slash-receive"],
-      ["trigger", "telegram.callback-confirm-pickup"],
       ["trigger", "telegram.callback"],
     ]);
   });
@@ -45,7 +43,7 @@ describe("setTelegramTriggerAttribute", () => {
   it("does not throw when no active span is set", () => {
     expect(() => setTelegramTriggerAttribute("telegram.text-dm")).not.toThrow();
     expect(() =>
-      setTelegramTriggerAttribute("telegram.callback-confirm-pickup"),
+      setTelegramTriggerAttribute("telegram.callback"),
     ).not.toThrow();
   });
 
@@ -80,14 +78,12 @@ describe("setTelegramTriggerAttribute", () => {
       setTelegramTriggerAttribute("telegram.group");
       setTelegramTriggerAttribute("telegram.photo");
       setTelegramTriggerAttribute("telegram.slash-receive");
-      setTelegramTriggerAttribute("telegram.callback-confirm-pickup");
       setTelegramTriggerAttribute("telegram.callback");
 
       expect(setAttribute.mock.calls).toEqual([
         ["trigger", "telegram.group"],
         ["trigger", "telegram.photo"],
         ["trigger", "telegram.slash-receive"],
-        ["trigger", "telegram.callback-confirm-pickup"],
         ["trigger", "telegram.callback"],
       ]);
     });
