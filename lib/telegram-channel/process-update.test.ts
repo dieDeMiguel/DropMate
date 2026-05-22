@@ -79,6 +79,7 @@ interface BuiltDeps {
   acceptReceptionRequest: ReturnType<typeof vi.fn>;
   editGroupCard: ReturnType<typeof vi.fn>;
   sendDirectMessage: ReturnType<typeof vi.fn>;
+  registerResident: ReturnType<typeof vi.fn>;
 }
 
 type ParsedLabel = NonNullable<
@@ -99,6 +100,7 @@ function buildDeps(overrides: {
   classification?: Flow2ClassificationResult;
   registeredResident?: Resident | null;
   acceptResult?: AcceptReceptionRequestResult;
+  registerResult?: { resident: Resident; updated: boolean };
 } = {}): BuiltDeps {
   const session = overrides.session ?? makeSession("sess_new");
   const sendToAsh = vi.fn().mockResolvedValue(session);
@@ -232,6 +234,26 @@ function buildDeps(overrides: {
     .mockResolvedValue(overrides.acceptResult ?? defaultAcceptResult);
   const editGroupCard = vi.fn().mockResolvedValue(undefined);
   const sendDirectMessage = vi.fn().mockResolvedValue(undefined);
+  const defaultRegisterResult = {
+    resident: {
+      id: "12345",
+      name: "Diego de Miguel",
+      street: "Lutterothstrasse",
+      houseNumber: "69",
+      floor: "Erdgeschoss Links",
+      platformId: "12345",
+      platform: "telegram" as const,
+      language: "de",
+      availabilityPatterns: [],
+      registeredAt: 1716000000000,
+      source: "explicit" as const,
+      confirmed: true,
+    } satisfies Resident,
+    updated: false,
+  };
+  const registerResident = vi
+    .fn()
+    .mockResolvedValue(overrides.registerResult ?? defaultRegisterResult);
   return {
     sendToAsh,
     waitUntil,
@@ -250,6 +272,7 @@ function buildDeps(overrides: {
     acceptReceptionRequest,
     editGroupCard,
     sendDirectMessage,
+    registerResident,
     deps: {
       expectedSecret:
         "expectedSecret" in overrides ? overrides.expectedSecret : SECRET,
@@ -270,6 +293,7 @@ function buildDeps(overrides: {
       acceptReceptionRequest,
       editGroupCard,
       sendDirectMessage,
+      registerResident,
     },
   };
 }
@@ -3152,5 +3176,352 @@ describe("FLOW_2 DONE synthetic shape (v2.1 Bug 2 regression, #94)", () => {
     // …but the example block is omitted rather than emitting a German
     // example that the model would mistakenly mirror in Japanese.
     expect(message).not.toContain("Example (");
+  });
+});
+
+describe("processInboundTelegramUpdate — registration (v2.1 #97 — channel-deterministic DM onboarding)", () => {
+  // Live trace 2026-05-22 (#97): a fresh user DM'd
+  // `/register Diego de Miguel Lutterothstrasse 69 Erdgeschoss Links`
+  // and received 10 bot messages — a freely-generated welcome wall, a
+  // trilingual /language brochure, AND a Flow 2 misfire ("Habe in der
+  // Gruppe gefragt…") against a registration message that never asked
+  // for a reception request. Fix: pull the registration decision out
+  // of the model the same way Slice 1 (#86) pulled Flow 2 out. The
+  // channel writes the Resident + sends ONE deterministic confirmation
+  // DM. The agent never runs. These cases pin that contract.
+
+  it("`/register` slash with full args → one DM, no agent invocation, no group post", async () => {
+    const { deps, sendToAsh, sendDirectMessage, registerResident, waitUntil } =
+      buildDeps();
+
+    const res = await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 99,
+          text: "/register Diego de Miguel Lutterothstrasse 69 Erdgeschoss Links",
+          fromUserId: 99,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(res.status).toBe(204);
+    // sendToAsh NEVER called — the agent is structurally bypassed.
+    expect(sendToAsh).not.toHaveBeenCalled();
+    expect(waitUntil).not.toHaveBeenCalled();
+    // Lib write was driven from the channel.
+    expect(registerResident).toHaveBeenCalledTimes(1);
+    expect(registerResident.mock.calls[0]![0]).toEqual({
+      name: "Diego de Miguel",
+      street: "Lutterothstrasse",
+      houseNumber: "69",
+      floor: "Erdgeschoss",
+      buzzerName: "Links",
+      platformId: "99",
+      telegramLanguageCode: "de",
+    });
+    // Exactly ONE DM — the confirmation. No welcome wall.
+    expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+    const [chatId, text] = sendDirectMessage.mock.calls[0]!;
+    expect(chatId).toBe(99);
+    expect(text).toBe(
+      "Vielen Dank, Diego de Miguel! Du bist jetzt unter Lutterothstrasse 69, Erdgeschoss Links registriert.",
+    );
+  });
+
+  it("`/register` slash with a comma between name and address parses identically", async () => {
+    const { deps, registerResident, sendToAsh } = buildDeps();
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 99,
+          text: "/register Anna-Sophie Meyer, Methfesselstraße 92",
+          fromUserId: 99,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(sendToAsh).not.toHaveBeenCalled();
+    expect(registerResident).toHaveBeenCalledTimes(1);
+    expect(registerResident.mock.calls[0]![0]).toMatchObject({
+      name: "Anna-Sophie Meyer",
+      street: "Methfesselstraße",
+      houseNumber: "92",
+    });
+  });
+
+  it("free-text `Diego de Miguel, Lutterothstrasse 69 Erdgeschoss Links` is handled deterministically (no agent)", async () => {
+    const { deps, sendToAsh, registerResident, classifyDmIntent } = buildDeps();
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 99,
+          text: "Diego de Miguel, Lutterothstrasse 69 Erdgeschoss Links",
+          fromUserId: 99,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(sendToAsh).not.toHaveBeenCalled();
+    // The classifier is also bypassed — we don't want to burn a Flow 2
+    // classification on a registration inbound (the misfire that
+    // produced the live-trace "Habe in der Gruppe gefragt …" duplicates).
+    expect(classifyDmIntent).not.toHaveBeenCalled();
+    expect(registerResident).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls through to the classifier when free-text does not match the registration shape", async () => {
+    const { deps, sendToAsh, registerResident, classifyDmIntent } = buildDeps();
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 99,
+          text: "Wo ist mein Paket?",
+          fromUserId: 99,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(registerResident).not.toHaveBeenCalled();
+    // Classifier runs (and returns isFlow2:false by default in this
+    // suite), so the agent ultimately gets the raw text.
+    expect(classifyDmIntent).toHaveBeenCalledTimes(1);
+    expect(sendToAsh).toHaveBeenCalledTimes(1);
+  });
+
+  it("bare `/register` with no args → usage-hint DM, no agent invocation, no Resident write", async () => {
+    const { deps, sendToAsh, sendDirectMessage, registerResident } = buildDeps();
+
+    const res = await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 99,
+          text: "/register",
+          fromUserId: 99,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(res.status).toBe(204);
+    expect(sendToAsh).not.toHaveBeenCalled();
+    expect(registerResident).not.toHaveBeenCalled();
+    expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+    const [, text] = sendDirectMessage.mock.calls[0]!;
+    expect(text).toContain("/register");
+    // German usage hint by default.
+    expect(text).toContain("<Name>");
+  });
+
+  it("uses the resident's stored language for the confirmation DM after re-registration", async () => {
+    // Re-registration: lib returns updated:true with the existing
+    // resident.language. Confirmation DM should render in that
+    // preserved language regardless of telegram's current languageCode.
+    const { deps, sendDirectMessage } = buildDeps({
+      registerResult: {
+        resident: {
+          id: "99",
+          name: "Diego de Miguel",
+          street: "Lutterothstrasse",
+          houseNumber: "69",
+          floor: "Erdgeschoss",
+          platformId: "99",
+          platform: "telegram",
+          language: "en", // ← stored from earlier DM
+          availabilityPatterns: [],
+          registeredAt: 1716000000000,
+          source: "explicit",
+          confirmed: true,
+        },
+        updated: true,
+      },
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 99,
+          text: "/register Diego de Miguel Lutterothstrasse 69 Erdgeschoss",
+          fromUserId: 99,
+          languageCode: "de", // ← ignored; resident.language=en wins
+        }),
+      ),
+      deps,
+    );
+
+    const [, text] = sendDirectMessage.mock.calls[0]!;
+    expect(text).toBe(
+      "Thanks, Diego de Miguel! You're registered at Lutterothstrasse 69, Erdgeschoss.",
+    );
+  });
+
+  it("falls back to telegram languageCode when resident.language is unset", async () => {
+    const { deps, sendDirectMessage } = buildDeps({
+      registerResult: {
+        resident: {
+          id: "99",
+          name: "Diego de Miguel",
+          street: "Lutterothstrasse",
+          houseNumber: "69",
+          platformId: "99",
+          platform: "telegram",
+          // language deliberately omitted
+          availabilityPatterns: [],
+          registeredAt: 1716000000000,
+          source: "explicit",
+          confirmed: true,
+        },
+        updated: false,
+      },
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 99,
+          text: "/register Diego de Miguel Lutterothstrasse 69",
+          fromUserId: 99,
+          languageCode: "tr",
+        }),
+      ),
+      deps,
+    );
+
+    const [, text] = sendDirectMessage.mock.calls[0]!;
+    expect(text).toContain("Teşekkürler");
+    expect(text).toContain("kaydedildin");
+  });
+
+  it("falls through to the agent when registerResident throws (Redis hiccup)", async () => {
+    const { deps, sendToAsh, registerResident, sendDirectMessage } = buildDeps();
+    registerResident.mockRejectedValueOnce(new Error("redis down"));
+
+    const res = await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 99,
+          text: "/register Diego de Miguel Lutterothstrasse 69 Erdgeschoss",
+          fromUserId: 99,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    // Returns 204 from the agent path (sendToAsh is mocked).
+    expect(res.status).toBe(204);
+    // Lib was attempted.
+    expect(registerResident).toHaveBeenCalledTimes(1);
+    // The hiccup fell through to the agent — the user gets *some*
+    // response even when Redis is down.
+    expect(sendToAsh).toHaveBeenCalledTimes(1);
+    // No deterministic confirmation DM — the lib write failed, so we
+    // cannot render the resident-specific confirmation. The agent's
+    // outbound drain handles the user-facing apology.
+    expect(sendDirectMessage).not.toHaveBeenCalled();
+  });
+
+  it("group `/register` does NOT fire the channel-deterministic path (only DMs trigger registration)", async () => {
+    const { deps, sendToAsh, registerResident } = buildDeps();
+
+    await processInboundTelegramUpdate(
+      makeRequest({
+        update_id: 1,
+        message: {
+          message_id: 1,
+          date: 1,
+          text: "/register Diego de Miguel Lutterothstrasse 69",
+          chat: { id: -100, type: "supergroup" },
+          from: { id: 99, is_bot: false, first_name: "T", language_code: "de" },
+        },
+      }),
+      deps,
+    );
+
+    // Registration lib NOT called from a group message — registration
+    // is a 1:1 onboarding flow.
+    expect(registerResident).not.toHaveBeenCalled();
+    // Group inbound still reaches the agent (same as legacy).
+    expect(sendToAsh).toHaveBeenCalledTimes(1);
+  });
+
+  it("confirmation DM language coverage — en/es/tr also render in their locale", async () => {
+    async function runFor(language: "en" | "es" | "tr") {
+      const { deps, sendDirectMessage } = buildDeps({
+        registerResult: {
+          resident: {
+            id: "99",
+            name: "Diego de Miguel",
+            street: "Lutterothstrasse",
+            houseNumber: "69",
+            platformId: "99",
+            platform: "telegram",
+            language,
+            availabilityPatterns: [],
+            registeredAt: 0,
+            source: "explicit",
+            confirmed: true,
+          },
+          updated: false,
+        },
+      });
+      await processInboundTelegramUpdate(
+        makeRequest(
+          dmUpdate({
+            chatId: 99,
+            text: "/register Diego de Miguel Lutterothstrasse 69",
+            fromUserId: 99,
+            languageCode: language,
+          }),
+        ),
+        deps,
+      );
+      const [, text] = sendDirectMessage.mock.calls[0]!;
+      return text as string;
+    }
+
+    expect(await runFor("en")).toBe(
+      "Thanks, Diego de Miguel! You're registered at Lutterothstrasse 69.",
+    );
+    expect(await runFor("es")).toBe(
+      "Gracias, Diego de Miguel! Estás registrado en Lutterothstrasse 69.",
+    );
+    expect(await runFor("tr")).toBe(
+      "Teşekkürler, Diego de Miguel! Lutterothstrasse 69 adresine kaydedildin.",
+    );
+  });
+
+  it("usage-hint language coverage — en/es/tr also render in their locale", async () => {
+    async function runFor(language: "en" | "es" | "tr") {
+      const { deps, sendDirectMessage } = buildDeps();
+      await processInboundTelegramUpdate(
+        makeRequest(
+          dmUpdate({
+            chatId: 99,
+            text: "/register",
+            fromUserId: 99,
+            languageCode: language,
+          }),
+        ),
+        deps,
+      );
+      const [, text] = sendDirectMessage.mock.calls[0]!;
+      return text as string;
+    }
+
+    expect(await runFor("en")).toContain("Please write");
+    expect(await runFor("es")).toContain("Por favor escribe");
+    expect(await runFor("tr")).toContain("Lütfen şöyle yaz");
   });
 });
