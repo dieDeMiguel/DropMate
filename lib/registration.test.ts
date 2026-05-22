@@ -48,6 +48,29 @@ describe("isRegisterCommand", () => {
   });
 });
 
+describe("isStartCommand", () => {
+  it("matches `/start` on its own", async () => {
+    const { isStartCommand } = await loadLib();
+    expect(isStartCommand("/start")).toBe(true);
+  });
+  it("matches `/start <deeplink-token>`", async () => {
+    const { isStartCommand } = await loadLib();
+    expect(isStartCommand("/start ref_abc123")).toBe(true);
+  });
+  it("matches `/start@DropMate_bot`", async () => {
+    const { isStartCommand } = await loadLib();
+    expect(isStartCommand("/start@DropMate_bot")).toBe(true);
+  });
+  it("rejects `/startx`", async () => {
+    const { isStartCommand } = await loadLib();
+    expect(isStartCommand("/startx")).toBe(false);
+  });
+  it("rejects `/register` (a different slash command)", async () => {
+    const { isStartCommand } = await loadLib();
+    expect(isStartCommand("/register Diego")).toBe(false);
+  });
+});
+
 describe("parseRegisterCommand", () => {
   it("returns null for bare `/register` (no args)", async () => {
     const { parseRegisterCommand } = await loadLib();
