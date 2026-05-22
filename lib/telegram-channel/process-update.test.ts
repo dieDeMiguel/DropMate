@@ -69,6 +69,7 @@ interface BuiltDeps {
   drainSession: ReturnType<typeof vi.fn>;
   getFileUrl: ReturnType<typeof vi.fn>;
   parseTrackingPage: ReturnType<typeof vi.fn>;
+  parseLabel: ReturnType<typeof vi.fn>;
   answerCallback: ReturnType<typeof vi.fn>;
   stripKeyboard: ReturnType<typeof vi.fn>;
   getPackageRecipientId: ReturnType<typeof vi.fn>;
@@ -89,12 +90,15 @@ interface BuiltDeps {
 type ParsedTrackingPage = NonNullable<
   Awaited<ReturnType<ProcessUpdateDeps["parseTrackingPage"]>>
 >;
+type ParsedLabel = Awaited<ReturnType<ProcessUpdateDeps["parseLabel"]>>;
 
 function buildDeps(overrides: {
   session?: Session;
   expectedSecret?: string | undefined;
   fileUrl?: string;
   parsedTrackingPage?: ParsedTrackingPage | null;
+  parsedLabel?: ParsedLabel;
+  parsedLabelError?: Error;
   packageRecipientId?: string | null;
   isRegisteredResident?: boolean;
   classification?: Flow2ClassificationResult;
@@ -132,6 +136,23 @@ function buildDeps(overrides: {
         ? overrides.parsedTrackingPage
         : defaultParsedTrackingPage,
     );
+  // v2.1 #107 Slice 2: default parse_label verdict is the Flow 1
+  // happy path — a high-confidence parse with a registered Resident
+  // recipient (matches the defaultRegisterPackageResult below).
+  // Tests exercising the disambiguation cases override this.
+  const defaultParsedLabel: ParsedLabel = {
+    carrier: "DHL",
+    trackingNumber: "00340434161094021899",
+    recipientName: "Marlene Hartmann",
+    recipientHouseNumber: "88",
+    confidence: "high",
+    reason: "all fields legible",
+  };
+  const parseLabel = overrides.parsedLabelError
+    ? vi.fn().mockRejectedValue(overrides.parsedLabelError)
+    : vi
+        .fn()
+        .mockResolvedValue(overrides.parsedLabel ?? defaultParsedLabel);
   const answerCallback = vi.fn().mockResolvedValue(undefined);
   const stripKeyboard = vi.fn().mockResolvedValue(undefined);
   const getPackageRecipientId = vi
@@ -312,6 +333,7 @@ function buildDeps(overrides: {
     drainSession,
     getFileUrl,
     parseTrackingPage,
+    parseLabel,
     answerCallback,
     stripKeyboard,
     getPackageRecipientId,
@@ -335,6 +357,7 @@ function buildDeps(overrides: {
       drainSession,
       getFileUrl,
       parseTrackingPage,
+      parseLabel,
       answerCallback,
       stripKeyboard,
       getPackageRecipientId,
@@ -482,147 +505,349 @@ describe("processInboundTelegramUpdate", () => {
     });
   });
 
-  describe("group photo → [photo received] synthetic (#79: agent invokes parse_label itself)", () => {
-    // Group photos route through Flow 1. Pre-#79 the channel pre-called
-    // parseLabel and folded the structured fields into a [label parsed]
-    // synthetic; #79 moves the parse_label call site inside ash.turn so
-    // the vision spend lands on the Agent Runs row. The channel's job
-    // shrinks to: resolve the file_id → signed URL, hand the agent a
-    // [photo received] file_url=… caption='…' synthetic.
+  describe("group photo → channel-deterministic Flow 1 (v2.1 #107 Slice 2 of #106)", () => {
+    // v2.1 #107 / Slice 2 of #106: group photos no longer reach the
+    // agent on the happy path. The channel resolves the file URL,
+    // calls parse_label itself, and on a high-confidence parse with a
+    // registered-resident recipient posts the deterministic group ack
+    // + recipient DM via lib/telegram-channel/flow-1-dms.ts. Closes
+    // the agent text-leak surface the live trace 2026-05-22 produced
+    // (#105 — 20+ free-form German messages on a single inbound).
 
-    it("forwards a [photo received] synthetic containing the signed file URL and the caption", async () => {
-      const fileUrl =
-        "https://api.telegram.org/file/bot111:AAA/photos/file_99.jpg";
-      const { deps, sendToAsh, getFileUrl, parseTrackingPage } = buildDeps({
-        fileUrl,
-      });
+    function holderResident(): Resident {
+      return {
+        id: "100",
+        name: "Diego Demiguel",
+        street: "Lutterothstrasse",
+        houseNumber: "69",
+        platformId: "100",
+        platform: "telegram",
+        language: "de",
+        availabilityPatterns: [],
+        registeredAt: Date.now(),
+        source: "explicit",
+        confirmed: true,
+      };
+    }
 
-      const update = {
-        update_id: 1,
+    function groupPhotoUpdate(opts: {
+      caption?: string;
+      photoFileIds?: ReadonlyArray<string>;
+      chatId?: number;
+      fromUserId?: number;
+      languageCode?: string;
+    } = {}): Record<string, unknown> {
+      const fromUserId = opts.fromUserId ?? 100;
+      return {
+        update_id: 500,
         message: {
           message_id: 1,
           date: 1,
-          caption: "Paket für Natascha",
-          chat: { id: 42, type: "supergroup" },
-          from: { id: 99, is_bot: false, first_name: "T", language_code: "de" },
-          photo: [
-            { file_id: "small", file_size: 100, width: 90, height: 90 },
-            { file_id: "large", file_size: 5000, width: 1280, height: 1280 },
-          ],
+          ...(opts.caption ? { caption: opts.caption } : {}),
+          chat: { id: opts.chatId ?? -100, type: "supergroup" },
+          from: {
+            id: fromUserId,
+            is_bot: false,
+            first_name: "Holder",
+            language_code: opts.languageCode ?? "de",
+          },
+          photo: (opts.photoFileIds ?? ["only"]).map((file_id) => ({
+            file_id,
+            file_size: 100,
+            width: 90,
+            height: 90,
+          })),
         },
       };
+    }
 
-      const res = await processInboundTelegramUpdate(makeRequest(update), deps);
+    it("on high-confidence parse + registered-resident recipient: calls parseLabel + registerPackage + posts group ack + DMs recipient with [Abgeholt] keyboard, no agent invocation", async () => {
+      const fileUrl =
+        "https://api.telegram.org/file/bot111:AAA/photos/file_99.jpg";
+      const {
+        deps,
+        sendToAsh,
+        getFileUrl,
+        parseLabel,
+        parseTrackingPage,
+        registerPackage,
+        sendDirectMessage,
+      } = buildDeps({
+        fileUrl,
+        registeredResident: holderResident(),
+      });
+
+      const res = await processInboundTelegramUpdate(
+        makeRequest(
+          groupPhotoUpdate({
+            caption: "Paket für Marlene",
+            photoFileIds: ["small", "large"],
+          }),
+        ),
+        deps,
+      );
+
       expect(res.status).toBe(204);
 
-      // The orchestrator picks the largest photo size (last entry) per
-      // pre-#79 behaviour.
+      // The orchestrator picks the largest photo size (last entry).
       expect(getFileUrl).toHaveBeenCalledWith("large");
 
-      // parseTrackingPage is the DM-photo branch; never fires for group
-      // photos.
+      // parseLabel is invoked channel-side now (not the agent).
+      // parseTrackingPage is the DM-photo branch; never fires here.
+      expect(parseLabel).toHaveBeenCalledTimes(1);
+      expect(parseLabel).toHaveBeenCalledWith({
+        imageUrl: fileUrl,
+        caption: "Paket für Marlene",
+      });
       expect(parseTrackingPage).not.toHaveBeenCalled();
 
-      const [message, options] = sendToAsh.mock.calls[0]!;
-      expect(typeof message).toBe("string");
-      expect(message).toBe(
-        `[photo received] file_url=${fileUrl} caption='Paket für Natascha'`,
-      );
-      // The pre-#79 [label parsed] shape MUST be gone — its presence
-      // would mean the channel is still pre-parsing.
-      expect(message).not.toContain("[label parsed]");
-      expect(message).not.toContain("carrier=");
-      expect(message).not.toContain("confidence=");
+      expect(registerPackage).toHaveBeenCalledTimes(1);
+      // Two sendDirectMessage calls: one to the group, one to the recipient.
+      expect(sendDirectMessage).toHaveBeenCalledTimes(2);
+      // Agent is NEVER invoked on this path.
+      expect(sendToAsh).not.toHaveBeenCalled();
 
-      expect(options.state).toEqual<TelegramChannelState>({
-        chatId: 42,
-        isGroup: true,
-        fromUserId: 99,
-        fromLanguageCode: "de",
+      // Group ack: posted to the inbound chat id (the group) with the
+      // pickup keyboard.
+      const [groupChatId, groupText, groupEntities, groupKeyboard] =
+        sendDirectMessage.mock.calls[0]!;
+      expect(groupChatId).toBe(-100);
+      expect(groupText).toContain("📦 Paket von Diego de Miguel (69)");
+      expect(groupText).toContain("an Marlene Hartmann (88)");
+      expect(groupEntities).toBeUndefined();
+      expect(groupKeyboard).toBeDefined();
+      expect(
+        (groupKeyboard as { inline_keyboard: ReadonlyArray<unknown> })
+          .inline_keyboard,
+      ).toHaveLength(1);
+
+      // Recipient DM: sent to the recipient's chat id (numeric of the
+      // platformId), same pickup keyboard.
+      const [recipientChatId, recipientText] = sendDirectMessage.mock.calls[1]!;
+      expect(recipientChatId).toBe(200);
+      expect(recipientText).toContain("Hi Marlene Hartmann!");
+      expect(recipientText).toContain("Diego de Miguel hat ein Paket");
+      expect(recipientText).toContain("[Abgeholt]");
+    });
+
+    it("forwards the caption (or undefined when absent) to parseLabel", async () => {
+      // No caption → parseLabel called with `caption: undefined`.
+      const { deps, parseLabel } = buildDeps({
+        registeredResident: holderResident(),
+      });
+
+      await processInboundTelegramUpdate(
+        makeRequest(groupPhotoUpdate({})),
+        deps,
+      );
+
+      expect(parseLabel).toHaveBeenCalledTimes(1);
+      expect(parseLabel.mock.calls[0]![0]).toMatchObject({
+        caption: undefined,
       });
     });
 
-    it("substitutes a placeholder caption when no caption was sent", async () => {
-      const fileUrl =
-        "https://api.telegram.org/file/bot111:AAA/photos/file_42.jpg";
-      const { deps, sendToAsh, getFileUrl } = buildDeps({ fileUrl });
-
-      const update = {
-        update_id: 2,
-        message: {
-          message_id: 2,
-          date: 1,
-          chat: { id: 42, type: "supergroup" },
-          from: { id: 99, is_bot: false, first_name: "T" },
-          photo: [{ file_id: "only", file_size: 100, width: 90, height: 90 }],
+    it("stays silent + does NOT invoke the agent when parseLabel returns low confidence (Slice 3 / #109 will introduce the clarification synthetic)", async () => {
+      const { deps, sendToAsh, registerPackage, sendDirectMessage } = buildDeps({
+        registeredResident: holderResident(),
+        parsedLabel: {
+          carrier: "DHL",
+          recipientName: "Müller",
+          recipientHouseNumber: "12",
+          confidence: "low",
+          reason: "blurry label",
         },
-      };
+      });
 
-      await processInboundTelegramUpdate(makeRequest(update), deps);
-
-      expect(getFileUrl).toHaveBeenCalledWith("only");
-      const [message] = sendToAsh.mock.calls[0]!;
-      expect(message).toBe(
-        `[photo received] file_url=${fileUrl} caption='(no caption)'`,
+      const res = await processInboundTelegramUpdate(
+        makeRequest(groupPhotoUpdate({ caption: "kann das jemand lesen?" })),
+        deps,
       );
+
+      expect(res.status).toBe(204);
+      expect(registerPackage).not.toHaveBeenCalled();
+      expect(sendDirectMessage).not.toHaveBeenCalled();
+      expect(sendToAsh).not.toHaveBeenCalled();
     });
 
-    it("doubles single quotes inside the caption so the wrapping pair parses as one field", async () => {
-      // Without escaping, a caption like "Marlene's Päckchen" would
-      // produce `caption='Marlene's Päckchen'` — the embedded
-      // apostrophe closes the wrapping pair early. The orchestrator
-      // doubles inner single quotes (`'` → `''`) so the agent can
-      // unambiguously parse the caption back out.
-      const fileUrl =
-        "https://api.telegram.org/file/bot111:AAA/photos/file_apos.jpg";
-      const { deps, sendToAsh } = buildDeps({ fileUrl });
-
-      const update = {
-        update_id: 3,
-        message: {
-          message_id: 3,
-          date: 1,
-          caption: "Marlene's Päckchen",
-          chat: { id: 42, type: "supergroup" },
-          from: { id: 99, is_bot: false, first_name: "T" },
-          photo: [{ file_id: "only", file_size: 100, width: 90, height: 90 }],
+    it("stays silent when parseLabel returns medium confidence", async () => {
+      const { deps, sendToAsh, registerPackage, sendDirectMessage } = buildDeps({
+        registeredResident: holderResident(),
+        parsedLabel: {
+          carrier: "Hermes",
+          recipientName: "Müller",
+          confidence: "medium",
+          reason: "partial label",
         },
-      };
+      });
 
-      await processInboundTelegramUpdate(makeRequest(update), deps);
-
-      const [message] = sendToAsh.mock.calls[0]!;
-      expect(message).toBe(
-        `[photo received] file_url=${fileUrl} caption='Marlene''s Päckchen'`,
+      await processInboundTelegramUpdate(
+        makeRequest(groupPhotoUpdate({ caption: "Maybe for Müller" })),
+        deps,
       );
+
+      expect(registerPackage).not.toHaveBeenCalled();
+      expect(sendDirectMessage).not.toHaveBeenCalled();
+      expect(sendToAsh).not.toHaveBeenCalled();
     });
 
-    it("falls back to [photo received, file url could not be resolved] when getFileUrl throws", async () => {
-      const { deps, sendToAsh, getFileUrl } = buildDeps();
+    it("stays silent when parseLabel omits recipientName even at high confidence", async () => {
+      // The label is legible enough to identify the carrier, but the
+      // recipient name is uncertain — the channel must not register
+      // without a name to avoid a misrouted DM. Slice 3 (#109) will
+      // route this to the clarification synthetic.
+      const { deps, sendToAsh, registerPackage, sendDirectMessage } = buildDeps({
+        registeredResident: holderResident(),
+        parsedLabel: {
+          carrier: "DHL",
+          // recipientName intentionally omitted
+          confidence: "high",
+          reason: "carrier legible, name not",
+        },
+      });
+
+      await processInboundTelegramUpdate(
+        makeRequest(groupPhotoUpdate({ caption: "DHL label" })),
+        deps,
+      );
+
+      expect(registerPackage).not.toHaveBeenCalled();
+      expect(sendDirectMessage).not.toHaveBeenCalled();
+      expect(sendToAsh).not.toHaveBeenCalled();
+    });
+
+    it("stays silent when parseLabel throws (vision outage, both primary + fallback errored)", async () => {
+      const { deps, sendToAsh, registerPackage, sendDirectMessage } = buildDeps({
+        registeredResident: holderResident(),
+        parsedLabelError: new Error("vision outage"),
+      });
+
+      await processInboundTelegramUpdate(
+        makeRequest(groupPhotoUpdate({ caption: "Paket für Marlene" })),
+        deps,
+      );
+
+      expect(registerPackage).not.toHaveBeenCalled();
+      expect(sendDirectMessage).not.toHaveBeenCalled();
+      expect(sendToAsh).not.toHaveBeenCalled();
+    });
+
+    it("stays silent when getFileUrl throws (cannot resolve the photo to a URL)", async () => {
+      const { deps, sendToAsh, getFileUrl, parseLabel, registerPackage } =
+        buildDeps({
+          registeredResident: holderResident(),
+        });
       getFileUrl.mockRejectedValueOnce(new Error("Bot API 404"));
 
-      const update = {
-        update_id: 4,
-        message: {
-          message_id: 4,
-          date: 1,
-          caption: "kann das jemand lesen?",
-          chat: { id: 42, type: "supergroup" },
-          from: { id: 99, is_bot: false, first_name: "T" },
-          photo: [{ file_id: "f", file_size: 100, width: 90, height: 90 }],
+      await processInboundTelegramUpdate(
+        makeRequest(groupPhotoUpdate({ caption: "kann das jemand lesen?" })),
+        deps,
+      );
+
+      expect(parseLabel).not.toHaveBeenCalled();
+      expect(registerPackage).not.toHaveBeenCalled();
+      expect(sendToAsh).not.toHaveBeenCalled();
+    });
+
+    it("DMs the unregistered holder a /register nudge when registerPackage throws REGISTER_PACKAGE_HOLDER_NOT_REGISTERED — silent in the group", async () => {
+      const error = Object.assign(new Error("not registered"), {
+        code: "REGISTER_PACKAGE_HOLDER_NOT_REGISTERED",
+      });
+      const { deps, sendToAsh, registerPackage, sendDirectMessage } = buildDeps({
+        registeredResident: null, // holder not registered
+        registerPackageError: error,
+      });
+
+      await processInboundTelegramUpdate(
+        makeRequest(
+          groupPhotoUpdate({
+            caption: "Paket für Marlene",
+            fromUserId: 999,
+            languageCode: "de",
+          }),
+        ),
+        deps,
+      );
+
+      expect(registerPackage).toHaveBeenCalledTimes(1);
+      // ONE DM goes out — the localised /register nudge to the holder.
+      // Group stays silent (no group ack on this branch).
+      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+      const [nudgeChatId, nudgeText] = sendDirectMessage.mock.calls[0]!;
+      expect(nudgeChatId).toBe(999);
+      expect(nudgeText).toContain("/register");
+      expect(sendToAsh).not.toHaveBeenCalled();
+    });
+
+    it("stays silent when the recipient resolution is 'unknown' (Slice 3 / #109 introduces the group question)", async () => {
+      const { deps, sendToAsh, sendDirectMessage } = buildDeps({
+        registeredResident: holderResident(),
+        parsedLabel: {
+          carrier: "DHL",
+          recipientName: "Stranger",
+          recipientHouseNumber: "999",
+          confidence: "high",
+          reason: "ok",
         },
-      };
+        registerPackageResult: {
+          package: {
+            id: "pkg_unknown",
+            streetId: "Lutterothstrasse",
+            recipientResidentId: null,
+            recipientName: "Stranger",
+            recipientHouseNumber: "999",
+            holderResidentId: "100",
+            carrier: "DHL",
+            status: "held",
+            receivedAt: Date.now(),
+            pickedUpAt: null,
+            reminded: false,
+          } satisfies Package,
+          holder: {
+            id: "100",
+            name: "Diego Demiguel",
+            houseNumber: "69",
+            floor: null,
+            buzzerName: null,
+            language: "de",
+          },
+          recipientResolution: { kind: "unknown" },
+          receptionRequestFulfilled: null,
+        },
+      });
 
-      await processInboundTelegramUpdate(makeRequest(update), deps);
+      await processInboundTelegramUpdate(
+        makeRequest(
+          groupPhotoUpdate({ caption: "Paket für Stranger (Hs.999)" }),
+        ),
+        deps,
+      );
 
-      const [message] = sendToAsh.mock.calls[0]!;
-      expect(message).toContain("[photo received, file url could not be resolved]");
-      expect(message).toContain("caption: kann das jemand lesen?");
-      expect(message).toMatch(/type the recipient/i);
-      // The pre-#79 shape MUST be gone here too — the agent's instructions
-      // pin the new failure shape, and emitting both labels at once would
-      // confuse the model's pattern match.
-      expect(message).not.toContain("[photo received, label could not be parsed]");
+      expect(sendDirectMessage).not.toHaveBeenCalled();
+      expect(sendToAsh).not.toHaveBeenCalled();
+    });
+
+    it("anonymous group photo (no fromUserId) stays silent — parseLabel is not even called", async () => {
+      const { deps, sendToAsh, parseLabel, sendDirectMessage } = buildDeps();
+
+      await processInboundTelegramUpdate(
+        makeRequest({
+          update_id: 600,
+          message: {
+            message_id: 1,
+            date: 1,
+            caption: "Paket für jemanden",
+            chat: { id: -100, type: "supergroup" },
+            // No `from` — anonymous group post.
+            photo: [{ file_id: "f", file_size: 100, width: 90, height: 90 }],
+          },
+        }),
+        deps,
+      );
+
+      expect(parseLabel).not.toHaveBeenCalled();
+      expect(sendDirectMessage).not.toHaveBeenCalled();
+      expect(sendToAsh).not.toHaveBeenCalled();
     });
   });
 
@@ -3575,8 +3800,29 @@ describe("processInboundTelegramUpdate — setTriggerAttribute (v2.1 #99)", () =
     expect(setTriggerAttribute).not.toHaveBeenCalled();
   });
 
-  it("group photo (Flow 1 / parse_label) → telegram.photo", async () => {
-    const { deps, sendToAsh, setTriggerAttribute } = buildDeps();
+  it("group photo (Flow 1 channel-deterministic, v2.1 #107) → handled, no agent invocation", async () => {
+    // v2.1 #107 Slice 2 inverted the prior invariant: group photos
+    // are now fully channel-deterministic on the happy path. On
+    // high-confidence parse_label + registered-resident recipient,
+    // `sendToAsh` is NEVER called, so `setTriggerAttribute` is NEVER
+    // set either. Regression: ensures channel-deterministic paths
+    // don't pollute the dashboard with phantom Trigger entries on
+    // rows that have no turns.
+    const { deps, sendToAsh, setTriggerAttribute } = buildDeps({
+      registeredResident: {
+        id: "99",
+        name: "Diego",
+        street: "Lutterothstrasse",
+        houseNumber: "69",
+        platformId: "99",
+        platform: "telegram",
+        language: "de",
+        availabilityPatterns: [],
+        registeredAt: 1716000000000,
+        source: "explicit",
+        confirmed: true,
+      },
+    });
 
     const photoUpdate = {
       update_id: 1,
@@ -3594,8 +3840,8 @@ describe("processInboundTelegramUpdate — setTriggerAttribute (v2.1 #99)", () =
 
     await processInboundTelegramUpdate(makeRequest(photoUpdate), deps);
 
-    expect(sendToAsh).toHaveBeenCalledTimes(1);
-    expect(setTriggerAttribute).toHaveBeenCalledWith("telegram.photo");
+    expect(sendToAsh).not.toHaveBeenCalled();
+    expect(setTriggerAttribute).not.toHaveBeenCalled();
   });
 
   it("DM photo recovery fallthrough (low-confidence parse handled by channel) → handled, no agent invocation", async () => {

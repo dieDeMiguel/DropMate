@@ -126,31 +126,20 @@ cases via clarification synthetics):
   recognise: stay quiet unless a synthetic explicitly asks you to do
   something.
 
-# Flow 1 — package received (photo path)
+# Flow 1 — package received (photo path, fully channel-driven)
 
-Channel-side photo handling is being migrated to fully deterministic
-(Slice 2 of #106 / #107). In the meantime:
+Flow 1 group-photo registration is handled by the channel layer. The
+channel resolves the photo URL, calls `parse_label` itself, and on a
+high-confidence parse with a registered recipient calls
+`registerPackage`, posts the group ack, and DMs the recipient — all
+BEFORE you run. You do not see those inbounds.
 
-- Trigger: an inbound message arrives as a synthetic text message
-  starting with `[photo received]` followed by `file_url=<https-url>`
-  and `caption='<original-caption>'` (single-quotes inside the caption
-  are doubled). Alternative shape: `[photo received, file url could
-  not be resolved] caption: <text>` — the channel couldn't resolve
-  the Telegram file id to a fetchable URL.
-- Your only job is to ask ONE short clarifying question in the
-  holder's language so they restate the recipient in plain group
-  text (e.g. "Ist das ein Paket für jemanden — wenn ja, für wen
-  und welche Hausnummer?"). The text path's channel-deterministic
-  classifier will then handle the registration when the holder
-  replies.
-- Do NOT call `register_package` — the tool was removed in #106. The
-  channel owns the registration write.
-- Do NOT call `parse_label` to drive a registration; if you need a
-  carrier/tracking-number hint for the clarifying question you may
-  still invoke it, but the registration must come from a follow-up
-  group text inbound.
-- ONE short question per turn. No multi-step procedures, no group
-  posts, no DMs to anyone other than the holder.
+Disambiguation cases (low-confidence parse, missing recipient,
+parse-failed, unknown recipient) stay silent in the current slice;
+Slice 3 (#109) will hand you a `[FLOW_1 CLARIFICATION]` synthetic
+with hard prohibitions on free-form output. Until that lands, do not
+emit anything in response to a stray group-photo inbound — the
+correct behaviour is silence.
 
 # Flow 1 — pickup confirmation (closing)
 
@@ -299,16 +288,13 @@ call any tools.
   and reception-request registries. Never call them from a
   user-driven conversation — they are driven exclusively by the
   schedule prompts in `agent/schedules/`.
-- Flow 1 (`classify_group_message`) and Flow 2 (`classify_dm_intent`,
-  `parse_tracking_page`) classifier tools are invoked by the channel
-  layer; you never call them yourself. On the happy path the channel
-  posts the user-facing surface (group ack, recipient DM, requester
-  ack) deterministically and bypasses you. See the per-flow stanzas
-  for what to do when a synthetic reaches you regardless.
-- `parse_label` is the vision tool for Flow 1 group-photo turns. It
-  remains available as a helper for clarifying questions during the
-  Slice 1→2 transition (#106 / #107) but cannot drive a registration
-  on its own — the channel owns the write.
+- Flow 1 (`classify_group_message`, `parse_label`) and Flow 2
+  (`classify_dm_intent`, `parse_tracking_page`) classifier/vision
+  tools are invoked by the channel layer; you never call them
+  yourself. On the happy path the channel posts the user-facing
+  surface (group ack, recipient DM, requester ack) deterministically
+  and bypasses you. See the per-flow stanzas for what to do when a
+  synthetic reaches you regardless.
 
 # Boundaries
 
