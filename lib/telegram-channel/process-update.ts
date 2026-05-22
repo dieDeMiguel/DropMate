@@ -107,7 +107,7 @@ import {
   PICKUP_NOT_RECIPIENT_ERROR_CODE,
   type ConfirmPickupResult,
 } from "../pickup.js";
-import type { PackageCarrier, Resident } from "../redis.js";
+import type { Package, PackageCarrier, Resident } from "../redis.js";
 import { emitTrace } from "../trace.js";
 import {
   buildRegistrationConfirmationDm,
@@ -125,6 +125,11 @@ import {
   buildFlow2VisionLowConfidenceDm,
 } from "./flow-2-dms.js";
 import {
+  buildDmTextPickupAlreadyDoneText,
+  buildDmTextPickupConfirmedText,
+  buildDmTextPickupMultiplePackagesText,
+  buildDmTextPickupNoOpenPackagesText,
+  buildDmTextPickupRetryText,
   buildGroupAckText,
   buildHolderNotRegisteredNudge,
   buildPickupKeyboard,
@@ -372,7 +377,7 @@ export interface ProcessUpdateDeps {
   readonly classifyDmIntent: (input: {
     text: string;
     languageHint?: string;
-  }) => Promise<Flow2ClassificationResult>;
+  }) => Promise<DmIntentClassificationResult>;
   /**
    * v2.1 #106 Slice 1: classifier for group text inbounds. Mirrors
    * `classifyDmIntent` shape but for the Flow 1 register-package
@@ -433,6 +438,29 @@ export interface ProcessUpdateDeps {
     caller: Resident,
     packageId: string,
   ) => Promise<ConfirmPickupResult>;
+  /**
+   * v2.1 #110: list held packages on the caller's street whose
+   * recipient is the caller themselves. Used by the DM-text
+   * pickup-confirmation route to resolve "which package?" before
+   * calling `confirmPickup`. Returns the held subset in arbitrary
+   * order; the caller branches on `[].length`:
+   *
+   *   - 0 → DM "you have no open packages with me"
+   *   - 1 → call `confirmPickup` deterministically
+   *   - 2+ → DM "which one? tap [Abgeholt] in the group"
+   *
+   * Implemented in the factory via `listHeldPackagesForStreet` +
+   * an in-memory filter on `recipientResidentId === caller.id`. The
+   * spike-scale tradeoff `listHeldPackagesForStreet` already accepts
+   * (full street scan per query) is fine here too — pickup-via-DM
+   * is rare and the street is small.
+   *
+   * Throws bubble up; the channel catches them and DMs the generic
+   * retry prompt rather than handing the inbound to the agent.
+   */
+  readonly listOpenPackagesForRecipient: (
+    caller: Resident,
+  ) => Promise<readonly Package[]>;
   /**
    * Resolves a Telegram `user_id` to the full `Resident` record (or
    * `null` if unregistered). Consumed by the Flow 2 v2 channel path:
@@ -625,10 +653,20 @@ export type Flow2RouteResult =
  * decoupled from the tool implementation (factory wires the real
  * tool's `execute` into the dep).
  *
+ * v2.1 #110: `kind` is the routing discriminator. Pre-#110 callers
+ * branched on the boolean `isFlow2`; post-#110 the equivalent check
+ * is `kind === "flow2-reception"`. Tests + callers updated in lockstep.
+ *
  * @see agent/tools/classify_dm_intent.ts
  */
-export interface Flow2ClassificationResult {
-  readonly isFlow2: boolean;
+export type DmIntentKind =
+  | "flow2-reception"
+  | "pickup-confirmation"
+  | "registration"
+  | "other";
+
+export interface DmIntentClassificationResult {
+  readonly kind: DmIntentKind;
   readonly absenceSignal: boolean;
   readonly carrier?: PackageCarrier;
   readonly expectedDate?: string;
@@ -637,6 +675,13 @@ export interface Flow2ClassificationResult {
   readonly confidence: "high" | "medium" | "low";
   readonly reason: string;
 }
+
+/**
+ * @deprecated Pre-#110 alias for {@link DmIntentClassificationResult}.
+ * Kept as a type alias only so external imports — should there be any
+ * — break loudly at the schema mismatch rather than the rename.
+ */
+export type Flow2ClassificationResult = DmIntentClassificationResult;
 
 /**
  * Subset of the `classify_group_message` tool output the orchestrator
@@ -1349,27 +1394,28 @@ function parseIsoToUnixMs(iso: string | undefined): number | undefined {
 }
 
 /**
- * v2.1 Slice 1 (#86) + #100: on every DM text inbound from a known
- * sender, call `classifyDmIntent` to decide whether this is a Flow 2 v2
- * trigger. If the classifier returns `confidence: "high"` AND the
- * sender is a registered resident, the channel deterministically:
+ * v2.1 Slice 1 (#86) + #100 + #110: on every DM text inbound from a
+ * known sender, call `classifyDmIntent` to decide which Flow path the
+ * inbound belongs to. v2.1 #110 widened the routing from a boolean
+ * `isFlow2` to a discriminated `kind`, adding a pickup-confirmation
+ * branch ("Hab abgeholt" / "Picked up" / "Recibido" / "Teslim aldım"):
  *
- *   1. Calls `createReceptionRequest(caller, fields)` (lib function)
- *      to write the request + post the neutral group card.
- *   2. Sends a deterministic localised ack DM via `sendDirectMessage`
- *      and returns `{ kind: "handled" }` so the orchestrator skips
- *      `sendToAsh` — closing #100's text-leak surface (welcome wall +
- *      duplicate registration confirmation + tripled ack observed on
- *      the live trace) structurally. The agent never runs on the
- *      success path.
+ *   - `kind: "flow2-reception"` + high-confidence + registered caller
+ *     → call `createReceptionRequest` + send localised ack DM. No
+ *     agent involvement. (#86 / #100)
+ *   - `kind: "pickup-confirmation"` + high-confidence + registered
+ *     caller → resolve the caller's open packages, call `confirmPickup`
+ *     deterministically when there's exactly one. No agent
+ *     involvement on any pickup-confirmation branch (#110).
+ *   - Anything else → fall through to the agent with the raw text.
  *
  * Every step is tolerant of failure: a classifier outage, an
- * unregistered caller, or a Redis/Bot-API hiccup on
- * `createReceptionRequest` all fall through to the v2 behaviour of
- * handing the raw text to the agent (`{ kind: "fallthrough" }`). The
- * card-posting decision is the only place a privacy-violating side
- * effect can land; if any upstream step fails, we'd rather miss the
- * routing than misroute.
+ * unregistered caller, or a Redis/Bot-API hiccup all fall through to
+ * the v2 behaviour of handing the raw text to the agent
+ * (`{ kind: "fallthrough" }`). The card-posting and pickup-closure
+ * decisions are the only places a privacy-violating or
+ * canonical-state-corrupting side effect can land; if any upstream
+ * step fails, we'd rather miss the routing than misroute.
  */
 async function routeDmTextThroughClassifier(
   inbound: TelegramInboundMessage,
@@ -1379,7 +1425,7 @@ async function routeDmTextThroughClassifier(
     return { kind: "fallthrough", toAgent: inbound.text };
   }
 
-  let classification: Flow2ClassificationResult;
+  let classification: DmIntentClassificationResult;
   emitTrace("classifier", "start");
   try {
     classification = await deps.classifyDmIntent({
@@ -1387,7 +1433,7 @@ async function routeDmTextThroughClassifier(
       languageHint: inbound.fromLanguageCode ?? undefined,
     });
     emitTrace("classifier", "end", {
-      isFlow2: classification.isFlow2,
+      intentKind: classification.kind,
       confidence: classification.confidence,
     });
   } catch (err) {
@@ -1403,7 +1449,20 @@ async function routeDmTextThroughClassifier(
     return { kind: "fallthrough", toAgent: inbound.text };
   }
 
-  if (!classification.isFlow2 || classification.confidence !== "high") {
+  // v2.1 #110: pickup-confirmation has a structurally different
+  // shape from flow2-reception (no createReceptionRequest, different
+  // dep), so dispatch on `kind` first.
+  if (
+    classification.kind === "pickup-confirmation" &&
+    classification.confidence === "high"
+  ) {
+    return routeDmTextPickupConfirmation(inbound, deps);
+  }
+
+  if (
+    classification.kind !== "flow2-reception" ||
+    classification.confidence !== "high"
+  ) {
     return { kind: "fallthrough", toAgent: inbound.text };
   }
 
@@ -1443,6 +1502,210 @@ async function routeDmTextThroughClassifier(
 
   const language = caller.language ?? inbound.fromLanguageCode ?? "de";
   return sendFlow2AckDm(inbound, language, deps);
+}
+
+/**
+ * v2.1 #110: route a DM-text pickup confirmation. The classifier
+ * verdict `kind === "pickup-confirmation"` + high-confidence already
+ * filtered the inbound; here we resolve "which package?" and call
+ * `lib/pickup.ts::confirmPickup` deterministically when there's
+ * exactly one open package addressed to the caller.
+ *
+ * Branches:
+ *
+ *   - Unregistered caller     → fallthrough (agent will ask them to
+ *                                /register).
+ *   - 0 open packages         → DM "you have no open packages" +
+ *                                handled (no agent).
+ *   - 2+ open packages        → DM "tap [Abgeholt] in the group" +
+ *                                handled. DM text alone can't
+ *                                disambiguate; the group button is
+ *                                unambiguous because each ack carries
+ *                                its own package id in `callback_data`.
+ *   - 1 open package          → call `confirmPickup`. On success: send
+ *                                a confirmation DM to the caller +
+ *                                the holder thanks DM (same template
+ *                                pickup-dms.ts uses for the button-tap
+ *                                path). The group ack edit-in-place
+ *                                step that the button-tap path does
+ *                                requires the group-ack message id,
+ *                                which Slice 1 (#106) doesn't persist
+ *                                on the Package record — so the
+ *                                DM-text path omits it. The recipient
+ *                                still closes the package canonically;
+ *                                only the group's view of the ack stays
+ *                                un-marked. A future iteration that
+ *                                persists `groupAckMessageId` on
+ *                                Package can wire the edit here too.
+ *   - PICKUP_ALREADY_DONE     → DM "already picked up" + handled.
+ *   - Other throw / lookup    → DM retry prompt + handled. We don't
+ *     hiccup                     fall through, because the agent on
+ *                                this surface is more likely to
+ *                                misroute than to add value.
+ *
+ * `sendToAsh` is NEVER called on any pickup-confirmation branch.
+ */
+async function routeDmTextPickupConfirmation(
+  inbound: TelegramInboundMessage,
+  deps: ProcessUpdateDeps,
+): Promise<Flow2RouteResult> {
+  if (inbound.fromUserId === null) {
+    return { kind: "fallthrough", toAgent: inbound.text };
+  }
+
+  const caller = await deps
+    .getRegisteredResident(inbound.fromUserId)
+    .catch(() => null);
+  if (!caller) {
+    // Unregistered → fallthrough so the agent can ask them to /register.
+    return { kind: "fallthrough", toAgent: inbound.text };
+  }
+
+  const language = caller.language ?? inbound.fromLanguageCode ?? "de";
+
+  let open: readonly Package[];
+  try {
+    open = await deps.listOpenPackagesForRecipient(caller);
+  } catch (err) {
+    console.error(
+      "[flow1-pickup-dm] listOpenPackagesForRecipient failed for userId",
+      inbound.fromUserId,
+      "error:",
+      err instanceof Error
+        ? { name: err.name, message: err.message, stack: err.stack }
+        : err,
+    );
+    await deps
+      .sendDirectMessage(inbound.chatId, buildDmTextPickupRetryText(language))
+      .catch(() => undefined);
+    return { kind: "handled" };
+  }
+
+  if (open.length === 0) {
+    await deps
+      .sendDirectMessage(
+        inbound.chatId,
+        buildDmTextPickupNoOpenPackagesText(language),
+      )
+      .catch(() => undefined);
+    return { kind: "handled" };
+  }
+
+  if (open.length > 1) {
+    await deps
+      .sendDirectMessage(
+        inbound.chatId,
+        buildDmTextPickupMultiplePackagesText(language),
+      )
+      .catch(() => undefined);
+    return { kind: "handled" };
+  }
+
+  const pkg = open[0]!;
+  emitTrace("flow1", "pickup.start", { packageId: pkg.id, source: "dm-text" });
+  let result: ConfirmPickupResult;
+  try {
+    result = await deps.confirmPickup(caller, pkg.id);
+    emitTrace("flow1", "pickup.end", { packageId: pkg.id, source: "dm-text" });
+  } catch (err) {
+    const errorCode =
+      err && typeof err === "object" && "code" in err
+        ? (err as { code?: string }).code
+        : undefined;
+    if (errorCode === PICKUP_ALREADY_DONE_ERROR_CODE) {
+      emitTrace("flow1", "pickup.reject.already-done", {
+        packageId: pkg.id,
+        source: "dm-text",
+      });
+      await deps
+        .sendDirectMessage(
+          inbound.chatId,
+          buildDmTextPickupAlreadyDoneText(language),
+        )
+        .catch(() => undefined);
+      return { kind: "handled" };
+    }
+    // PICKUP_NOT_RECIPIENT shouldn't fire here because we resolved
+    // the package list off `recipientResidentId === caller.id`. If it
+    // does (race against a concurrent flip), bucket with the generic
+    // retry — the user can try again and `listOpenPackagesForRecipient`
+    // will then return [].
+    console.error(
+      "[flow1-pickup-dm] confirmPickup failed for userId",
+      inbound.fromUserId,
+      "packageId",
+      pkg.id,
+      "error:",
+      err instanceof Error
+        ? { name: err.name, message: err.message, stack: err.stack }
+        : err,
+    );
+    emitTrace("flow1", "pickup.reject.redis-hiccup", {
+      packageId: pkg.id,
+      source: "dm-text",
+    });
+    await deps
+      .sendDirectMessage(inbound.chatId, buildDmTextPickupRetryText(language))
+      .catch(() => undefined);
+    return { kind: "handled" };
+  }
+
+  // Happy path: status flipped. Send a confirmation DM to the caller
+  // + the holder thanks DM. The group-ack edit step that the
+  // button-tap path does is omitted here — see docstring.
+  try {
+    emitTrace("dm", "start", { kind: "flow1-pickup-confirm" });
+    await deps.sendDirectMessage(
+      inbound.chatId,
+      buildDmTextPickupConfirmedText(language),
+    );
+    emitTrace("dm", "end", { kind: "flow1-pickup-confirm" });
+  } catch (err) {
+    console.error(
+      "[flow1-pickup-dm] confirmation DM failed for chatId",
+      inbound.chatId,
+      "error:",
+      err instanceof Error ? err.message : err,
+    );
+    emitTrace("dm", "error", { kind: "flow1-pickup-confirm" });
+  }
+
+  if (result.holder) {
+    const holderChatId = Number(result.holder.platformId);
+    if (Number.isFinite(holderChatId)) {
+      try {
+        emitTrace("dm", "start", { kind: "pickup-holder-thanks" });
+        await deps.sendDirectMessage(
+          holderChatId,
+          buildHolderThanksDmText({
+            holder: result.holder,
+            recipient: result.recipient ?? {
+              id: result.package.recipientResidentId ?? "",
+              name: result.package.recipientName,
+              houseNumber: result.package.recipientHouseNumber,
+              language: null,
+            },
+          }),
+        );
+        emitTrace("dm", "end", { kind: "pickup-holder-thanks" });
+      } catch (err) {
+        console.error(
+          "[flow1-pickup-dm] holder thanks DM failed for platformId",
+          result.holder.platformId,
+          "error:",
+          err instanceof Error ? err.message : err,
+        );
+        emitTrace("dm", "error", { kind: "pickup-holder-thanks" });
+      }
+    } else {
+      console.error(
+        "[flow1-pickup-dm] holder.platformId is not a finite number — skipping thanks DM",
+        { platformId: result.holder.platformId },
+      );
+    }
+  }
+
+  return { kind: "handled" };
 }
 
 /**

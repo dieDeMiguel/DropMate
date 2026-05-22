@@ -46,7 +46,11 @@ import {
 import { registerPackage } from "../package.js";
 import { confirmPickup } from "../pickup.js";
 import { registerResident } from "../registration.js";
-import { getResident, upsertKnownTelegramUser } from "../redis.js";
+import {
+  getResident,
+  listHeldPackagesForStreet,
+  upsertKnownTelegramUser,
+} from "../redis.js";
 import { runWithTrace, type TraceKind } from "../trace.js";
 import {
   buildFileProxyUrl,
@@ -244,7 +248,11 @@ export function telegramChannel(config: TelegramChannelConfig) {
                 input: unknown,
                 options: unknown,
               ) => Promise<{
-                isFlow2: boolean;
+                kind:
+                  | "flow2-reception"
+                  | "pickup-confirmation"
+                  | "registration"
+                  | "other";
                 absenceSignal: boolean;
                 carrier?:
                   | "DHL"
@@ -295,6 +303,14 @@ export function telegramChannel(config: TelegramChannelConfig) {
             registerPackage: (holder, input) => registerPackage(holder, input),
             confirmPickup: (caller, packageId) =>
               confirmPickup(caller, packageId),
+            listOpenPackagesForRecipient: async (caller) => {
+              // v2.1 #110: scope to the caller's own street and filter
+              // by `recipientResidentId === caller.id`. Held-only because
+              // an already-picked-up package wouldn't be "open"; expired
+              // would surface a stale match.
+              const held = await listHeldPackagesForStreet(caller.street);
+              return held.filter((pkg) => pkg.recipientResidentId === caller.id);
+            },
             getRegisteredResident: async (userId) =>
               getResident(String(userId)),
             createReceptionRequest: (caller, input) =>

@@ -129,3 +129,112 @@ export function buildHolderNotRegisteredNudge(
   }
   return HOLDER_NOT_REGISTERED_NUDGES["de"]!;
 }
+
+/**
+ * v2.1 #110: DM-text pickup confirmation responses. When a registered
+ * resident DMs "Hab abgeholt" / "Picked up" / etc., the classifier
+ * routes them through the same `lib/pickup.ts::confirmPickup` lib the
+ * button-tap path uses (#108). The DM-text surface has different UX
+ * surfaces from the button tap, so it gets its own template set:
+ *
+ *   - 0 open packages → tell the user there's nothing to close.
+ *   - 1 open package  → confirm + thanks (the holder gets the same
+ *                       thanks DM via `pickup-dms.ts::buildHolderThanksDmText`).
+ *   - 2+ open packages → ask the user to disambiguate by tapping the
+ *                        button on the right group ack (the button is
+ *                        unambiguous; DM text isn't).
+ *   - already done   → idempotent — the package is already closed.
+ *   - retry          → recoverable failure (Redis hiccup, lookup
+ *                       throws). User can re-send the DM.
+ *
+ * Localised de/en/es/tr, same set as flow-2-dms.ts /
+ * volunteer-accept-dms.ts / pickup-dms.ts; falls back to German.
+ */
+type SupportedLanguage = "de" | "en" | "es" | "tr";
+
+const SUPPORTED_LANGUAGES: ReadonlySet<string> = new Set<SupportedLanguage>([
+  "de",
+  "en",
+  "es",
+  "tr",
+]);
+
+function pickLanguage(raw: string | null | undefined): SupportedLanguage {
+  if (raw && SUPPORTED_LANGUAGES.has(raw)) {
+    return raw as SupportedLanguage;
+  }
+  return "de";
+}
+
+const DM_TEXT_PICKUP_NO_OPEN_PACKAGES: Readonly<
+  Record<SupportedLanguage, string>
+> = {
+  de: "Du hast aktuell kein offenes Paket bei mir.",
+  en: "You don't have any open packages with me right now.",
+  es: "Ahora mismo no tienes ningún paquete pendiente conmigo.",
+  tr: "Şu anda bende açık bir paketin yok.",
+};
+
+export function buildDmTextPickupNoOpenPackagesText(
+  raw: string | null | undefined,
+): string {
+  return DM_TEXT_PICKUP_NO_OPEN_PACKAGES[pickLanguage(raw)];
+}
+
+const DM_TEXT_PICKUP_MULTIPLE_PACKAGES: Readonly<
+  Record<SupportedLanguage, string>
+> = {
+  de: "Welches Paket meinst du? Bitte tippe in der Gruppe auf [Abgeholt] beim richtigen Paket.",
+  en: "Which package? Please tap [Picked up] on the right one in the group.",
+  es: "¿Cuál paquete? Por favor toca [Recogido] en el correcto en el grupo.",
+  tr: "Hangi paket? Lütfen gruptaki doğru paketin [Alındı] düğmesine dokun.",
+};
+
+export function buildDmTextPickupMultiplePackagesText(
+  raw: string | null | undefined,
+): string {
+  return DM_TEXT_PICKUP_MULTIPLE_PACKAGES[pickLanguage(raw)];
+}
+
+const DM_TEXT_PICKUP_CONFIRMED: Readonly<
+  Record<SupportedLanguage, string>
+> = {
+  de: "Hab notiert — danke!",
+  en: "Got it — thanks!",
+  es: "Anotado — ¡gracias!",
+  tr: "Not aldım — teşekkürler!",
+};
+
+export function buildDmTextPickupConfirmedText(
+  raw: string | null | undefined,
+): string {
+  return DM_TEXT_PICKUP_CONFIRMED[pickLanguage(raw)];
+}
+
+const DM_TEXT_PICKUP_ALREADY_DONE: Readonly<
+  Record<SupportedLanguage, string>
+> = {
+  de: "Dieses Paket wurde schon abgeholt.",
+  en: "This package has already been picked up.",
+  es: "Este paquete ya ha sido recogido.",
+  tr: "Bu paket zaten alınmış.",
+};
+
+export function buildDmTextPickupAlreadyDoneText(
+  raw: string | null | undefined,
+): string {
+  return DM_TEXT_PICKUP_ALREADY_DONE[pickLanguage(raw)];
+}
+
+const DM_TEXT_PICKUP_RETRY: Readonly<Record<SupportedLanguage, string>> = {
+  de: "Etwas ist schiefgelaufen. Bitte gleich nochmal versuchen.",
+  en: "Something went wrong. Please try again in a moment.",
+  es: "Algo salió mal. Por favor inténtalo de nuevo en un momento.",
+  tr: "Bir şeyler ters gitti. Lütfen birazdan tekrar dene.",
+};
+
+export function buildDmTextPickupRetryText(
+  raw: string | null | undefined,
+): string {
+  return DM_TEXT_PICKUP_RETRY[pickLanguage(raw)];
+}

@@ -59,7 +59,7 @@ describe("classify_dm_intent — fallback chain", () => {
   it("returns the primary model's parsed output on the happy path", async () => {
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        isFlow2: true,
+        kind: "flow2-reception",
         absenceSignal: true,
         carrier: "DHL",
         confidence: "high",
@@ -69,9 +69,9 @@ describe("classify_dm_intent — fallback chain", () => {
 
     const result = (await runExecute({
       text: "Ich erwarte morgen DHL und bin nicht zu Hause",
-    })) as { isFlow2: boolean; confidence: string };
+    })) as { kind: string; confidence: string };
 
-    expect(result.isFlow2).toBe(true);
+    expect(result.kind).toBe("flow2-reception");
     expect(result.confidence).toBe("high");
 
     expect(generateObjectMock).toHaveBeenCalledTimes(1);
@@ -83,7 +83,7 @@ describe("classify_dm_intent — fallback chain", () => {
     generateObjectMock.mockRejectedValueOnce(new Error("gemini timed out"));
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        isFlow2: false,
+        kind: "other",
         absenceSignal: false,
         confidence: "low",
         reason: "fallback ok; this is a search query",
@@ -92,9 +92,9 @@ describe("classify_dm_intent — fallback chain", () => {
 
     const result = (await runExecute({
       text: "Wo ist mein Paket?",
-    })) as { isFlow2: boolean };
+    })) as { kind: string };
 
-    expect(result.isFlow2).toBe(false);
+    expect(result.kind).toBe("other");
 
     const { primary, fallback } = await loadModelSlugs();
     expect(generateObjectMock).toHaveBeenCalledTimes(2);
@@ -138,7 +138,7 @@ describe("classify_dm_intent — prompt shape", () => {
     generateObjectMock.mockReset();
     generateObjectMock.mockResolvedValue({
       object: {
-        isFlow2: false,
+        kind: "other",
         absenceSignal: false,
         confidence: "low",
         reason: "default stub",
@@ -200,7 +200,7 @@ describe("classify_dm_intent — positive Flow 2 cases (DE/EN/ES/TR)", () => {
   it("DE: 'Ich erwarte morgen 14-16 Uhr DHL und bin nicht zu Hause' → isFlow2 high-confidence", async () => {
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        isFlow2: true,
+        kind: "flow2-reception",
         absenceSignal: true,
         carrier: "DHL",
         expectedDate: "2026-05-22",
@@ -215,13 +215,13 @@ describe("classify_dm_intent — positive Flow 2 cases (DE/EN/ES/TR)", () => {
       text: "Ich erwarte morgen 14-16 Uhr DHL und bin nicht zu Hause",
       languageHint: "de",
     })) as {
-      isFlow2: boolean;
+      kind: string;
       absenceSignal: boolean;
       carrier: string;
       confidence: string;
     };
 
-    expect(result.isFlow2).toBe(true);
+    expect(result.kind).toBe("flow2-reception");
     expect(result.absenceSignal).toBe(true);
     expect(result.carrier).toBe("DHL");
     expect(result.confidence).toBe("high");
@@ -230,7 +230,7 @@ describe("classify_dm_intent — positive Flow 2 cases (DE/EN/ES/TR)", () => {
   it("EN: 'Tomorrow I'll get a Hermes package but I'll be at work' → isFlow2 high-confidence", async () => {
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        isFlow2: true,
+        kind: "flow2-reception",
         absenceSignal: true,
         carrier: "Hermes",
         expectedDate: "2026-05-22",
@@ -242,9 +242,9 @@ describe("classify_dm_intent — positive Flow 2 cases (DE/EN/ES/TR)", () => {
     const result = (await runExecute({
       text: "Tomorrow I'll get a Hermes package but I'll be at work",
       languageHint: "en",
-    })) as { isFlow2: boolean; carrier: string; confidence: string };
+    })) as { kind: string; carrier: string; confidence: string };
 
-    expect(result.isFlow2).toBe(true);
+    expect(result.kind).toBe("flow2-reception");
     expect(result.carrier).toBe("Hermes");
     expect(result.confidence).toBe("high");
   });
@@ -252,7 +252,7 @@ describe("classify_dm_intent — positive Flow 2 cases (DE/EN/ES/TR)", () => {
   it("ES: 'Mañana espero un paquete de DHL pero no estaré en casa' → isFlow2 high-confidence", async () => {
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        isFlow2: true,
+        kind: "flow2-reception",
         absenceSignal: true,
         carrier: "DHL",
         expectedDate: "2026-05-22",
@@ -264,9 +264,9 @@ describe("classify_dm_intent — positive Flow 2 cases (DE/EN/ES/TR)", () => {
     const result = (await runExecute({
       text: "Mañana espero un paquete de DHL pero no estaré en casa",
       languageHint: "es",
-    })) as { isFlow2: boolean; absenceSignal: boolean; confidence: string };
+    })) as { kind: string; absenceSignal: boolean; confidence: string };
 
-    expect(result.isFlow2).toBe(true);
+    expect(result.kind).toBe("flow2-reception");
     expect(result.absenceSignal).toBe(true);
     expect(result.confidence).toBe("high");
   });
@@ -274,7 +274,7 @@ describe("classify_dm_intent — positive Flow 2 cases (DE/EN/ES/TR)", () => {
   it("TR: 'Yarın bir DHL kargosu bekliyorum ama evde olmayacağım' → isFlow2 high-confidence", async () => {
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        isFlow2: true,
+        kind: "flow2-reception",
         absenceSignal: true,
         carrier: "DHL",
         expectedDate: "2026-05-22",
@@ -286,16 +286,16 @@ describe("classify_dm_intent — positive Flow 2 cases (DE/EN/ES/TR)", () => {
     const result = (await runExecute({
       text: "Yarın bir DHL kargosu bekliyorum ama evde olmayacağım",
       languageHint: "tr",
-    })) as { isFlow2: boolean; confidence: string };
+    })) as { kind: string; confidence: string };
 
-    expect(result.isFlow2).toBe(true);
+    expect(result.kind).toBe("flow2-reception");
     expect(result.confidence).toBe("high");
   });
 
   it("DE: 'Donnerstag kommt mein Paket, ich bin nicht da' → isFlow2 medium (no carrier, vague day)", async () => {
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        isFlow2: true,
+        kind: "flow2-reception",
         absenceSignal: true,
         confidence: "medium",
         reason: "absence + day but no carrier and no window",
@@ -304,16 +304,16 @@ describe("classify_dm_intent — positive Flow 2 cases (DE/EN/ES/TR)", () => {
 
     const result = (await runExecute({
       text: "Donnerstag kommt mein Paket, ich bin nicht da",
-    })) as { isFlow2: boolean; confidence: string };
+    })) as { kind: string; confidence: string };
 
-    expect(result.isFlow2).toBe(true);
+    expect(result.kind).toBe("flow2-reception");
     expect(result.confidence).toBe("medium");
   });
 
   it("EN: 'I'll be travelling next week, expecting a UPS box' → isFlow2 medium", async () => {
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        isFlow2: true,
+        kind: "flow2-reception",
         absenceSignal: true,
         carrier: "UPS",
         confidence: "medium",
@@ -323,9 +323,9 @@ describe("classify_dm_intent — positive Flow 2 cases (DE/EN/ES/TR)", () => {
 
     const result = (await runExecute({
       text: "I'll be travelling next week, expecting a UPS box",
-    })) as { isFlow2: boolean; carrier: string; confidence: string };
+    })) as { kind: string; carrier: string; confidence: string };
 
-    expect(result.isFlow2).toBe(true);
+    expect(result.kind).toBe("flow2-reception");
     expect(result.carrier).toBe("UPS");
     expect(result.confidence).toBe("medium");
   });
@@ -333,7 +333,7 @@ describe("classify_dm_intent — positive Flow 2 cases (DE/EN/ES/TR)", () => {
   it("DE: 'Heute kommt DPD zwischen 10 und 12, ich bin unterwegs' → isFlow2 high", async () => {
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        isFlow2: true,
+        kind: "flow2-reception",
         absenceSignal: true,
         carrier: "DPD",
         expectedDate: "2026-05-21",
@@ -354,7 +354,7 @@ describe("classify_dm_intent — positive Flow 2 cases (DE/EN/ES/TR)", () => {
   it("ES: 'Hoy de 14 a 16 espero un paquete de Amazon, estoy fuera' → isFlow2 high", async () => {
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        isFlow2: true,
+        kind: "flow2-reception",
         absenceSignal: true,
         carrier: "Amazon",
         expectedDate: "2026-05-21",
@@ -376,7 +376,7 @@ describe("classify_dm_intent — positive Flow 2 cases (DE/EN/ES/TR)", () => {
   it("TR: 'Bugün 15-17 arasında GLS gelecek, işteyim' → isFlow2 high", async () => {
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        isFlow2: true,
+        kind: "flow2-reception",
         absenceSignal: true,
         carrier: "GLS",
         expectedDate: "2026-05-21",
@@ -404,7 +404,7 @@ describe("classify_dm_intent — positive Flow 2 cases (DE/EN/ES/TR)", () => {
     // behaviour.
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        isFlow2: true,
+        kind: "flow2-reception",
         absenceSignal: false, // slash command doesn't say "I'm out"
         carrier: "DHL",
         expectedDate: "2026-05-22",
@@ -415,16 +415,16 @@ describe("classify_dm_intent — positive Flow 2 cases (DE/EN/ES/TR)", () => {
 
     const result = (await runExecute({
       text: "/receive DHL morgen 14-16",
-    })) as { isFlow2: boolean; confidence: string };
+    })) as { kind: string; confidence: string };
 
-    expect(result.isFlow2).toBe(true);
+    expect(result.kind).toBe("flow2-reception");
     expect(result.confidence).toBe("medium");
   });
 
   it("DE: 'Übermorgen UPS, ich bin auf der Arbeit' → isFlow2 medium (no window)", async () => {
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        isFlow2: true,
+        kind: "flow2-reception",
         absenceSignal: true,
         carrier: "UPS",
         expectedDate: "2026-05-23",
@@ -446,7 +446,7 @@ describe("classify_dm_intent — positive Flow 2 cases (DE/EN/ES/TR)", () => {
     // surfaces the absence + day even when the carrier isn't in our enum.
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        isFlow2: true,
+        kind: "flow2-reception",
         absenceSignal: true,
         carrier: "unknown",
         expectedDate: "2026-05-22",
@@ -464,6 +464,271 @@ describe("classify_dm_intent — positive Flow 2 cases (DE/EN/ES/TR)", () => {
   });
 });
 
+describe("classify_dm_intent — v2.1 #110 pickup-confirmation cases (DE/EN/ES/TR)", () => {
+  beforeEach(() => {
+    generateObjectMock.mockReset();
+  });
+
+  it("DE: 'Hab abgeholt' → kind: 'pickup-confirmation' high confidence", async () => {
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        kind: "pickup-confirmation",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "unambiguous closing language",
+      },
+    });
+
+    const result = (await runExecute({
+      text: "Hab abgeholt",
+      languageHint: "de",
+    })) as { kind: string; confidence: string };
+
+    expect(result.kind).toBe("pickup-confirmation");
+    expect(result.confidence).toBe("high");
+  });
+
+  it("DE: 'Habe das Paket abgeholt' → kind: 'pickup-confirmation' high confidence", async () => {
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        kind: "pickup-confirmation",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "explicit pickup phrasing",
+      },
+    });
+
+    const result = (await runExecute({
+      text: "Habe das Paket abgeholt",
+    })) as { kind: string };
+
+    expect(result.kind).toBe("pickup-confirmation");
+  });
+
+  it("EN: 'Picked up' → kind: 'pickup-confirmation' high confidence", async () => {
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        kind: "pickup-confirmation",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "unambiguous English closing language",
+      },
+    });
+
+    const result = (await runExecute({
+      text: "Picked up",
+      languageHint: "en",
+    })) as { kind: string; confidence: string };
+
+    expect(result.kind).toBe("pickup-confirmation");
+    expect(result.confidence).toBe("high");
+  });
+
+  it("EN: 'Got the package' → kind: 'pickup-confirmation' high confidence", async () => {
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        kind: "pickup-confirmation",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "explicit pickup phrasing",
+      },
+    });
+
+    const result = (await runExecute({
+      text: "Got the package",
+    })) as { kind: string };
+
+    expect(result.kind).toBe("pickup-confirmation");
+  });
+
+  it("ES: 'Recibido' → kind: 'pickup-confirmation' high confidence", async () => {
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        kind: "pickup-confirmation",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "Spanish closing language",
+      },
+    });
+
+    const result = (await runExecute({
+      text: "Recibido",
+      languageHint: "es",
+    })) as { kind: string; confidence: string };
+
+    expect(result.kind).toBe("pickup-confirmation");
+    expect(result.confidence).toBe("high");
+  });
+
+  it("ES: 'Lo recogí' → kind: 'pickup-confirmation' high confidence", async () => {
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        kind: "pickup-confirmation",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "Spanish closing language",
+      },
+    });
+
+    const result = (await runExecute({
+      text: "Lo recogí",
+    })) as { kind: string };
+
+    expect(result.kind).toBe("pickup-confirmation");
+  });
+
+  it("TR: 'Teslim aldım' → kind: 'pickup-confirmation' high confidence", async () => {
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        kind: "pickup-confirmation",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "Turkish closing language",
+      },
+    });
+
+    const result = (await runExecute({
+      text: "Teslim aldım",
+      languageHint: "tr",
+    })) as { kind: string; confidence: string };
+
+    expect(result.kind).toBe("pickup-confirmation");
+    expect(result.confidence).toBe("high");
+  });
+
+  it("TR: 'Paketi aldım' → kind: 'pickup-confirmation' high confidence", async () => {
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        kind: "pickup-confirmation",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "Turkish closing language",
+      },
+    });
+
+    const result = (await runExecute({
+      text: "Paketi aldım",
+    })) as { kind: string };
+
+    expect(result.kind).toBe("pickup-confirmation");
+  });
+
+  it("DE fuzzy: 'ich habe das' → kind: 'pickup-confirmation' MEDIUM confidence (could mean anything)", async () => {
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        kind: "pickup-confirmation",
+        absenceSignal: false,
+        confidence: "medium",
+        reason: "fuzzy closing language — could mean other things",
+      },
+    });
+
+    const result = (await runExecute({
+      text: "ich habe das",
+    })) as { kind: string; confidence: string };
+
+    expect(result.kind).toBe("pickup-confirmation");
+    expect(result.confidence).toBe("medium");
+  });
+
+  it("DE: 'Danke!' → kind: 'other' (acknowledgement, NOT pickup confirmation)", async () => {
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        kind: "other",
+        absenceSignal: false,
+        confidence: "low",
+        reason: "social acknowledgement, no pickup signal",
+      },
+    });
+
+    const result = (await runExecute({
+      text: "Danke!",
+    })) as { kind: string };
+
+    expect(result.kind).toBe("other");
+  });
+
+  it("DE: 'Habe ein Paket für Müller angenommen' → kind: 'other' (Flow 1 group label, NOT pickup)", async () => {
+    // Critical negative: this is the holder confirming receipt of someone
+    // else's package — different from the recipient's pickup. Classifier
+    // must not conflate these.
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        kind: "other",
+        absenceSignal: false,
+        confidence: "low",
+        reason: "Flow 1 group-label, not pickup confirmation",
+      },
+    });
+
+    const result = (await runExecute({
+      text: "Habe ein Paket für Müller angenommen",
+    })) as { kind: string };
+
+    expect(result.kind).toBe("other");
+  });
+
+  it("DE: 'Ich nehme das Paket an' → kind: 'other' (Flow 2 accept-volunteer, NOT pickup)", async () => {
+    // Critical negative: 'I'll accept the package' is the volunteer
+    // accepting a Flow 2 reception ask. It is NOT a pickup confirmation
+    // (the writer hasn't taken possession yet).
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        kind: "other",
+        absenceSignal: false,
+        confidence: "low",
+        reason: "volunteer-accept intent, not pickup",
+      },
+    });
+
+    const result = (await runExecute({
+      text: "Ich nehme das Paket an",
+    })) as { kind: string };
+
+    expect(result.kind).toBe("other");
+  });
+
+  it("system prompt names the pickup canonical phrasings in DE/EN/ES/TR", async () => {
+    // Regression pin: the channel routes off `kind: 'pickup-confirmation'`
+    // at high confidence, so the system prompt MUST give the model
+    // concrete phrasings to recognise — otherwise the classifier will
+    // miss every variation of "Hab abgeholt" / "Picked up" / etc.
+    generateObjectMock.mockReset();
+    generateObjectMock.mockResolvedValue({
+      object: {
+        kind: "other",
+        absenceSignal: false,
+        confidence: "low",
+        reason: "test stub",
+      },
+    });
+    await runExecute({ text: "anything" });
+    const call = generateObjectMock.mock.calls[0]![0];
+    expect(call.system).toMatch(/Hab abgeholt/);
+    expect(call.system).toMatch(/Picked up/);
+    expect(call.system).toMatch(/Recibido/);
+    expect(call.system).toMatch(/Teslim aldım/);
+  });
+
+  it("system prompt explicitly distinguishes 'pickup-confirmation' from 'Ich nehme das Paket an' (volunteer-accept)", async () => {
+    // Regression pin: the most subtle false-positive is conflating
+    // "I'll take it" (volunteer-accept, Flow 2) with "I took it"
+    // (pickup-confirmation). The system prompt must call this out.
+    generateObjectMock.mockReset();
+    generateObjectMock.mockResolvedValue({
+      object: {
+        kind: "other",
+        absenceSignal: false,
+        confidence: "low",
+        reason: "test stub",
+      },
+    });
+    await runExecute({ text: "anything" });
+    const call = generateObjectMock.mock.calls[0]![0];
+    expect(call.system).toMatch(/Ich nehme das Paket an/);
+  });
+});
+
 describe("classify_dm_intent — negative cases (NOT Flow 2)", () => {
   beforeEach(() => {
     generateObjectMock.mockReset();
@@ -476,7 +741,7 @@ describe("classify_dm_intent — negative cases (NOT Flow 2)", () => {
     // return isFlow2=false so the agent handles Flow 0 alone.
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        isFlow2: false,
+        kind: "other",
         absenceSignal: false,
         confidence: "low",
         reason: "no absence signal — Flow 0",
@@ -485,16 +750,16 @@ describe("classify_dm_intent — negative cases (NOT Flow 2)", () => {
 
     const result = (await runExecute({
       text: "Ein Paket kommt heute",
-    })) as { isFlow2: boolean; absenceSignal: boolean };
+    })) as { kind: string; absenceSignal: boolean };
 
-    expect(result.isFlow2).toBe(false);
+    expect(result.kind).toBe("other");
     expect(result.absenceSignal).toBe(false);
   });
 
   it("DE: 'Wo ist mein Paket?' → isFlow2 false (Flow 3 — search)", async () => {
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        isFlow2: false,
+        kind: "other",
         absenceSignal: false,
         confidence: "low",
         reason: "search intent, not pre-announce",
@@ -503,15 +768,15 @@ describe("classify_dm_intent — negative cases (NOT Flow 2)", () => {
 
     const result = (await runExecute({
       text: "Wo ist mein Paket?",
-    })) as { isFlow2: boolean };
+    })) as { kind: string };
 
-    expect(result.isFlow2).toBe(false);
+    expect(result.kind).toBe("other");
   });
 
   it("DE: 'Habe ein Paket für Müller angenommen' → isFlow2 false (Flow 1 — group label)", async () => {
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        isFlow2: false,
+        kind: "other",
         absenceSignal: false,
         confidence: "low",
         reason: "package received for someone, not pre-announce",
@@ -520,15 +785,15 @@ describe("classify_dm_intent — negative cases (NOT Flow 2)", () => {
 
     const result = (await runExecute({
       text: "Habe ein Paket für Müller angenommen",
-    })) as { isFlow2: boolean };
+    })) as { kind: string };
 
-    expect(result.isFlow2).toBe(false);
+    expect(result.kind).toBe("other");
   });
 
   it("DE: '/register Diego, Methfesselstraße 90' → isFlow2 false (registration)", async () => {
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        isFlow2: false,
+        kind: "other",
         absenceSignal: false,
         confidence: "low",
         reason: "registration command",
@@ -537,15 +802,15 @@ describe("classify_dm_intent — negative cases (NOT Flow 2)", () => {
 
     const result = (await runExecute({
       text: "/register Diego, Methfesselstraße 90",
-    })) as { isFlow2: boolean };
+    })) as { kind: string };
 
-    expect(result.isFlow2).toBe(false);
+    expect(result.kind).toBe("other");
   });
 
   it("DE: 'Hallo! Wie geht's?' → isFlow2 false (chit-chat)", async () => {
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        isFlow2: false,
+        kind: "other",
         absenceSignal: false,
         confidence: "low",
         reason: "social greeting",
@@ -553,16 +818,16 @@ describe("classify_dm_intent — negative cases (NOT Flow 2)", () => {
     });
 
     const result = (await runExecute({ text: "Hallo! Wie geht's?" })) as {
-      isFlow2: boolean;
+      kind: string;
     };
 
-    expect(result.isFlow2).toBe(false);
+    expect(result.kind).toBe("other");
   });
 
   it("EN: 'Thanks!' → isFlow2 false (acknowledgement)", async () => {
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        isFlow2: false,
+        kind: "other",
         absenceSignal: false,
         confidence: "low",
         reason: "acknowledgement",
@@ -570,10 +835,10 @@ describe("classify_dm_intent — negative cases (NOT Flow 2)", () => {
     });
 
     const result = (await runExecute({ text: "Thanks!" })) as {
-      isFlow2: boolean;
+      kind: string;
     };
 
-    expect(result.isFlow2).toBe(false);
+    expect(result.kind).toBe("other");
   });
 
   it("DE: 'Bin morgen nicht da' → isFlow2 false (absence WITHOUT package context — could be vacation note)", async () => {
@@ -582,7 +847,7 @@ describe("classify_dm_intent — negative cases (NOT Flow 2)", () => {
     // a follow-up.
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        isFlow2: false,
+        kind: "other",
         absenceSignal: true,
         confidence: "low",
         reason: "absence but no package context",
@@ -591,9 +856,9 @@ describe("classify_dm_intent — negative cases (NOT Flow 2)", () => {
 
     const result = (await runExecute({
       text: "Bin morgen nicht da",
-    })) as { isFlow2: boolean; absenceSignal: boolean };
+    })) as { kind: string; absenceSignal: boolean };
 
-    expect(result.isFlow2).toBe(false);
+    expect(result.kind).toBe("other");
     expect(result.absenceSignal).toBe(true);
   });
 
@@ -602,7 +867,7 @@ describe("classify_dm_intent — negative cases (NOT Flow 2)", () => {
     // NOT make it Flow 2. Absence is the load-bearing signal.
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        isFlow2: false,
+        kind: "other",
         absenceSignal: false,
         carrier: "DHL",
         expectedDate: "2026-05-21",
@@ -615,9 +880,9 @@ describe("classify_dm_intent — negative cases (NOT Flow 2)", () => {
 
     const result = (await runExecute({
       text: "DHL kommt um 14 Uhr",
-    })) as { isFlow2: boolean; absenceSignal: boolean };
+    })) as { kind: string; absenceSignal: boolean };
 
-    expect(result.isFlow2).toBe(false);
+    expect(result.kind).toBe("other");
     expect(result.absenceSignal).toBe(false);
   });
 });
@@ -651,7 +916,7 @@ describe("classify_dm_intent — v2.1 Bug 1 regression (#93 / #92 Trace A): loca
   it("regression: 'Ich erwarte morgen 14-16 Uhr DHL und bin nicht zu Hause' → tomorrow 14:00–16:00 Berlin, not today 06:00–08:00", async () => {
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        isFlow2: true,
+        kind: "flow2-reception",
         absenceSignal: true,
         carrier: "DHL",
         expectedDate: "2026-05-22",
@@ -666,7 +931,7 @@ describe("classify_dm_intent — v2.1 Bug 1 regression (#93 / #92 Trace A): loca
       text: "Ich erwarte morgen 14-16 Uhr DHL und bin nicht zu Hause",
       languageHint: "de",
     })) as {
-      isFlow2: boolean;
+      kind: string;
       carrier: string;
       expectedDate: string;
       expectedWindowStartAt: number;
@@ -674,7 +939,7 @@ describe("classify_dm_intent — v2.1 Bug 1 regression (#93 / #92 Trace A): loca
       confidence: string;
     };
 
-    expect(result.isFlow2).toBe(true);
+    expect(result.kind).toBe("flow2-reception");
     expect(result.carrier).toBe("DHL");
     expect(result.confidence).toBe("high");
     expect(result.expectedDate).toBe("2026-05-22");
@@ -695,7 +960,7 @@ describe("classify_dm_intent — v2.1 Bug 1 regression (#93 / #92 Trace A): loca
   it("'morgen Vormittag' → tomorrow 09:00–12:00 (NOT today morning)", async () => {
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        isFlow2: true,
+        kind: "flow2-reception",
         absenceSignal: true,
         carrier: "Hermes",
         expectedDate: "2026-05-22",
@@ -722,7 +987,7 @@ describe("classify_dm_intent — v2.1 Bug 1 regression (#93 / #92 Trace A): loca
   it("'heute Vormittag' → today 09:00–12:00", async () => {
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        isFlow2: true,
+        kind: "flow2-reception",
         absenceSignal: true,
         carrier: "DHL",
         expectedDate: "2026-05-21",
@@ -749,7 +1014,7 @@ describe("classify_dm_intent — v2.1 Bug 1 regression (#93 / #92 Trace A): loca
   it("'heute Nachmittag' → today 14:00–18:00", async () => {
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        isFlow2: true,
+        kind: "flow2-reception",
         absenceSignal: true,
         carrier: "UPS",
         expectedDate: "2026-05-21",
@@ -774,7 +1039,7 @@ describe("classify_dm_intent — v2.1 Bug 1 regression (#93 / #92 Trace A): loca
   it("'übermorgen' → day after tomorrow (2026-05-23)", async () => {
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        isFlow2: true,
+        kind: "flow2-reception",
         absenceSignal: true,
         carrier: "UPS",
         expectedDate: "2026-05-23",
@@ -795,7 +1060,7 @@ describe("classify_dm_intent — v2.1 Bug 1 regression (#93 / #92 Trace A): loca
     // Today (pinned) is Donnerstag 2026-05-21. Next Montag is 2026-05-25.
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        isFlow2: true,
+        kind: "flow2-reception",
         absenceSignal: true,
         carrier: "DHL",
         expectedDate: "2026-05-25",
@@ -823,7 +1088,7 @@ describe("classify_dm_intent — v2.1 Bug 1 regression (#93 / #92 Trace A): loca
     // classification.
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        isFlow2: true,
+        kind: "flow2-reception",
         absenceSignal: true,
         carrier: "DHL",
         // expectedDate omitted on purpose
@@ -837,13 +1102,13 @@ describe("classify_dm_intent — v2.1 Bug 1 regression (#93 / #92 Trace A): loca
     const result = (await runExecute({
       text: "DHL 14-16 Uhr, bin nicht da",
     })) as {
-      isFlow2: boolean;
+      kind: string;
       carrier: string;
       expectedWindowStartAt?: number;
       expectedWindowEndAt?: number;
     };
 
-    expect(result.isFlow2).toBe(true);
+    expect(result.kind).toBe("flow2-reception");
     expect(result.carrier).toBe("DHL");
     expect(result.expectedWindowStartAt).toBeUndefined();
     expect(result.expectedWindowEndAt).toBeUndefined();
@@ -852,7 +1117,7 @@ describe("classify_dm_intent — v2.1 Bug 1 regression (#93 / #92 Trace A): loca
   it("malformed model output (start > end) drops the window rather than emitting an inverted range", async () => {
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        isFlow2: true,
+        kind: "flow2-reception",
         absenceSignal: true,
         carrier: "DHL",
         expectedDate: "2026-05-22",
@@ -866,12 +1131,12 @@ describe("classify_dm_intent — v2.1 Bug 1 regression (#93 / #92 Trace A): loca
     const result = (await runExecute({
       text: "DHL morgen 16-14 Uhr, bin nicht da",
     })) as {
-      isFlow2: boolean;
+      kind: string;
       expectedWindowStartAt?: number;
       expectedWindowEndAt?: number;
     };
 
-    expect(result.isFlow2).toBe(true);
+    expect(result.kind).toBe("flow2-reception");
     expect(result.expectedWindowStartAt).toBeUndefined();
     expect(result.expectedWindowEndAt).toBeUndefined();
   });
@@ -887,7 +1152,7 @@ describe("classify_dm_intent — system prompt disambiguation (v2.1 Bug 1 / #93)
     generateObjectMock.mockReset();
     generateObjectMock.mockResolvedValue({
       object: {
-        isFlow2: false,
+        kind: "other",
         absenceSignal: false,
         confidence: "low",
         reason: "test stub",
@@ -903,7 +1168,7 @@ describe("classify_dm_intent — system prompt disambiguation (v2.1 Bug 1 / #93)
     generateObjectMock.mockReset();
     generateObjectMock.mockResolvedValue({
       object: {
-        isFlow2: false,
+        kind: "other",
         absenceSignal: false,
         confidence: "low",
         reason: "test stub",
@@ -922,7 +1187,7 @@ describe("classify_dm_intent — system prompt disambiguation (v2.1 Bug 1 / #93)
     generateObjectMock.mockReset();
     generateObjectMock.mockResolvedValue({
       object: {
-        isFlow2: false,
+        kind: "other",
         absenceSignal: false,
         confidence: "low",
         reason: "test stub",

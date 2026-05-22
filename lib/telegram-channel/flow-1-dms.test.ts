@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildDmTextPickupAlreadyDoneText,
+  buildDmTextPickupConfirmedText,
+  buildDmTextPickupMultiplePackagesText,
+  buildDmTextPickupNoOpenPackagesText,
+  buildDmTextPickupRetryText,
   buildGroupAckText,
   buildHolderNotRegisteredNudge,
   buildPickupKeyboard,
@@ -109,6 +114,106 @@ describe("flow-1-dms", () => {
     it("falls back to German for unsupported languages", () => {
       expect(buildHolderNotRegisteredNudge("ja")).toBe(
         "Um Pakete für andere zu registrieren, registriere dich zuerst mit /register.",
+      );
+    });
+  });
+
+  // v2.1 #110: DM-text pickup-confirmation fallback templates.
+  describe("buildDmTextPickupNoOpenPackagesText", () => {
+    it("returns German by default", () => {
+      expect(buildDmTextPickupNoOpenPackagesText(null)).toBe(
+        "Du hast aktuell kein offenes Paket bei mir.",
+      );
+    });
+    it("returns English for 'en'", () => {
+      expect(buildDmTextPickupNoOpenPackagesText("en")).toBe(
+        "You don't have any open packages with me right now.",
+      );
+    });
+    it("returns Spanish for 'es'", () => {
+      expect(buildDmTextPickupNoOpenPackagesText("es")).toBe(
+        "Ahora mismo no tienes ningún paquete pendiente conmigo.",
+      );
+    });
+    it("returns Turkish for 'tr'", () => {
+      expect(buildDmTextPickupNoOpenPackagesText("tr")).toBe(
+        "Şu anda bende açık bir paketin yok.",
+      );
+    });
+    it("falls back to German for unsupported languages", () => {
+      expect(buildDmTextPickupNoOpenPackagesText("ja")).toBe(
+        "Du hast aktuell kein offenes Paket bei mir.",
+      );
+    });
+  });
+
+  describe("buildDmTextPickupMultiplePackagesText", () => {
+    it("renders the German disambiguation prompt pointing to the group button", () => {
+      const text = buildDmTextPickupMultiplePackagesText("de");
+      expect(text).toBe(
+        "Welches Paket meinst du? Bitte tippe in der Gruppe auf [Abgeholt] beim richtigen Paket.",
+      );
+      // Regression pin: the prompt must mention [Abgeholt] verbatim so
+      // the writer can pattern-match it on the group surface.
+      expect(text).toContain("[Abgeholt]");
+    });
+    it("renders English for 'en' with [Picked up]", () => {
+      expect(buildDmTextPickupMultiplePackagesText("en")).toContain(
+        "[Picked up]",
+      );
+    });
+    it("renders Spanish for 'es' with [Recogido]", () => {
+      expect(buildDmTextPickupMultiplePackagesText("es")).toContain(
+        "[Recogido]",
+      );
+    });
+    it("renders Turkish for 'tr' with [Alındı]", () => {
+      expect(buildDmTextPickupMultiplePackagesText("tr")).toContain(
+        "[Alındı]",
+      );
+    });
+  });
+
+  describe("buildDmTextPickupConfirmedText", () => {
+    it("returns the German confirmation by default", () => {
+      expect(buildDmTextPickupConfirmedText(null)).toBe("Hab notiert — danke!");
+    });
+    it("returns English for 'en'", () => {
+      expect(buildDmTextPickupConfirmedText("en")).toBe("Got it — thanks!");
+    });
+    it("returns Spanish for 'es'", () => {
+      expect(buildDmTextPickupConfirmedText("es")).toBe("Anotado — ¡gracias!");
+    });
+    it("returns Turkish for 'tr'", () => {
+      expect(buildDmTextPickupConfirmedText("tr")).toBe(
+        "Not aldım — teşekkürler!",
+      );
+    });
+  });
+
+  describe("buildDmTextPickupAlreadyDoneText", () => {
+    it("matches the toast text from pickup-dms.ts (same UX promise across surfaces)", () => {
+      // The toast on the button-tap path and the DM on the text path
+      // should say the same thing in the same language — otherwise the
+      // user gets confused about whether something different happened.
+      expect(buildDmTextPickupAlreadyDoneText("de")).toBe(
+        "Dieses Paket wurde schon abgeholt.",
+      );
+      expect(buildDmTextPickupAlreadyDoneText("en")).toBe(
+        "This package has already been picked up.",
+      );
+    });
+  });
+
+  describe("buildDmTextPickupRetryText", () => {
+    it("returns a German retry prompt by default", () => {
+      expect(buildDmTextPickupRetryText(null)).toBe(
+        "Etwas ist schiefgelaufen. Bitte gleich nochmal versuchen.",
+      );
+    });
+    it("returns English for 'en'", () => {
+      expect(buildDmTextPickupRetryText("en")).toBe(
+        "Something went wrong. Please try again in a moment.",
       );
     });
   });
