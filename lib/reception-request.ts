@@ -269,8 +269,28 @@ export interface AcceptReceptionRequestResult {
 export const ACCEPT_DIFFERENT_STREET_ERROR_CODE =
   "ACCEPT_DIFFERENT_STREET" as const;
 
+/**
+ * v2.1 #98: a self-accept attempt — the caller is the request's own
+ * requester, which is a permanent rejection (the request's
+ * `requesterResidentId` doesn't change). Surfaced as a typed code so the
+ * channel handler can render a dedicated toast and strip the keyboard
+ * (the same shape as the cross-street rejection — a permanent reject
+ * shouldn't leave a live retry button under the volunteer's finger).
+ *
+ * Live trace 2026-05-22 (prod `dpl_8A1T6ECT4ttiWRnBHot7Sa3vEUC9`): a
+ * requester accidentally typed `Si` in the group, the channel routed it
+ * as an accept tap targeting their own card, the lib happily flipped
+ * the request to `matched` with `volunteerResidentId === requesterResidentId`,
+ * and the downstream DM-pair fired (the requester DM'd themselves the
+ * "thanks for helping" template). The data path then contradicted itself
+ * and surfaced the v1-style 12-message cascade.
+ */
+export const ACCEPT_SELF_NOT_ALLOWED_ERROR_CODE =
+  "ACCEPT_RECEPTION_SELF_NOT_ALLOWED" as const;
+
 export type AcceptReceptionRequestErrorCode =
-  typeof ACCEPT_DIFFERENT_STREET_ERROR_CODE;
+  | typeof ACCEPT_DIFFERENT_STREET_ERROR_CODE
+  | typeof ACCEPT_SELF_NOT_ALLOWED_ERROR_CODE;
 
 export class AcceptReceptionRequestError extends Error {
   readonly code: AcceptReceptionRequestErrorCode;
@@ -331,12 +351,12 @@ export async function acceptReceptionRequest(
         `acceptReceptionRequest: reception request ${input.requestId} is already ${target.status}, cannot accept.`,
       );
     }
-    if (target.streetId !== caller.street) {
-      throw new AcceptReceptionRequestError(
-        ACCEPT_DIFFERENT_STREET_ERROR_CODE,
-        `acceptReceptionRequest: reception request ${input.requestId} is on a different street — only residents on the same street can claim.`,
-      );
-    }
+    // Cross-street guard moved below the self-accept guard so #98's
+    // permanent-reject toast surfaces first when both conditions hold.
+    // (In practice they don't co-occur: a request's `streetId` is the
+    // requester's street at creation, so a self-accept never has a
+    // cross-street mismatch. Order matters anyway as a contract — see
+    // #98 acceptance criteria.)
   } else {
     let all: readonly ReceptionRequest[];
     try {
@@ -357,6 +377,38 @@ export async function acceptReceptionRequest(
       );
     }
     target = eligible[0]!;
+  }
+
+  // #98: self-accept guard. The requester cannot volunteer for their own
+  // card — there is no "I'll receive my own package while I'm not home"
+  // semantic. The check runs after `target` is fully resolved (both the
+  // explicit `requestId` branch and the implicit "most-recent open on my
+  // street" branch funnel through here) and BEFORE the canonical state
+  // flip, so a self-accept never lands `volunteerResidentId === requesterResidentId`
+  // in Redis. Surfaced as a typed code so the channel handler can render
+  // a dedicated toast and strip the keyboard (a permanent rejection
+  // shouldn't leave a retry button live).
+  //
+  // Acceptance-criteria order (#98): self FIRST, then cross-street, then
+  // Redis-fetch errors (which are surfaced earlier in the function).
+  // Self-accept is the most clear-cut rejection — surface it directly
+  // without leaking that streetIds also matter.
+  if (target.requesterResidentId === caller.id) {
+    throw new AcceptReceptionRequestError(
+      ACCEPT_SELF_NOT_ALLOWED_ERROR_CODE,
+      `acceptReceptionRequest: caller ${caller.id} is the requester of ${target.id} — cannot volunteer for your own request.`,
+    );
+  }
+
+  // #96 Part B: cross-street guard. Only triggers on the explicit
+  // `requestId` branch in practice — the else-branch already filtered to
+  // `caller.street` — but kept here so a future caller that resolves
+  // `target` in some other way can't bypass the constraint.
+  if (target.streetId !== caller.street) {
+    throw new AcceptReceptionRequestError(
+      ACCEPT_DIFFERENT_STREET_ERROR_CODE,
+      `acceptReceptionRequest: reception request ${target.id} is on a different street — only residents on the same street can claim.`,
+    );
   }
 
   const updated: ReceptionRequest = {

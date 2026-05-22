@@ -373,3 +373,31 @@ export function crossStreetToastForLanguage(
   const language = pickLanguage(raw);
   return CROSS_STREET_TOASTS[language];
 }
+
+/**
+ * v2.1 #98: localized self-accept rejection toast. Used when
+ * `acceptReceptionRequest` throws with code
+ * `ACCEPT_SELF_NOT_ALLOWED_ERROR_CODE` — the tapper is the requester of
+ * the card they're trying to claim. Permanent rejection (the request's
+ * `requesterResidentId` doesn't change), so the channel strips the
+ * keyboard alongside the toast — no upside to leaving a retry button
+ * under the requester's finger.
+ *
+ * Mirrors the language set covered by `CROSS_STREET_TOASTS`,
+ * `ACCEPT_RETRY_TOASTS`, and `FLOW_2_DONE_ACK_EXAMPLES` so the channel's
+ * user-facing surface stays consistent. Adding a fifth language is a
+ * one-line touch in each of those tables.
+ */
+const SELF_ACCEPT_TOASTS: Readonly<Record<SupportedLanguage, string>> = {
+  de: "Du kannst dein eigenes Paket nicht selbst annehmen.",
+  en: "You can't volunteer for your own package.",
+  es: "No puedes aceptar tu propio paquete.",
+  tr: "Kendi paketini sen kabul edemezsin.",
+};
+
+export function selfAcceptToastForLanguage(
+  raw: string | null | undefined,
+): string {
+  const language = pickLanguage(raw);
+  return SELF_ACCEPT_TOASTS[language];
+}

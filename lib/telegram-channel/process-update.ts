@@ -78,6 +78,7 @@ import type { Session } from "experimental-ash/channels";
 
 import {
   ACCEPT_DIFFERENT_STREET_ERROR_CODE,
+  ACCEPT_SELF_NOT_ALLOWED_ERROR_CODE,
   type AcceptReceptionRequestInput,
   type AcceptReceptionRequestResult,
   type CreateReceptionRequestInput,
@@ -100,6 +101,7 @@ import {
   buildRequesterAcceptDm,
   buildVolunteerAcceptDmText,
   crossStreetToastForLanguage,
+  selfAcceptToastForLanguage,
 } from "./volunteer-accept-dms.js";
 
 /**
@@ -1144,6 +1146,25 @@ async function handleAcceptReceptionGroup(
         ? (err as { code?: string }).code
         : undefined;
     const language = volunteer.language ?? cb.fromLanguageCode;
+    if (errorCode === ACCEPT_SELF_NOT_ALLOWED_ERROR_CODE) {
+      // #98: permanent rejection — the tapper is the request's own
+      // requester. Strip the keyboard so a button mistap, autocomplete,
+      // or voice-to-text doesn't flip the request to a self-matched dead
+      // state on a re-tap. The constraint is permanent (the request's
+      // requester doesn't change), so there is no recovery path through
+      // this card; another resident may still claim it from a fresh card
+      // — but not from this tapper's surface.
+      await deps
+        .answerCallback(
+          cb.callbackId,
+          selfAcceptToastForLanguage(language),
+        )
+        .catch(() => undefined);
+      await deps
+        .stripKeyboard(cb.chatId, cb.messageId)
+        .catch(() => undefined);
+      return new Response(null, { status: 204 });
+    }
     if (errorCode === ACCEPT_DIFFERENT_STREET_ERROR_CODE) {
       // #96 Part B: permanent rejection. Strip the keyboard so the
       // volunteer doesn't keep re-tapping (the toast already explains
