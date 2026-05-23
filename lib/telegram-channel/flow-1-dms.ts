@@ -345,6 +345,42 @@ export function buildFlow1ClarificationSynthetic(args: {
 }
 
 /**
+ * v2.1 #116 (Slice 3 of #113): private confirmation DM the channel
+ * sends to the holder when a Flow 1 registration LINKS to a Flow 2
+ * `ReceptionRequest` (the holder is fulfilling a pre-announced
+ * "I won't be home" ask). The group ack is suppressed on that branch —
+ * the original Flow 2 group post is the announcement — so the holder
+ * needs a private ack so they know the channel registered the package
+ * and the recipient was DM'd.
+ *
+ *     📦 Paket für <recipient> erkannt — <recipient> wurde benachrichtigt.
+ *
+ * Localised de/en/es/tr, same set as the other Flow 1 templates;
+ * falls back to German.
+ */
+const HOLDER_CONFIRMATION_DM_TEMPLATES: Readonly<
+  Record<SupportedLanguage, (recipientName: string) => string>
+> = {
+  de: (recipientName) =>
+    `📦 Paket für ${recipientName} erkannt — ${recipientName} wurde benachrichtigt.`,
+  en: (recipientName) =>
+    `📦 Package for ${recipientName} recognised — ${recipientName} has been notified.`,
+  es: (recipientName) =>
+    `📦 Paquete para ${recipientName} reconocido — ${recipientName} ha sido avisado/a.`,
+  tr: (recipientName) =>
+    `📦 ${recipientName} için paket tanındı — ${recipientName} bilgilendirildi.`,
+};
+
+export function buildHolderConfirmationDmText(args: {
+  readonly recipientName: string;
+  readonly language: string | null | undefined;
+}): string {
+  return HOLDER_CONFIRMATION_DM_TEMPLATES[pickLanguage(args.language)](
+    args.recipientName,
+  );
+}
+
+/**
  * Cheap regex heuristic for "the caption names 2+ recipients but the
  * vision tool only returned 1". Detects:
  *

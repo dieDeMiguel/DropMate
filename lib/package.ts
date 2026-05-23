@@ -95,9 +95,15 @@ export type RecipientResolution =
  * Summary of the registered holder. Same shape the deleted
  * `register_package` tool returned; the channel's DM + group-ack
  * builders read fields off this struct.
+ *
+ * `platformId` (v2.1 #116) is the Telegram user id of the holder,
+ * surfaced so the channel can DM the holder directly on the Flow 2
+ * fulfillment suppression branch (the holder confirmation DM in place
+ * of the group ack). Mirrors `PickupHolderSummary` in `lib/pickup.ts`.
  */
 export interface HolderSummary {
   readonly id: string;
+  readonly platformId: string;
   readonly name: string;
   readonly houseNumber: string;
   readonly floor: string | null;
@@ -107,15 +113,32 @@ export interface HolderSummary {
 
 /**
  * If this Package closes out a pending Flow 2 reception request, the
- * caller (channel) can route a richer fulfillment DM to the original
- * requester. Slice 1 of #106 doesn't act on this directly — the
- * existing Flow 2 fulfillment surface is handled by the agent on the
- * fallthrough — but the field stays here for parity with the deleted
- * tool's return shape.
+ * caller (channel) reads this to decide whether to suppress the Flow 1
+ * group ack post and DM the holder a private confirmation instead.
+ *
+ * `previousStatus` (v2.1 #116 / Slice 3 of #113) is the
+ * `ReceptionRequest.status` value BEFORE this call flipped it to
+ * `"fulfilled"`. `findOpenReceptionRequestForRecipient` only returns
+ * pre-fulfilment rows (status ∈ {`"open"`, `"matched"`}), so the
+ * channel can tell apart:
+ *
+ *   - `"matched"` — the volunteer who tapped `[Ich kann helfen]` is the
+ *     one uploading the label now. Suppress the group ack: the original
+ *     Flow 2 post is the announcement.
+ *   - `"open"` — nobody tapped, but someone showed up with the package
+ *     anyway. Still suppress: the original Flow 2 post is still the
+ *     active announcement; a fresh "Paket von X an Y" ack on top would
+ *     be redundant noise.
+ *
+ * Both branches currently route to the same suppression behaviour; the
+ * field is preserved so a future iteration can refine (e.g. surface the
+ * cross-volunteer case where the matched volunteer differs from the
+ * uploading holder).
  */
 export interface ReceptionRequestFulfillmentSummary {
   readonly requestId: string;
   readonly requesterResidentId: string;
+  readonly previousStatus: "open" | "matched";
 }
 
 /**
@@ -172,6 +195,7 @@ export class RegisterPackageError extends Error {
 function summariseHolder(holder: Resident): HolderSummary {
   return {
     id: holder.id,
+    platformId: holder.platformId,
     name: holder.name,
     houseNumber: holder.houseNumber,
     floor: holder.floor ?? null,
@@ -298,6 +322,10 @@ export async function registerPackage(
 
   let fulfillment: ReceptionRequestFulfillmentSummary | null = null;
   if (openRequest) {
+    // findOpenReceptionRequestForRecipient already filters to
+    // status ∈ {"open", "matched"} — the assertion narrows the type
+    // for the consumer without re-checking.
+    const previousStatus = openRequest.status as "open" | "matched";
     const fulfilledRequest: ReceptionRequest = {
       ...openRequest,
       status: "fulfilled",
@@ -306,6 +334,7 @@ export async function registerPackage(
     fulfillment = {
       requestId: openRequest.id,
       requesterResidentId: openRequest.requesterResidentId,
+      previousStatus,
     };
   }
 

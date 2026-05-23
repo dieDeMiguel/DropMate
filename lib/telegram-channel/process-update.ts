@@ -134,6 +134,7 @@ import {
   buildDmTextPickupRetryText,
   buildFlow1ClarificationSynthetic,
   buildGroupAckText,
+  buildHolderConfirmationDmText,
   buildHolderNotRegisteredNudge,
   buildPickupKeyboard,
   buildRecipientDmText,
@@ -1015,6 +1016,59 @@ async function handleCallbackQuery(
  *   - unregistered holder          → `/register` nudge DM, silent in
  *                                    group (matches text path / #106)
  */
+/**
+ * v2.1 #116 (Slice 3 of #113): private holder confirmation DM sent
+ * INSTEAD of the group ack when a Flow 1 registration LINKS to a Flow 2
+ * `ReceptionRequest`. The original Flow 2 group card is the public
+ * announcement; the holder still needs a private signal that the
+ * channel registered the package and notified the recipient.
+ *
+ * Shared by both the photo route (`routeGroupPhoto`) and the text route
+ * (`routeGroupTextThroughClassifier`). Failures are swallowed (logged)
+ * — same shape the group ack post + recipient DM use; a transient
+ * Telegram outage shouldn't roll back the Package write.
+ */
+async function sendFlow1HolderConfirmation(args: {
+  readonly deps: ProcessUpdateDeps;
+  readonly registered: RegisterPackageResult;
+  readonly source: "photo" | "text";
+}): Promise<void> {
+  const { deps, registered, source } = args;
+  if (registered.recipientResolution.kind !== "resident") {
+    // Defensive: only called from the resident branch. The narrowed
+    // type is established at the call sites, but the helper guards
+    // against future refactors handing it a non-resident resolution.
+    return;
+  }
+  const holderChatId = Number(registered.holder.platformId);
+  if (!Number.isFinite(holderChatId)) {
+    console.error(
+      "[flow1] holder.platformId is not a finite number — skipping holder confirmation DM",
+      { platformId: registered.holder.platformId, source },
+    );
+    return;
+  }
+  const text = buildHolderConfirmationDmText({
+    recipientName: registered.recipientResolution.resident.name,
+    language: registered.holder.language,
+  });
+  try {
+    emitTrace("dm", "start", { kind: "flow1-holder-confirmation" });
+    await deps.sendDirectMessage(holderChatId, text);
+    emitTrace("dm", "end", { kind: "flow1-holder-confirmation" });
+  } catch (err) {
+    console.error(
+      `[flow1] holder confirmation DM (${source}) failed for platformId`,
+      registered.holder.platformId,
+      "package",
+      registered.package.id,
+      "error:",
+      err instanceof Error ? err.message : err,
+    );
+    emitTrace("dm", "error", { kind: "flow1-holder-confirmation" });
+  }
+}
+
 async function routeGroupPhoto(
   inbound: TelegramInboundMessage,
   fileId: string,
@@ -1254,10 +1308,6 @@ async function routeGroupPhoto(
     return { kind: "silent" };
   }
 
-  const groupAckText = buildGroupAckText({
-    holder: registered.holder,
-    recipient: registered.recipientResolution.resident,
-  });
   const recipientDmText = buildRecipientDmText({
     holder: registered.holder,
     recipient: registered.recipientResolution.resident,
@@ -1267,23 +1317,40 @@ async function routeGroupPhoto(
   // between the recipient and the bot.
   const recipientKeyboard = buildPickupKeyboard(registered.package.id);
 
-  // Group ack. `sendDirectMessage` is chat-id-agnostic — sending to
-  // `inbound.chatId` posts to the group when the inbound came from a
-  // group. No inline keyboard (v2.1 #114).
-  try {
-    emitTrace("dm", "start", { kind: "flow1-group-ack" });
-    await deps.sendDirectMessage(inbound.chatId, groupAckText);
-    emitTrace("dm", "end", { kind: "flow1-group-ack" });
-  } catch (err) {
-    console.error(
-      "[flow1] group ack post (photo) failed for chatId",
-      inbound.chatId,
-      "package",
-      registered.package.id,
-      "error:",
-      err instanceof Error ? err.message : err,
-    );
-    emitTrace("dm", "error", { kind: "flow1-group-ack" });
+  // v2.1 #116 (Slice 3 of #113): if this registration LINKS to a Flow 2
+  // ReceptionRequest (the holder is fulfilling a pre-announced "I won't
+  // be home" ask), suppress the group ack — the original Flow 2 group
+  // post is the announcement — and DM the holder a private confirmation
+  // instead. The recipient DM still fires unchanged.
+  if (registered.receptionRequestFulfilled !== null) {
+    await sendFlow1HolderConfirmation({
+      deps,
+      registered,
+      source: "photo",
+    });
+  } else {
+    const groupAckText = buildGroupAckText({
+      holder: registered.holder,
+      recipient: registered.recipientResolution.resident,
+    });
+    // Group ack. `sendDirectMessage` is chat-id-agnostic — sending to
+    // `inbound.chatId` posts to the group when the inbound came from a
+    // group. No inline keyboard (v2.1 #114).
+    try {
+      emitTrace("dm", "start", { kind: "flow1-group-ack" });
+      await deps.sendDirectMessage(inbound.chatId, groupAckText);
+      emitTrace("dm", "end", { kind: "flow1-group-ack" });
+    } catch (err) {
+      console.error(
+        "[flow1] group ack post (photo) failed for chatId",
+        inbound.chatId,
+        "package",
+        registered.package.id,
+        "error:",
+        err instanceof Error ? err.message : err,
+      );
+      emitTrace("dm", "error", { kind: "flow1-group-ack" });
+    }
   }
 
   const recipientChatId = Number(registered.recipientResolution.resident.id);
@@ -2112,10 +2179,6 @@ async function routeGroupTextThroughClassifier(
       continue;
     }
 
-    const groupAckText = buildGroupAckText({
-      holder: registered.holder,
-      recipient: registered.recipientResolution.resident,
-    });
     const recipientDmText = buildRecipientDmText({
       holder: registered.holder,
       recipient: registered.recipientResolution.resident,
@@ -2125,20 +2188,37 @@ async function routeGroupTextThroughClassifier(
     // between the recipient and the bot.
     const recipientKeyboard = buildPickupKeyboard(registered.package.id);
 
-    try {
-      emitTrace("dm", "start", { kind: "flow1-group-ack" });
-      await deps.sendDirectMessage(inbound.chatId, groupAckText);
-      emitTrace("dm", "end", { kind: "flow1-group-ack" });
-    } catch (err) {
-      console.error(
-        "[flow1] group ack post failed for chatId",
-        inbound.chatId,
-        "package",
-        registered.package.id,
-        "error:",
-        err instanceof Error ? err.message : err,
-      );
-      emitTrace("dm", "error", { kind: "flow1-group-ack" });
+    // v2.1 #116 (Slice 3 of #113): same suppression branch as the
+    // photo route — when this registration LINKS to a Flow 2
+    // ReceptionRequest, the original Flow 2 group post is the
+    // announcement; the new "Paket von X an Y" group ack would be
+    // redundant noise. DM the holder a private confirmation instead.
+    if (registered.receptionRequestFulfilled !== null) {
+      await sendFlow1HolderConfirmation({
+        deps,
+        registered,
+        source: "text",
+      });
+    } else {
+      const groupAckText = buildGroupAckText({
+        holder: registered.holder,
+        recipient: registered.recipientResolution.resident,
+      });
+      try {
+        emitTrace("dm", "start", { kind: "flow1-group-ack" });
+        await deps.sendDirectMessage(inbound.chatId, groupAckText);
+        emitTrace("dm", "end", { kind: "flow1-group-ack" });
+      } catch (err) {
+        console.error(
+          "[flow1] group ack post failed for chatId",
+          inbound.chatId,
+          "package",
+          registered.package.id,
+          "error:",
+          err instanceof Error ? err.message : err,
+        );
+        emitTrace("dm", "error", { kind: "flow1-group-ack" });
+      }
     }
 
     const recipientChatId = Number(registered.recipientResolution.resident.id);
