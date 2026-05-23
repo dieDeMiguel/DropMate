@@ -471,7 +471,7 @@ export interface ProcessUpdateDeps {
    *
    *   - 0 → DM "you have no open packages with me"
    *   - 1 → call `confirmPickup` deterministically
-   *   - 2+ → DM "which one? tap [Abgeholt] in the group"
+   *   - 2+ → DM "which one? tap [Abgeholt] in the per-package DM above"
    *
    * Implemented in the factory via `listHeldPackagesForStreet` +
    * an in-memory filter on `recipientResidentId === caller.id`. The
@@ -1642,11 +1642,13 @@ async function routeDmTextThroughClassifier(
  *                                /register).
  *   - 0 open packages         → DM "you have no open packages" +
  *                                handled (no agent).
- *   - 2+ open packages        → DM "tap [Abgeholt] in the group" +
- *                                handled. DM text alone can't
- *                                disambiguate; the group button is
- *                                unambiguous because each ack carries
- *                                its own package id in `callback_data`.
+ *   - 2+ open packages        → DM "tap [Abgeholt] in the per-package
+ *                                DM above" + handled (v2.1 #115). DM
+ *                                text alone can't disambiguate; the
+ *                                recipient's per-package DM thread is
+ *                                the only surface with a button per
+ *                                package since #114 killed the group
+ *                                keyboard, so we point them there.
  *   - 1 open package          → call `confirmPickup`. On success: send
  *                                a confirmation DM to the caller +
  *                                the holder thanks DM (same template

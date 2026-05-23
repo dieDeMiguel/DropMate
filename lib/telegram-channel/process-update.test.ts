@@ -3700,7 +3700,7 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
     );
   });
 
-  it("2+ open packages → sends disambiguation DM redirecting to group button, does NOT call confirmPickup", async () => {
+  it("2+ open packages → sends disambiguation DM pointing at per-package DM above, does NOT call confirmPickup (v2.1 #115)", async () => {
     const resident = recipientResident("de");
     const { deps, sendToAsh, sendDirectMessage, confirmPickup } = buildDeps({
       classification: {
@@ -3732,7 +3732,7 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
     expect(sendToAsh).not.toHaveBeenCalled();
     expect(sendDirectMessage).toHaveBeenCalledTimes(1);
     expect(sendDirectMessage.mock.calls[0]![1]).toBe(
-      "Welches Paket meinst du? Bitte tippe in der Gruppe auf [Abgeholt] beim richtigen Paket.",
+      "Du hast mehrere offene Pakete. Bitte tippe [Abgeholt] in der entsprechenden DM oben — ich habe dir für jedes Paket eine eigene Nachricht geschickt.",
     );
   });
 
