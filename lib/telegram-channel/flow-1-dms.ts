@@ -11,11 +11,11 @@
  * runs on the happy path, so it cannot fire a welcome wall,
  * paraphrase the card text, or name deleted tools.
  *
- * Both surfaces carry the `[Abgeholt]` inline keyboard (one row, one
- * button) with `callback_data: confirm_pickup:<package.id>`. The
- * existing `handleCallbackQuery` path in `process-update.ts` already
- * routes that action (#24), so the close-the-loop pickup tap works
- * the same way it did for the agent-driven Flow 1.
+ * Only the recipient DM carries the `[Abgeholt]` inline keyboard (one
+ * row, one button) with `callback_data: confirm_pickup:<package.id>`
+ * since v2.1 #114 — the group ack is announce-only and pickup is
+ * private. The existing `handleCallbackQuery` path in
+ * `process-update.ts` routes the action (#24).
  *
  * de-only for Slice 1 — en/es/tr land alongside Slice 3 (#109) or as
  * a follow-up. Falls back to German silently when the recipient's
@@ -31,10 +31,10 @@ import type { HolderSummary, ResidentRecipientSummary } from "../package.js";
 
 /**
  * Single-button `[Abgeholt]` inline keyboard. `callback_data` is
- * `confirm_pickup:<package.id>` so the recipient (or any registered
- * resident, with scope-gating in the callback handler) can close the
- * package by tapping the same button on either the group ack OR the
- * recipient DM.
+ * `confirm_pickup:<package.id>`. v2.1 #114: this keyboard now lands
+ * ONLY on the recipient's DM — never on the group ack. Pickup is
+ * private business between the recipient and the bot; the group
+ * stays at announce-only.
  *
  * Per Telegram spec: callback_data max 64 bytes. `pkg_<timestamp>_<rand>`
  * is well within budget.
@@ -71,9 +71,9 @@ export function buildGroupAckText(args: {
 /**
  * Compose the recipient DM body. Private — names the holder + their
  * address details (house number, floor, buzzer) so the recipient can
- * walk over and collect. Includes the `[Abgeholt]` button in the
- * recipient DM AND in the group ack so they can close from either
- * surface.
+ * walk over and collect. Includes the `[Abgeholt]` button only in
+ * this DM (v2.1 #114: the group ack no longer carries the button;
+ * pickup is private business between the recipient and the bot).
  *
  * Slice 1 ships de-only. Recipients on the MVP street are almost all
  * German-speakers; the en/es/tr variants land alongside Slice 3
@@ -87,7 +87,7 @@ export function buildGroupAckText(args: {
  *     📍 <holder.houseNumber>[, Stock <floor>][ — Klingel <buzzer>]
  *
  *     Melde dich, wenn du es abgeholt hast — tippe einfach auf
- *     [Abgeholt] hier oder in der Gruppe.
+ *     [Abgeholt].
  */
 export function buildRecipientDmText(args: {
   readonly holder: HolderSummary;
@@ -103,7 +103,7 @@ export function buildRecipientDmText(args: {
     "",
     `📍 ${holder.houseNumber}${floorClause}${buzzerClause}`,
     "",
-    "Melde dich, wenn du es abgeholt hast — tippe einfach auf [Abgeholt] hier oder in der Gruppe.",
+    "Melde dich, wenn du es abgeholt hast — tippe einfach auf [Abgeholt].",
   ].join("\n");
 }
 

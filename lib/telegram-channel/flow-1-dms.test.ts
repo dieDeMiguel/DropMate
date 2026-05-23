@@ -57,6 +57,15 @@ describe("flow-1-dms", () => {
       expect(text).toContain("[Abgeholt]");
     });
 
+    it("v2.1 #114: no longer points the recipient at the group [Abgeholt] button (the group ack carries no keyboard)", () => {
+      const text = buildRecipientDmText({ holder, recipient });
+      // Regression pin: the pre-#114 wording said "tippe einfach auf
+      // [Abgeholt] hier oder in der Gruppe." The group keyboard is
+      // gone — the DM must NOT reference the group button anymore.
+      expect(text).not.toContain("in der Gruppe");
+      expect(text).not.toContain("oder in der Gruppe");
+    });
+
     it("omits the floor clause when holder.floor is null", () => {
       const text = buildRecipientDmText({
         holder: { ...holder, floor: null },
