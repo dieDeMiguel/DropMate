@@ -11,7 +11,8 @@
     "dev": "ash dev",
     "typecheck": "tsgo",
     "test": "vitest run --passWithNoTests",
-    "prepare": "husky"
+    "prepare": "husky",
+    "seed-diagram": "./scripts/seed-diagram.sh"
   },
   "dependencies": {
     "@chat-adapter/telegram": "^4.28.1",
