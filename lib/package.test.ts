@@ -327,10 +327,71 @@ describe("registerPackage (v2.1 #106 — channel-deterministic Flow 1)", () => {
     expect(result.receptionRequestFulfilled).not.toBeNull();
     expect(result.receptionRequestFulfilled?.requestId).toBe("req_open");
     expect(result.receptionRequestFulfilled?.requesterResidentId).toBe("200");
+    expect(result.receptionRequestFulfilled?.previousStatus).toBe("open");
     expect(result.package.receptionRequestId).toBe("req_open");
 
     const updated = requestStore.get("req_open");
     expect(updated?.status).toBe("fulfilled");
+  });
+
+  it("v2.1 #116 — exposes previousStatus='matched' when the linked ReceptionRequest had a volunteer accepted via [Ich kann helfen]", async () => {
+    const holder = seedResident({
+      platformId: "100",
+      name: "Diego",
+      houseNumber: "69",
+    });
+    seedResident({
+      platformId: "200",
+      name: "Patricia Höfer",
+      houseNumber: "90",
+    });
+    // Volunteer (Diego) already tapped [Ich kann helfen] on the
+    // requester's Flow 2 card — request flipped to "matched".
+    seedRequest({
+      id: "req_matched",
+      streetId: "Methfesselstraße",
+      requesterResidentId: "200",
+      requesterName: "Patricia Höfer",
+      requesterHouseNumber: "90",
+      status: "matched",
+      volunteerResidentId: "100",
+    });
+
+    const { registerPackage } = await loadLib();
+    const result = await registerPackage(holder, {
+      recipientName: "Patricia Höfer",
+      recipientHouseNumber: "90",
+      carrier: "DHL",
+    });
+
+    expect(result.receptionRequestFulfilled).not.toBeNull();
+    expect(result.receptionRequestFulfilled?.requestId).toBe("req_matched");
+    expect(result.receptionRequestFulfilled?.previousStatus).toBe("matched");
+
+    const updated = requestStore.get("req_matched");
+    expect(updated?.status).toBe("fulfilled");
+  });
+
+  it("v2.1 #116 — HolderSummary exposes platformId so the channel can DM the holder a private confirmation", async () => {
+    const holder = seedResident({
+      platformId: "100",
+      name: "Diego",
+      houseNumber: "69",
+    });
+    seedResident({
+      platformId: "200",
+      name: "Marlene",
+      houseNumber: "88",
+    });
+
+    const { registerPackage } = await loadLib();
+    const result = await registerPackage(holder, {
+      recipientName: "Marlene",
+      recipientHouseNumber: "88",
+    });
+
+    expect(result.holder.platformId).toBe("100");
+    expect(result.holder.id).toBe("100");
   });
 
   it("does not link to a 'fulfilled' or 'expired' request — only open or matched", async () => {

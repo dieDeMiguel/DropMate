@@ -8,6 +8,7 @@ import {
   buildDmTextPickupRetryText,
   buildFlow1ClarificationSynthetic,
   buildGroupAckText,
+  buildHolderConfirmationDmText,
   buildHolderNotRegisteredNudge,
   buildPickupKeyboard,
   buildRecipientDmText,
@@ -18,6 +19,7 @@ import type { HolderSummary, ResidentRecipientSummary } from "../package.js";
 
 const holder: HolderSummary = {
   id: "100",
+  platformId: "100",
   name: "Diego Demiguel",
   houseNumber: "69",
   floor: "Erdgeschoss",
@@ -359,6 +361,76 @@ describe("flow-1-dms", () => {
           `ONE short clarifying question in ${language}`,
         );
       }
+    });
+  });
+
+  describe("buildHolderConfirmationDmText (v2.1 #116 — Flow 2 fulfillment suppression branch)", () => {
+    it("renders the German confirmation by default and names the recipient twice", () => {
+      const text = buildHolderConfirmationDmText({
+        recipientName: "Patricia Höfer",
+        language: "de",
+      });
+      expect(text).toBe(
+        "📦 Paket für Patricia Höfer erkannt — Patricia Höfer wurde benachrichtigt.",
+      );
+    });
+    it("renders English for 'en'", () => {
+      const text = buildHolderConfirmationDmText({
+        recipientName: "Patricia",
+        language: "en",
+      });
+      expect(text).toBe(
+        "📦 Package for Patricia recognised — Patricia has been notified.",
+      );
+    });
+    it("renders Spanish for 'es'", () => {
+      const text = buildHolderConfirmationDmText({
+        recipientName: "Patricia",
+        language: "es",
+      });
+      expect(text).toBe(
+        "📦 Paquete para Patricia reconocido — Patricia ha sido avisado/a.",
+      );
+    });
+    it("renders Turkish for 'tr'", () => {
+      const text = buildHolderConfirmationDmText({
+        recipientName: "Patricia",
+        language: "tr",
+      });
+      expect(text).toBe(
+        "📦 Patricia için paket tanındı — Patricia bilgilendirildi.",
+      );
+    });
+    it("falls back to German for unsupported languages", () => {
+      const text = buildHolderConfirmationDmText({
+        recipientName: "Patricia",
+        language: "ja",
+      });
+      expect(text).toContain("erkannt");
+      expect(text).toContain("benachrichtigt");
+    });
+    it("falls back to German on null / undefined language", () => {
+      const a = buildHolderConfirmationDmText({
+        recipientName: "Patricia",
+        language: null,
+      });
+      const b = buildHolderConfirmationDmText({
+        recipientName: "Patricia",
+        language: undefined,
+      });
+      expect(a).toContain("erkannt");
+      expect(b).toContain("erkannt");
+    });
+    it("does NOT leak the holder's house/buzzer/floor (privacy)", () => {
+      // The whole purpose of this DM is to ack the holder; we never
+      // restate their own address back at them and we definitely
+      // don't include the recipient's private fields (which the
+      // recipient DM separately covers).
+      const text = buildHolderConfirmationDmText({
+        recipientName: "Patricia",
+        language: "de",
+      });
+      expect(text).not.toMatch(/Klingel|Stock|Erdgeschoss/);
     });
   });
 

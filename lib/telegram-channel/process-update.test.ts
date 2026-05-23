@@ -227,6 +227,7 @@ function buildDeps(overrides: {
     } satisfies Package,
     holder: {
       id: "100",
+      platformId: "100",
       name: "Diego de Miguel",
       houseNumber: "69",
       floor: "Erdgeschoss",
@@ -715,6 +716,159 @@ describe("processInboundTelegramUpdate", () => {
       ).toHaveLength(1);
     });
 
+    it("v2.1 #116 — on Flow 2 fulfillment linkage (receptionRequestFulfilled !== null): suppresses the group ack, DMs the holder a private confirmation, still DMs the recipient with the [Abgeholt] keyboard", async () => {
+      const {
+        deps,
+        sendToAsh,
+        registerPackage,
+        sendDirectMessage,
+      } = buildDeps({
+        registeredResident: holderResident(),
+        registerPackageResult: {
+          package: {
+            id: "pkg_linked",
+            streetId: "Methfesselstraße",
+            recipientResidentId: "200",
+            recipientName: "Patricia Höfer",
+            recipientHouseNumber: "90",
+            holderResidentId: "100",
+            carrier: "DHL",
+            status: "held",
+            receivedAt: Date.now(),
+            pickedUpAt: null,
+            reminded: false,
+            receptionRequestId: "req_matched",
+          } satisfies Package,
+          holder: {
+            id: "100",
+            platformId: "100",
+            name: "Diego de Miguel",
+            houseNumber: "69",
+            floor: null,
+            buzzerName: null,
+            language: "de",
+          },
+          recipientResolution: {
+            kind: "resident",
+            resident: {
+              id: "200",
+              name: "Patricia Höfer",
+              houseNumber: "90",
+              language: "de",
+              floor: null,
+              buzzerName: null,
+            },
+          },
+          receptionRequestFulfilled: {
+            requestId: "req_matched",
+            requesterResidentId: "200",
+            previousStatus: "matched",
+          },
+        },
+      });
+
+      const res = await processInboundTelegramUpdate(
+        makeRequest(groupPhotoUpdate({ caption: "Paket für Patricia" })),
+        deps,
+      );
+
+      expect(res.status).toBe(204);
+      expect(registerPackage).toHaveBeenCalledTimes(1);
+      // Two DMs: one private holder confirmation, one recipient DM.
+      // NO group ack on this branch.
+      expect(sendDirectMessage).toHaveBeenCalledTimes(2);
+      expect(sendToAsh).not.toHaveBeenCalled();
+
+      // First DM is the holder confirmation — sent to holder.platformId
+      // (Number(100) === 100), NOT to the group chat id (-100).
+      const [holderChatId, holderText, holderEntities, holderKeyboard] =
+        sendDirectMessage.mock.calls[0]!;
+      expect(holderChatId).toBe(100);
+      expect(holderChatId).not.toBe(-100);
+      expect(holderText).toContain("Paket für Patricia Höfer erkannt");
+      expect(holderText).toContain("Patricia Höfer wurde benachrichtigt");
+      expect(holderEntities).toBeUndefined();
+      expect(holderKeyboard).toBeUndefined();
+
+      // Regression pin: the group chat (chatId -100) is NEVER addressed
+      // by sendDirectMessage on the suppression branch.
+      for (const call of sendDirectMessage.mock.calls) {
+        expect(call[0]).not.toBe(-100);
+      }
+
+      // Second DM is the recipient DM — same shape as the
+      // non-suppressed path, with the [Abgeholt] keyboard.
+      const [recipientChatId, recipientText, , recipientKeyboard] =
+        sendDirectMessage.mock.calls[1]!;
+      expect(recipientChatId).toBe(200);
+      expect(recipientText).toContain("Hi Patricia Höfer!");
+      expect(recipientText).toContain("[Abgeholt]");
+      expect(recipientKeyboard).toBeDefined();
+    });
+
+    it("v2.1 #116 — also suppresses when previousStatus='open' (no volunteer accepted yet, but holder showed up anyway)", async () => {
+      const {
+        deps,
+        registerPackage,
+        sendDirectMessage,
+      } = buildDeps({
+        registeredResident: holderResident(),
+        registerPackageResult: {
+          package: {
+            id: "pkg_linked",
+            streetId: "Methfesselstraße",
+            recipientResidentId: "200",
+            recipientName: "Patricia",
+            recipientHouseNumber: "90",
+            holderResidentId: "100",
+            carrier: "DHL",
+            status: "held",
+            receivedAt: Date.now(),
+            pickedUpAt: null,
+            reminded: false,
+            receptionRequestId: "req_open",
+          } satisfies Package,
+          holder: {
+            id: "100",
+            platformId: "100",
+            name: "Diego de Miguel",
+            houseNumber: "69",
+            floor: null,
+            buzzerName: null,
+            language: "de",
+          },
+          recipientResolution: {
+            kind: "resident",
+            resident: {
+              id: "200",
+              name: "Patricia",
+              houseNumber: "90",
+              language: "de",
+              floor: null,
+              buzzerName: null,
+            },
+          },
+          receptionRequestFulfilled: {
+            requestId: "req_open",
+            requesterResidentId: "200",
+            previousStatus: "open",
+          },
+        },
+      });
+
+      await processInboundTelegramUpdate(
+        makeRequest(groupPhotoUpdate({ caption: "Paket für Patricia" })),
+        deps,
+      );
+
+      expect(registerPackage).toHaveBeenCalledTimes(1);
+      expect(sendDirectMessage).toHaveBeenCalledTimes(2);
+      // No group chat call.
+      for (const call of sendDirectMessage.mock.calls) {
+        expect(call[0]).not.toBe(-100);
+      }
+    });
+
     it("forwards the caption (or undefined when absent) to parseLabel", async () => {
       // No caption → parseLabel called with `caption: undefined`.
       const { deps, parseLabel } = buildDeps({
@@ -987,6 +1141,7 @@ describe("processInboundTelegramUpdate", () => {
           } satisfies Package,
           holder: {
             id: "100",
+            platformId: "100",
             name: "Diego Demiguel",
             houseNumber: "69",
             floor: null,
@@ -5035,6 +5190,99 @@ describe("processInboundTelegramUpdate — Flow 1 group text (v2.1 #106 Slice 1 
     ).toHaveLength(1);
   });
 
+  it("v2.1 #116 — on Flow 2 fulfillment linkage (receptionRequestFulfilled !== null): suppresses the group ack, DMs the holder a private confirmation, still DMs the recipient with the [Abgeholt] keyboard", async () => {
+    const {
+      deps,
+      sendToAsh,
+      registerPackage,
+      sendDirectMessage,
+    } = buildDeps({
+      registeredResident: holderResident(),
+      groupClassification: {
+        isPackageRegistration: true,
+        recipients: [{ name: "Patricia Höfer", houseNumber: "90" }],
+        carrier: "DHL",
+        confidence: "high",
+        reason: "explicit package registration",
+      },
+      registerPackageResult: {
+        package: {
+          id: "pkg_linked_text",
+          streetId: "Methfesselstraße",
+          recipientResidentId: "200",
+          recipientName: "Patricia Höfer",
+          recipientHouseNumber: "90",
+          holderResidentId: "100",
+          carrier: "DHL",
+          status: "held",
+          receivedAt: Date.now(),
+          pickedUpAt: null,
+          reminded: false,
+          receptionRequestId: "req_matched_text",
+        } satisfies Package,
+        holder: {
+          id: "100",
+          platformId: "100",
+          name: "Diego de Miguel",
+          houseNumber: "69",
+          floor: null,
+          buzzerName: null,
+          language: "de",
+        },
+        recipientResolution: {
+          kind: "resident",
+          resident: {
+            id: "200",
+            name: "Patricia Höfer",
+            houseNumber: "90",
+            language: "de",
+            floor: null,
+            buzzerName: null,
+          },
+        },
+        receptionRequestFulfilled: {
+          requestId: "req_matched_text",
+          requesterResidentId: "200",
+          previousStatus: "matched",
+        },
+      },
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        groupRegistrationUpdate({ text: "Paket für Patricia Höfer (Hs.90)" }),
+      ),
+      deps,
+    );
+
+    expect(registerPackage).toHaveBeenCalledTimes(1);
+    // Two DMs only: holder confirmation + recipient DM. No group ack.
+    expect(sendDirectMessage).toHaveBeenCalledTimes(2);
+    expect(sendToAsh).not.toHaveBeenCalled();
+
+    // Holder confirmation: sent to the holder's platformId, NOT to
+    // the group chat id (-100).
+    const [holderChatId, holderText, , holderKeyboard] =
+      sendDirectMessage.mock.calls[0]!;
+    expect(holderChatId).toBe(100);
+    expect(holderText).toContain("Paket für Patricia Höfer erkannt");
+    expect(holderText).toContain("Patricia Höfer wurde benachrichtigt");
+    expect(holderKeyboard).toBeUndefined();
+
+    // Regression pin: NO call addresses the group chat on this branch.
+    for (const call of sendDirectMessage.mock.calls) {
+      expect(call[0]).not.toBe(-100);
+    }
+
+    // Recipient DM unchanged from the non-suppression path.
+    const [recipientChatId, recipientText, , recipientKeyboard] =
+      sendDirectMessage.mock.calls[1]!;
+    expect(recipientChatId).toBe(200);
+    expect(recipientText).toContain("Hi Patricia Höfer!");
+    expect(recipientText).toContain("[Abgeholt]");
+    expect(recipientKeyboard).toBeDefined();
+  });
+
   it("stays silent + does NOT invoke the agent when the classifier returns isPackageRegistration: false (off-topic group chat)", async () => {
     const { deps, sendToAsh, registerPackage, sendDirectMessage } = buildDeps({
       groupClassification: {
@@ -5294,6 +5542,7 @@ describe("processInboundTelegramUpdate — Flow 1 group text (v2.1 #106 Slice 1 
         } satisfies Package,
         holder: {
           id: "100",
+          platformId: "100",
           name: "Diego Demiguel",
           houseNumber: "69",
           floor: null,
