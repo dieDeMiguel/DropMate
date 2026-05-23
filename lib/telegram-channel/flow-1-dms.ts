@@ -140,9 +140,12 @@ export function buildHolderNotRegisteredNudge(
  *   - 0 open packages → tell the user there's nothing to close.
  *   - 1 open package  → confirm + thanks (the holder gets the same
  *                       thanks DM via `pickup-dms.ts::buildHolderThanksDmText`).
- *   - 2+ open packages → ask the user to disambiguate by tapping the
- *                        button on the right group ack (the button is
- *                        unambiguous; DM text isn't).
+ *   - 2+ open packages → ask the user to disambiguate by tapping
+ *                        [Abgeholt] in the per-package DM the bot
+ *                        already sent above (v2.1 #115: the group ack
+ *                        no longer carries the button after #114, so
+ *                        the recipient's own DM thread is the only
+ *                        surface with a button per package).
  *   - already done   → idempotent — the package is already closed.
  *   - retry          → recoverable failure (Redis hiccup, lookup
  *                       throws). User can re-send the DM.
@@ -184,10 +187,10 @@ export function buildDmTextPickupNoOpenPackagesText(
 const DM_TEXT_PICKUP_MULTIPLE_PACKAGES: Readonly<
   Record<SupportedLanguage, string>
 > = {
-  de: "Welches Paket meinst du? Bitte tippe in der Gruppe auf [Abgeholt] beim richtigen Paket.",
-  en: "Which package? Please tap [Picked up] on the right one in the group.",
-  es: "¿Cuál paquete? Por favor toca [Recogido] en el correcto en el grupo.",
-  tr: "Hangi paket? Lütfen gruptaki doğru paketin [Alındı] düğmesine dokun.",
+  de: "Du hast mehrere offene Pakete. Bitte tippe [Abgeholt] in der entsprechenden DM oben — ich habe dir für jedes Paket eine eigene Nachricht geschickt.",
+  en: "You have multiple open packages. Please tap [Abgeholt] in the corresponding DM above — I sent you a separate message for each one.",
+  es: "Tienes varios paquetes pendientes. Por favor toca [Abgeholt] en el DM correspondiente arriba — te envié un mensaje aparte para cada uno.",
+  tr: "Birden fazla açık paketin var. Lütfen yukarıdaki ilgili DM'de [Abgeholt] düğmesine dokun — her paket için ayrı bir mesaj gönderdim.",
 };
 
 export function buildDmTextPickupMultiplePackagesText(

@@ -160,28 +160,46 @@ describe("flow-1-dms", () => {
   });
 
   describe("buildDmTextPickupMultiplePackagesText", () => {
-    it("renders the German disambiguation prompt pointing to the group button", () => {
+    it("renders the German disambiguation prompt pointing to the per-package DM above", () => {
       const text = buildDmTextPickupMultiplePackagesText("de");
       expect(text).toBe(
-        "Welches Paket meinst du? Bitte tippe in der Gruppe auf [Abgeholt] beim richtigen Paket.",
+        "Du hast mehrere offene Pakete. Bitte tippe [Abgeholt] in der entsprechenden DM oben — ich habe dir für jedes Paket eine eigene Nachricht geschickt.",
       );
       // Regression pin: the prompt must mention [Abgeholt] verbatim so
-      // the writer can pattern-match it on the group surface.
+      // the writer can pattern-match it on the DM surface (v2.1 #114
+      // killed the literal button text on the group).
       expect(text).toContain("[Abgeholt]");
     });
-    it("renders English for 'en' with [Picked up]", () => {
-      expect(buildDmTextPickupMultiplePackagesText("en")).toContain(
-        "[Picked up]",
-      );
+    it("v2.1 #115 — German prompt no longer points at 'die Gruppe' (the group keyboard is gone since #114)", () => {
+      const text = buildDmTextPickupMultiplePackagesText("de");
+      expect(text).not.toContain("in der Gruppe");
+      expect(text).not.toContain("Gruppe");
     });
-    it("renders Spanish for 'es' with [Recogido]", () => {
-      expect(buildDmTextPickupMultiplePackagesText("es")).toContain(
-        "[Recogido]",
-      );
+    it("renders English for 'en' with [Abgeholt] pointing at the DM above", () => {
+      const text = buildDmTextPickupMultiplePackagesText("en");
+      expect(text).toContain("[Abgeholt]");
+      expect(text).toContain("DM above");
+      expect(text).not.toContain("in the group");
+      expect(text).not.toContain("group");
     });
-    it("renders Turkish for 'tr' with [Alındı]", () => {
-      expect(buildDmTextPickupMultiplePackagesText("tr")).toContain(
-        "[Alındı]",
+    it("renders Spanish for 'es' with [Abgeholt] pointing at the DM above", () => {
+      const text = buildDmTextPickupMultiplePackagesText("es");
+      expect(text).toContain("[Abgeholt]");
+      expect(text).toContain("arriba");
+      expect(text).not.toContain("en el grupo");
+      expect(text).not.toContain("grupo");
+    });
+    it("renders Turkish for 'tr' with [Abgeholt] pointing at the DM above", () => {
+      const text = buildDmTextPickupMultiplePackagesText("tr");
+      expect(text).toContain("[Abgeholt]");
+      expect(text).toContain("yukarıdaki");
+      expect(text).not.toContain("gruptaki");
+      expect(text).not.toContain("grup");
+    });
+    it("falls back to German for unsupported languages", () => {
+      const text = buildDmTextPickupMultiplePackagesText("ja");
+      expect(text).toBe(
+        "Du hast mehrere offene Pakete. Bitte tippe [Abgeholt] in der entsprechenden DM oben — ich habe dir für jedes Paket eine eigene Nachricht geschickt.",
       );
     });
   });
