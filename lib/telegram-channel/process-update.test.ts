@@ -642,7 +642,7 @@ describe("processInboundTelegramUpdate", () => {
       };
     }
 
-    it("on high-confidence parse + registered-resident recipient: calls parseLabel + registerPackage + posts group ack + DMs recipient with [Abgeholt] keyboard, no agent invocation", async () => {
+    it("on high-confidence parse + registered-resident recipient: calls parseLabel + registerPackage + posts announce-only group ack + DMs recipient with [Abgeholt] keyboard (v2.1 #114: no group keyboard), no agent invocation", async () => {
       const fileUrl =
         "https://api.telegram.org/file/bot111:AAA/photos/file_99.jpg";
       const {
@@ -683,32 +683,36 @@ describe("processInboundTelegramUpdate", () => {
       expect(parseTrackingPage).not.toHaveBeenCalled();
 
       expect(registerPackage).toHaveBeenCalledTimes(1);
-      // Two sendDirectMessage calls: one to the group, one to the recipient.
+      // Two sendDirectMessage calls: one to the group (announce-only),
+      // one to the recipient (carries the [Abgeholt] keyboard).
       expect(sendDirectMessage).toHaveBeenCalledTimes(2);
       // Agent is NEVER invoked on this path.
       expect(sendToAsh).not.toHaveBeenCalled();
 
-      // Group ack: posted to the inbound chat id (the group) with the
-      // pickup keyboard.
+      // Group ack: posted to the inbound chat id (the group). v2.1
+      // #114 regression pin: NO inline keyboard on the group ack.
       const [groupChatId, groupText, groupEntities, groupKeyboard] =
         sendDirectMessage.mock.calls[0]!;
       expect(groupChatId).toBe(-100);
       expect(groupText).toContain("📦 Paket von Diego de Miguel (69)");
       expect(groupText).toContain("an Marlene Hartmann (88)");
       expect(groupEntities).toBeUndefined();
-      expect(groupKeyboard).toBeDefined();
-      expect(
-        (groupKeyboard as { inline_keyboard: ReadonlyArray<unknown> })
-          .inline_keyboard,
-      ).toHaveLength(1);
+      expect(groupKeyboard).toBeUndefined();
 
       // Recipient DM: sent to the recipient's chat id (numeric of the
-      // platformId), same pickup keyboard.
-      const [recipientChatId, recipientText] = sendDirectMessage.mock.calls[1]!;
+      // platformId), carries the pickup keyboard (the only surface
+      // that does post-#114).
+      const [recipientChatId, recipientText, _recipientEntities, recipientKeyboard] =
+        sendDirectMessage.mock.calls[1]!;
       expect(recipientChatId).toBe(200);
       expect(recipientText).toContain("Hi Marlene Hartmann!");
       expect(recipientText).toContain("Diego de Miguel hat ein Paket");
       expect(recipientText).toContain("[Abgeholt]");
+      expect(recipientKeyboard).toBeDefined();
+      expect(
+        (recipientKeyboard as { inline_keyboard: ReadonlyArray<unknown> })
+          .inline_keyboard,
+      ).toHaveLength(1);
     });
 
     it("forwards the caption (or undefined when absent) to parseLabel", async () => {
@@ -1696,7 +1700,7 @@ describe("processInboundTelegramUpdate — callback_query", () => {
     // holder thanks. `sendToAsh` is NEVER called on this path — that is
     // the structural invariant these cases pin.
 
-    it("flips status, edits the group ack in place, and DMs the holder thanks on the happy path (group tap)", async () => {
+    it("flips status, strips the recipient DM keyboard, and DMs the holder thanks on the happy path — v2.1 #114: no editGroupCard call", async () => {
       const {
         deps,
         sendToAsh,
@@ -1722,14 +1726,16 @@ describe("processInboundTelegramUpdate — callback_query", () => {
         } satisfies Resident,
       });
 
+      // v2.1 #114: in the new design the pickup keyboard lives only
+      // on the recipient's 1:1 DM (chatId = recipient.platformId).
       const res = await processInboundTelegramUpdate(
         makeRequest(
           cbUpdate({
-            chatId: -100123,
-            messageId: 555,
+            chatId: 200, // recipient's DM chat
+            messageId: 777,
             fromUserId: 200,
             data: "confirm_pickup:pkg_42",
-            chatType: "supergroup",
+            chatType: "private",
             languageCode: "de",
           }),
         ),
@@ -1743,16 +1749,15 @@ describe("processInboundTelegramUpdate — callback_query", () => {
       expect(confirmPickup).toHaveBeenCalledTimes(1);
       expect(confirmPickup.mock.calls[0]![1]).toBe("pkg_42");
       expect(answerCallback).toHaveBeenCalledWith("cb_abc");
-      expect(stripKeyboard).toHaveBeenCalledWith(-100123, 555);
+      // Strip targets the recipient DM message (the only surface that
+      // carries the pickup keyboard post-#114).
+      expect(stripKeyboard).toHaveBeenCalledWith(200, 777);
 
-      // Group ack edited in place with the picked-up marker.
-      expect(editGroupCard).toHaveBeenCalledTimes(1);
-      const [editChatId, editMessageId, editText] = editGroupCard.mock.calls[0]!;
-      expect(editChatId).toBe(-100123);
-      expect(editMessageId).toBe(555);
-      expect(editText).toContain("✅ abgeholt");
-      expect(editText).toContain("Diego de Miguel");
-      expect(editText).toContain("Marlene Hartmann");
+      // v2.1 #114 regression pin: no editGroupCard call. The group
+      // ack stays as the original "📦 Paket von X an Y." announcement
+      // — pickup is private business between the recipient and the
+      // bot, so the group never learns the package was closed.
+      expect(editGroupCard).not.toHaveBeenCalled();
 
       // Holder thanks DM lands.
       expect(sendDirectMessage).toHaveBeenCalledTimes(1);
@@ -1765,52 +1770,7 @@ describe("processInboundTelegramUpdate — callback_query", () => {
       expect(sendToAsh).not.toHaveBeenCalled();
     });
 
-    it("happy path also works from a DM surface (recipient tapped [Abgeholt] on their DM, not the group)", async () => {
-      const {
-        deps,
-        sendToAsh,
-        confirmPickup,
-        editGroupCard,
-        sendDirectMessage,
-      } = buildDeps({
-        registeredResident: {
-          id: "200",
-          name: "Marlene Hartmann",
-          street: "Methfesselstraße",
-          houseNumber: "88",
-          platformId: "200",
-          platform: "telegram",
-          language: "de",
-          availabilityPatterns: [],
-          registeredAt: 1716000000000,
-          source: "explicit",
-          confirmed: true,
-        } satisfies Resident,
-      });
-
-      await processInboundTelegramUpdate(
-        makeRequest(
-          cbUpdate({
-            chatId: 200, // recipient's DM chat
-            messageId: 777,
-            fromUserId: 200,
-            data: "confirm_pickup:pkg_42",
-            chatType: "private",
-          }),
-        ),
-        deps,
-      );
-
-      expect(confirmPickup).toHaveBeenCalledTimes(1);
-      // editGroupCard targets whichever message carried the keyboard —
-      // here the recipient's DM message id. Same primitive does the
-      // edit either way (it's just editMessageText on the platform).
-      expect(editGroupCard).toHaveBeenCalledWith(200, 777, expect.any(String));
-      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
-      expect(sendToAsh).not.toHaveBeenCalled();
-    });
-
-    it("PICKUP_NOT_RECIPIENT throw → dedicated toast + keyboard stripped, no DMs", async () => {
+    it("PICKUP_NOT_RECIPIENT throw → dedicated toast, NO keyboard strip (v2.1 #114: stale group keyboard stays untouched), no DMs", async () => {
       const { PICKUP_NOT_RECIPIENT_ERROR_CODE } = await import("../pickup.js");
       const err: Error & { code?: string } = new Error("not recipient");
       err.code = PICKUP_NOT_RECIPIENT_ERROR_CODE;
@@ -1859,8 +1819,12 @@ describe("processInboundTelegramUpdate — callback_query", () => {
         "cb_abc",
         expect.stringMatching(/nicht der empfänger/i),
       );
-      // Keyboard stripped — permanent rejection.
-      expect(stripKeyboard).toHaveBeenCalledWith(-100123, 555);
+      // v2.1 #114: keyboard stays live. The only way a non-recipient
+      // can tap is via a stale pre-#114 group keyboard — stripping
+      // it would punish every other resident's view of that
+      // historical message. The recipient's DM keyboard is untouched
+      // either way (it's on a different chat).
+      expect(stripKeyboard).not.toHaveBeenCalled();
       // No edit, no DM, no agent invocation.
       expect(editGroupCard).not.toHaveBeenCalled();
       expect(sendDirectMessage).not.toHaveBeenCalled();
@@ -1968,7 +1932,7 @@ describe("processInboundTelegramUpdate — callback_query", () => {
       expect(sendToAsh).not.toHaveBeenCalled();
     });
 
-    it("unregistered tapper → not-recipient toast + keyboard stripped, no lib call", async () => {
+    it("unregistered tapper → not-recipient toast, NO keyboard strip (v2.1 #114: stale group keyboard stays untouched), no lib call", async () => {
       const {
         deps,
         sendToAsh,
@@ -2001,7 +1965,11 @@ describe("processInboundTelegramUpdate — callback_query", () => {
         "cb_abc",
         expect.stringMatching(/nicht der empfänger/i),
       );
-      expect(stripKeyboard).toHaveBeenCalledWith(-100123, 555);
+      // v2.1 #114: keyboard stays live. Same rationale as the
+      // PICKUP_NOT_RECIPIENT branch — only path here is a stale
+      // pre-#114 group keyboard, and stripping it punishes the
+      // whole group.
+      expect(stripKeyboard).not.toHaveBeenCalled();
       expect(sendToAsh).not.toHaveBeenCalled();
     });
 
@@ -2039,7 +2007,7 @@ describe("processInboundTelegramUpdate — callback_query", () => {
       expect(sendToAsh).not.toHaveBeenCalled();
     });
 
-    it("editGroupCard and sendDirectMessage failures are swallowed (canonical state already correct)", async () => {
+    it("holder thanks DM failure is swallowed (canonical state already correct) — v2.1 #114: editGroupCard is no longer called", async () => {
       const {
         deps,
         sendToAsh,
@@ -2060,27 +2028,27 @@ describe("processInboundTelegramUpdate — callback_query", () => {
           confirmed: true,
         } satisfies Resident,
       });
-      editGroupCard.mockRejectedValueOnce(new Error("edit failed"));
       sendDirectMessage.mockRejectedValueOnce(new Error("dm failed"));
 
       const res = await processInboundTelegramUpdate(
         makeRequest(
           cbUpdate({
-            chatId: -100123,
-            messageId: 555,
+            chatId: 200, // recipient DM (the only surface with the keyboard)
+            messageId: 777,
             fromUserId: 200,
             data: "confirm_pickup:pkg_42",
-            chatType: "supergroup",
+            chatType: "private",
           }),
         ),
         deps,
       );
 
-      // Both side effects were attempted (and failed), but the
+      // The holder-thanks DM was attempted (and failed), but the
       // overall response stays 204 because the lib already flipped
       // canonical state — surfacing a 5xx now would be misleading.
       expect(res.status).toBe(204);
-      expect(editGroupCard).toHaveBeenCalledTimes(1);
+      // v2.1 #114: editGroupCard is never called on pickup.
+      expect(editGroupCard).not.toHaveBeenCalled();
       expect(sendDirectMessage).toHaveBeenCalledTimes(1);
       expect(sendToAsh).not.toHaveBeenCalled();
     });
@@ -5005,7 +4973,7 @@ describe("processInboundTelegramUpdate — Flow 1 group text (v2.1 #106 Slice 1 
     };
   }
 
-  it("on high-confidence classifier verdict + registered-resident recipient: calls registerPackage + posts group ack + DMs recipient with [Abgeholt] keyboard, no agent invocation", async () => {
+  it("on high-confidence classifier verdict + registered-resident recipient: calls registerPackage + posts announce-only group ack + DMs recipient with [Abgeholt] keyboard (v2.1 #114: no group keyboard), no agent invocation", async () => {
     const {
       deps,
       sendToAsh,
@@ -5035,29 +5003,36 @@ describe("processInboundTelegramUpdate — Flow 1 group text (v2.1 #106 Slice 1 
     expect(res.status).toBe(204);
     expect(classifyGroupMessage).toHaveBeenCalledTimes(1);
     expect(registerPackage).toHaveBeenCalledTimes(1);
-    // Two sendDirectMessage calls: one to the group, one to the recipient.
+    // Two sendDirectMessage calls: one to the group (announce-only),
+    // one to the recipient (carries the [Abgeholt] keyboard).
     expect(sendDirectMessage).toHaveBeenCalledTimes(2);
     // Agent is NEVER invoked on this path.
     expect(sendToAsh).not.toHaveBeenCalled();
 
-    // Group ack: posted to the inbound chat id (the group) with the
-    // pickup keyboard.
+    // Group ack: posted to the inbound chat id (the group). v2.1
+    // #114 regression pin: NO inline keyboard on the group ack.
     const [groupChatId, groupText, groupEntities, groupKeyboard] =
       sendDirectMessage.mock.calls[0]!;
     expect(groupChatId).toBe(-100);
     expect(groupText).toContain("📦 Paket von Diego de Miguel (69)");
     expect(groupText).toContain("an Marlene Hartmann (88)");
     expect(groupEntities).toBeUndefined();
-    expect(groupKeyboard).toBeDefined();
-    expect((groupKeyboard as { inline_keyboard: ReadonlyArray<unknown> }).inline_keyboard).toHaveLength(1);
+    expect(groupKeyboard).toBeUndefined();
 
     // Recipient DM: sent to the recipient's chat id (numeric of the
-    // platformId), same pickup keyboard.
-    const [recipientChatId, recipientText] = sendDirectMessage.mock.calls[1]!;
+    // platformId), carries the pickup keyboard (the only surface
+    // that does post-#114).
+    const [recipientChatId, recipientText, _recipientEntities, recipientKeyboard] =
+      sendDirectMessage.mock.calls[1]!;
     expect(recipientChatId).toBe(200);
     expect(recipientText).toContain("Hi Marlene Hartmann!");
     expect(recipientText).toContain("Diego de Miguel hat ein Paket");
     expect(recipientText).toContain("[Abgeholt]");
+    expect(recipientKeyboard).toBeDefined();
+    expect(
+      (recipientKeyboard as { inline_keyboard: ReadonlyArray<unknown> })
+        .inline_keyboard,
+    ).toHaveLength(1);
   });
 
   it("stays silent + does NOT invoke the agent when the classifier returns isPackageRegistration: false (off-topic group chat)", async () => {

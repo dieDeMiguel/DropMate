@@ -151,7 +151,6 @@ import {
 import type { InlineKeyboardMarkup, TelegramMessageEntity } from "./send.js";
 import { verifyTelegramSecretHeader } from "./verify.js";
 import {
-  buildGroupAckPickedUpText,
   buildHolderThanksDmText,
   pickupAlreadyDoneToast,
   pickupNotRecipientToast,
@@ -1263,19 +1262,17 @@ async function routeGroupPhoto(
     holder: registered.holder,
     recipient: registered.recipientResolution.resident,
   });
-  const keyboard = buildPickupKeyboard(registered.package.id);
+  // v2.1 #114: pickup keyboard lives only on the recipient DM now —
+  // the group ack is announce-only. Pickup is private business
+  // between the recipient and the bot.
+  const recipientKeyboard = buildPickupKeyboard(registered.package.id);
 
   // Group ack. `sendDirectMessage` is chat-id-agnostic — sending to
   // `inbound.chatId` posts to the group when the inbound came from a
-  // group.
+  // group. No inline keyboard (v2.1 #114).
   try {
     emitTrace("dm", "start", { kind: "flow1-group-ack" });
-    await deps.sendDirectMessage(
-      inbound.chatId,
-      groupAckText,
-      undefined,
-      keyboard,
-    );
+    await deps.sendDirectMessage(inbound.chatId, groupAckText);
     emitTrace("dm", "end", { kind: "flow1-group-ack" });
   } catch (err) {
     console.error(
@@ -1297,7 +1294,7 @@ async function routeGroupPhoto(
         recipientChatId,
         recipientDmText,
         undefined,
-        keyboard,
+        recipientKeyboard,
       );
       emitTrace("dm", "end", { kind: "flow1-recipient" });
     } catch (err) {
@@ -2121,16 +2118,14 @@ async function routeGroupTextThroughClassifier(
       holder: registered.holder,
       recipient: registered.recipientResolution.resident,
     });
-    const keyboard = buildPickupKeyboard(registered.package.id);
+    // v2.1 #114: pickup keyboard lives only on the recipient DM now —
+    // the group ack is announce-only. Pickup is private business
+    // between the recipient and the bot.
+    const recipientKeyboard = buildPickupKeyboard(registered.package.id);
 
     try {
       emitTrace("dm", "start", { kind: "flow1-group-ack" });
-      await deps.sendDirectMessage(
-        inbound.chatId,
-        groupAckText,
-        undefined,
-        keyboard,
-      );
+      await deps.sendDirectMessage(inbound.chatId, groupAckText);
       emitTrace("dm", "end", { kind: "flow1-group-ack" });
     } catch (err) {
       console.error(
@@ -2152,7 +2147,7 @@ async function routeGroupTextThroughClassifier(
           recipientChatId,
           recipientDmText,
           undefined,
-          keyboard,
+          recipientKeyboard,
         );
         emitTrace("dm", "end", { kind: "flow1-recipient" });
       } catch (err) {
@@ -2524,24 +2519,31 @@ async function handleAcceptReceptionGroup(
 
 /**
  * v2.1 #108 (Slice 4 of #105) — channel-deterministic pickup tap.
+ * Updated by v2.1 #114 (Slice 1 of #113) to drop the group-card
+ * edit and to leave the keyboard intact on non-recipient
+ * rejections, since the pickup keyboard now lives only on the
+ * recipient's 1:1 DM (the group ack stays announce-only).
  *
- * Mirrors the v2.1 #96 Part A `handleAcceptReceptionGroup` shape
- * one-for-one: resolve the caller via `getRegisteredResident`,
- * dispatch to the lib-level `confirmPickup`, then on success edit
- * the group ack in place (the same message that carried the
- * `[Abgeholt]` keyboard) + DM the holder thanks in their stored
- * language. `sendToAsh` is NEVER called on this path — the agent
- * does not run on the pickup-tap surface.
+ * Resolves the caller via `getRegisteredResident`, dispatches to
+ * the lib-level `confirmPickup`, then on success ack + strip the
+ * recipient's DM keyboard + DM the holder thanks. `sendToAsh` is
+ * NEVER called on this path — the agent does not run on the
+ * pickup-tap surface.
  *
  * Error class → toast / keyboard treatment:
  *
  *   - getRegisteredResident throws / returns null (race vs
  *     directory): generic retry toast, keyboard stays live.
+ *   - caller resolves to null (unregistered tapper): not-recipient
+ *     toast. Keyboard stays live (only path here is a stale
+ *     pre-#114 group keyboard; touching it would punish every
+ *     other resident's view of that historical message).
  *   - confirmPickup throws `PICKUP_NOT_RECIPIENT`: dedicated
- *     toast + strip keyboard (caller will never become the
- *     recipient; permanent rejection).
+ *     toast only. Same stale-group-keyboard reasoning as the
+ *     unregistered branch — do not strip.
  *   - confirmPickup throws `PICKUP_ALREADY_DONE`: dedicated toast
- *     only; keyboard already stripped from the previous success.
+ *     only; keyboard already stripped from the previous success
+ *     on the recipient's DM.
  *   - other throw (Redis hiccup): generic retry toast, keyboard
  *     stays live.
  *
@@ -2549,10 +2551,10 @@ async function handleAcceptReceptionGroup(
  * failure path leaves the keyboard intact on recoverable errors.
  * Same #95 invariant the volunteer-accept handler relies on.
  *
- * editGroupCard / sendDirectMessage failures after the lib call
- * succeeded are logged but never raised: the canonical state in
- * Redis is correct, and any DM / group-edit retry can land
- * separately without re-flipping the package status.
+ * sendDirectMessage failures after the lib call succeeded are
+ * logged but never raised: the canonical state in Redis is
+ * correct, and any DM retry can land separately without
+ * re-flipping the package status.
  */
 async function handleConfirmPickup(
   cb: TelegramInboundCallback,
@@ -2591,14 +2593,17 @@ async function handleConfirmPickup(
     // Pickup taps from unregistered users get the not-recipient
     // toast — an unregistered user is by definition not the
     // recipient of any Package (recipientResidentId would never
-    // match). Strip the keyboard so they don't keep tapping.
+    // match). v2.1 #114: do NOT strip the keyboard. The only place
+    // the pickup keyboard can land in the new design is the
+    // recipient's own DM (a 1:1 chat), and a non-recipient tap
+    // arriving here can only come from a stale pre-#114 group
+    // keyboard; the recipient's DM keyboard stays for them.
     await deps
       .answerCallback(
         cb.callbackId,
         pickupNotRecipientToast(cb.fromLanguageCode),
       )
       .catch(() => undefined);
-    await deps.stripKeyboard(cb.chatId, cb.messageId).catch(() => undefined);
     return new Response(null, { status: 204 });
   }
 
@@ -2618,10 +2623,12 @@ async function handleConfirmPickup(
       await deps
         .answerCallback(cb.callbackId, pickupNotRecipientToast(language))
         .catch(() => undefined);
-      // Permanent rejection — non-recipient never becomes the
-      // recipient by re-tapping. Strip the keyboard so they don't
-      // keep hammering it.
-      await deps.stripKeyboard(cb.chatId, cb.messageId).catch(() => undefined);
+      // v2.1 #114: do NOT strip the keyboard. With the keyboard
+      // living only on the recipient's DM (a 1:1 chat), a
+      // non-recipient tap that reaches here can only come from a
+      // stale pre-#114 group keyboard — stripping it would punish
+      // every other resident's view of that historical message.
+      // The recipient's DM keyboard stays untouched.
       return new Response(null, { status: 204 });
     }
     if (errorCode === PICKUP_ALREADY_DONE_ERROR_CODE) {
@@ -2649,53 +2656,16 @@ async function handleConfirmPickup(
     return new Response(null, { status: 204 });
   }
 
-  // Happy path: status flipped. Ack + strip the keyboard, then edit
-  // the group ack in place + DM the holder thanks. Doing this AFTER
-  // the lib call (vs before) is what makes the failure path above
-  // leave the keyboard intact on recoverable errors.
+  // Happy path: status flipped. Ack + strip the keyboard on the
+  // recipient's DM (where the tap originated — the only surface
+  // that carries the pickup keyboard in v2.1 #114), then DM the
+  // holder thanks. Doing the strip AFTER the lib call (vs before)
+  // is what makes the failure path above leave the keyboard intact
+  // on recoverable errors. The group ack message is left untouched
+  // — pickup is private business and the group narration stays at
+  // the original "📦 Paket von X an Y." announcement (v2.1 #114).
   await deps.answerCallback(cb.callbackId).catch(() => undefined);
   await deps.stripKeyboard(cb.chatId, cb.messageId).catch(() => undefined);
-
-  // Edit the in-group ack message to add the ✅ abgeholt marker.
-  // We need both holder and recipient names to render the full new
-  // text; the recipient name is always frozen on the Package, but
-  // the holder name only exists on the loaded Resident record. If
-  // the holder lookup failed (e.g. the holder de-registered between
-  // Slice 1's write and the recipient tapping), skip the edit —
-  // the keyboard is already stripped, so the user-facing effect is
-  // just that the original ack stays visible without the ✅ marker.
-  // That's better than rendering an edit with a missing name.
-  if (result.holder) {
-    try {
-      await deps.editGroupCard(
-        cb.chatId,
-        cb.messageId,
-        buildGroupAckPickedUpText({
-          holder: {
-            name: result.holder.name,
-            houseNumber: result.holder.houseNumber,
-          },
-          recipient: {
-            name: result.recipient?.name ?? result.package.recipientName,
-            houseNumber:
-              result.recipient?.houseNumber ??
-              result.package.recipientHouseNumber,
-          },
-        }),
-      );
-    } catch (err) {
-      console.error(
-        "[confirm_pickup] editGroupCard failed for chatId",
-        cb.chatId,
-        "messageId",
-        cb.messageId,
-        "error:",
-        err instanceof Error
-          ? { name: err.name, message: err.message, stack: err.stack }
-          : err,
-      );
-    }
-  }
 
   // DM the holder thanks (when we can resolve a chat id for them).
   // The holder's `platformId` equals their Telegram user id, which
