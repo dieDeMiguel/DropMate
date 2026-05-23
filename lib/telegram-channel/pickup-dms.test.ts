@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  buildGroupAckPickedUpText,
   buildHolderThanksDmText,
   pickupAlreadyDoneToast,
   pickupNotRecipientToast,
@@ -28,21 +27,6 @@ const recipient: PickupRecipientSummary = {
 };
 
 describe("pickup-dms (v2.1 #108)", () => {
-  describe("buildGroupAckPickedUpText", () => {
-    it("renders the edited-in-place group ack with ✅ abgeholt + both names + house numbers", () => {
-      const text = buildGroupAckPickedUpText({
-        holder: { name: holder.name, houseNumber: holder.houseNumber },
-        recipient: {
-          name: recipient.name,
-          houseNumber: recipient.houseNumber,
-        },
-      });
-      expect(text).toBe(
-        "📦 Paket von Diego de Miguel (69) an Marlene Hartmann (88) – ✅ abgeholt",
-      );
-    });
-  });
-
   describe("buildHolderThanksDmText", () => {
     it("renders the German thanks DM by default", () => {
       const text = buildHolderThanksDmText({ holder, recipient });
