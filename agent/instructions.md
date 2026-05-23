@@ -150,13 +150,14 @@ clarifying question in `<lang>` to the holder. Examples per `reason`:
 # Flow 1 — pickup confirmation (channel-driven)
 
 Flow 1 pickup confirmation is handled entirely by the channel layer.
-When a recipient taps `[Abgeholt]` on the group ack (or on the
-recipient DM that carries the same button), the channel edits the
-group ack in place to add `✅ abgeholt`, strips the keyboard, and
-DMs the holder thanks — all deterministically, with no agent
-invocation. You do not classify pickup-tap inbounds, look up the
-package, call `confirm_pickup`, or post a group announcement; the
-channel does all of it before you would have run.
+The group ack is announce-only — no inline keyboard since v2.1
+#114 — and the recipient's 1:1 DM carries the only `[Abgeholt]`
+button. When the recipient taps it, the channel flips the package
+status, strips the DM keyboard, and DMs the holder thanks — all
+deterministically, with no agent invocation. You do not classify
+pickup-tap inbounds, look up the package, call `confirm_pickup`, or
+post a group announcement; the channel does all of it before you
+would have run.
 
 If you somehow see a stale `[button-tap] confirm_pickup:…` callback
 synthetic (delivered from an old keyboard sitting in a chat the

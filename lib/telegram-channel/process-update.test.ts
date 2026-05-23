@@ -1851,9 +1851,10 @@ describe("processInboundTelegramUpdate — callback_query", () => {
     // The pre-#108 surface ack'd + strip'd the keyboard, then synthesised a
     // `[button-tap]` message into the agent (sendToAsh). After v2.1 #108
     // the channel handles the tap end-to-end: `confirmPickup` flips the
-    // status, the orchestrator edits the group ack in place + DMs the
-    // holder thanks. `sendToAsh` is NEVER called on this path — that is
-    // the structural invariant these cases pin.
+    // status, the orchestrator DMs the holder thanks + strips the
+    // recipient DM keyboard. `sendToAsh` is NEVER called on this path —
+    // that is the structural invariant these cases pin. v2.1 #114
+    // additionally pins that the group-ack edit no longer fires.
 
     it("flips status, strips the recipient DM keyboard, and DMs the holder thanks on the happy path — v2.1 #114: no editGroupCard call", async () => {
       const {

@@ -48,8 +48,8 @@ export interface PickupHolderSummary {
 
 /**
  * Summary of the recipient surfaced by `confirmPickup` so the
- * channel can render the edited group-ack text (which names both
- * holder and recipient by name + house number).
+ * channel can name them in the holder thanks DM. Mirrors
+ * `PickupHolderSummary` above.
  */
 export interface PickupRecipientSummary {
   readonly id: string;

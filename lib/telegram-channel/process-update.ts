@@ -875,9 +875,12 @@ async function handleCallbackQuery(
 
   // v2.1 #108 (Slice 4 of #105): channel-deterministic pickup tap.
   // The `[Abgeholt]` callback is handled here end-to-end (status flip
-  // via `confirmPickup`, edit the group ack in place, DM the holder)
-  // and `sendToAsh` is NEVER called on this path. Mirrors the
-  // volunteer-accept callback architecture (#96) one-for-one.
+  // via `confirmPickup`, DM the holder, strip the recipient DM
+  // keyboard) and `sendToAsh` is NEVER called on this path. Mirrors
+  // the volunteer-accept callback architecture (#96) one-for-one.
+  // v2.1 #114 (Slice 1 of #113) dropped the group-ack edit step —
+  // the group ack is announce-only and the only tap surface left is
+  // the recipient's 1:1 DM.
   //
   // The pre-#108 path was: gate-on-recipient-scope + ack + strip +
   // hand the agent a `[button-tap] confirm_pickup` synthetic. The
@@ -1720,17 +1723,11 @@ async function routeDmTextThroughClassifier(
  *                                a confirmation DM to the caller +
  *                                the holder thanks DM (same template
  *                                pickup-dms.ts uses for the button-tap
- *                                path). The group ack edit-in-place
- *                                step that the button-tap path does
- *                                requires the group-ack message id,
- *                                which Slice 1 (#106) doesn't persist
- *                                on the Package record — so the
- *                                DM-text path omits it. The recipient
- *                                still closes the package canonically;
- *                                only the group's view of the ack stays
- *                                un-marked. A future iteration that
- *                                persists `groupAckMessageId` on
- *                                Package can wire the edit here too.
+ *                                path). v2.1 #114 dropped the
+ *                                group-ack edit on both surfaces —
+ *                                the group ack is announce-only and
+ *                                the close-the-loop signal lives on
+ *                                the DM side.
  *   - PICKUP_ALREADY_DONE     → DM "already picked up" + handled.
  *   - Other throw / lookup    → DM retry prompt + handled. We don't
  *     hiccup                     fall through, because the agent on
@@ -1845,8 +1842,8 @@ async function routeDmTextPickupConfirmation(
   }
 
   // Happy path: status flipped. Send a confirmation DM to the caller
-  // + the holder thanks DM. The group-ack edit step that the
-  // button-tap path does is omitted here — see docstring.
+  // + the holder thanks DM. Group ack stays untouched on both
+  // surfaces since v2.1 #114.
   try {
     emitTrace("dm", "start", { kind: "flow1-pickup-confirm" });
     await deps.sendDirectMessage(

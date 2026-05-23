@@ -3,14 +3,17 @@
  * surface.
  *
  * v2.1 #108 (Slice 4 of #105): when the recipient taps `[Abgeholt]`
- * on the group ack posted by Slice 1 (#106) — or on the recipient
- * DM that also carries the keyboard — the channel writes the
- * group-ack edit + the holder thanks DM itself instead of handing
- * the agent a `[button-tap] …` synthetic and letting the model
- * compose them. Same shape pattern that closed Flow 2's text-leak
- * surface (#96 Part A, #100): the model never runs on the happy
- * path, so it cannot fire a welcome wall, paraphrase the card text,
- * or name deleted tools.
+ * on the recipient DM, the channel writes the holder thanks DM
+ * itself instead of handing the agent a `[button-tap] …` synthetic
+ * and letting the model compose it. Same shape pattern that closed
+ * Flow 2's text-leak surface (#96 Part A, #100): the model never
+ * runs on the happy path, so it cannot fire a welcome wall,
+ * paraphrase the card text, or name deleted tools.
+ *
+ * v2.1 #114 (Slice 1 of #113) narrowed the surface further: the
+ * group ack is announce-only (no keyboard, no edit on pickup), so
+ * the only tap surface is the recipient's 1:1 DM. Pickup is private
+ * business between the recipient and the bot.
  *
  * Localised to de/en/es/tr — same set as `flow-2-dms.ts`,
  * `volunteer-accept-dms.ts`, and `flow-1-dms.ts::HOLDER_NOT_REGISTERED_NUDGES`.
@@ -40,25 +43,6 @@ function pickLanguage(raw: string | null | undefined): SupportedLanguage {
     return raw as SupportedLanguage;
   }
   return "de";
-}
-
-/**
- * Compose the edited-in-place group ack body. Replaces the
- * `📦 Paket von … an …` line posted by Slice 1 with the same
- * structure plus a trailing `– ✅ abgeholt` marker so the group can
- * see the package is closed without reading a new message.
- *
- * Falls back to the names frozen on the Package record (passed via
- * the caller) when the resident lookups returned null — that
- * preserves group narration even if the holder or recipient
- * de-registered between Slice 1's post and the recipient tapping.
- */
-export function buildGroupAckPickedUpText(args: {
-  readonly holder: { readonly name: string; readonly houseNumber: string };
-  readonly recipient: { readonly name: string; readonly houseNumber: string };
-}): string {
-  const { holder, recipient } = args;
-  return `📦 Paket von ${holder.name} (${holder.houseNumber}) an ${recipient.name} (${recipient.houseNumber}) – ✅ abgeholt`;
 }
 
 /**
