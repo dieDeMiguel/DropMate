@@ -63,3 +63,50 @@ Post-deploy:
   CHANNEL → FLOW 2 LIB → TELEGRAM light up while AGENT stays unlit.
 - Send a group photo (Flow 1); confirm CHANNEL → VISION → AGENT lights
   up.
+
+## Local-dev iteration (#104)
+
+The bot's webhook URL points at the production deploy, so a localhost
+`pnpm dev` session never sees real Telegram traffic — the diagram
+renders correctly but nothing ever ignites. Iterating on box layout,
+cable timing, or ignite/heartbeat tuning would otherwise require
+ngrok + repointing the Telegram webhook, or deploying every tweak to
+preview.
+
+To unblock that loop, the channel exposes a dev-only synthetic seed:
+
+```bash
+pnpm dev                         # in one terminal
+pnpm seed-diagram                # in another — lights every box once
+
+# Loop the seed 5 times, rotating text → photo → callback accents:
+pnpm seed-diagram --loop 5
+
+# Different host or port? Override the emit URL:
+EMIT_URL=http://127.0.0.1:3001/api/trace/dev/emit pnpm seed-diagram
+```
+
+What the script does:
+
+- POSTs synthetic events to `/api/trace/dev/emit` with a shared
+  `traceId` so the diagram groups them into one trace.
+- Walks the canonical sequence `channel → registration → classifier
+  → vision → flow2 (create + accept) → agent → dm` with a 600ms
+  hop delay matching the diagram's `MIN_HOP_MS`.
+
+Production guard: the route returns 404 when `NODE_ENV=production`.
+Smoke-check from any machine:
+
+```bash
+curl -X POST https://drop-mate-delta.vercel.app/api/trace/dev/emit \
+  -H 'content-type: application/json' \
+  -d '{"stage":"channel","phase":"start"}'
+# → 404 Not Found
+```
+
+Implementation:
+
+- `lib/telegram-channel/trace-dev-routes.ts` — handler + production
+  guard.
+- `lib/telegram-channel/factory.ts` — mounts the POST route.
+- `scripts/seed-diagram.sh` — the canonical seed sequence.

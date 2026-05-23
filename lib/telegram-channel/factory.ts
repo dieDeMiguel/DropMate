@@ -67,6 +67,7 @@ import {
   type TelegramChannelState,
 } from "./process-update.js";
 import { sendTelegramMessage } from "./send.js";
+import { handleTraceDevEmitRequest } from "./trace-dev-routes.js";
 import { handleTraceSseRequest } from "./trace-routes.js";
 import { setTelegramTriggerAttribute } from "./trigger-attribute.js";
 
@@ -127,6 +128,17 @@ export function telegramChannel(config: TelegramChannelConfig) {
       // booth-demo page (#102) renders each box accordingly.
       GET<TelegramChannelState>("/api/trace", async (req) =>
         handleTraceSseRequest(req),
+      ),
+
+      // Dev-only synthetic trace seed (#104). Lets `scripts/seed-diagram.sh`
+      // ignite every box in sequence without a real Telegram webhook —
+      // crucial for local-dev iteration on box layout + cable timing,
+      // because the bot's webhook URL only points at the production
+      // deploy. Returns 404 in production via a NODE_ENV check inside
+      // the handler (rather than conditional route registration, which
+      // would fork the factory shape).
+      POST<TelegramChannelState>("/api/trace/dev/emit", async (req) =>
+        handleTraceDevEmitRequest(req),
       ),
 
       // GET proxy for shipping-label photos. The Gateway server fetches
