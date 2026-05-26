@@ -509,6 +509,48 @@ describe("createEngine — synthetic trace stream", () => {
     const toolsBox = doc.getElementById("box-tools")!;
     expect(toolsBox.classList.contains("ignite")).toBe(true);
   });
+
+  it("schedule.fire.start lights ASH SCHEDULES (the seed script's #125 path)", async () => {
+    // scripts/seed-diagram.sh emits `schedule fire.start` so the
+    // ASH SCHEDULES box ignites during booth demos. Pre-fix the seed
+    // used a bare `fire` phase that fell through every engine branch
+    // → box stayed dark, defeating Slice 2's whole purpose. Pin the
+    // compound shape that DOES ignite.
+    const doc = makeDiagramDoc();
+    const engine = createEngine(doc);
+
+    engine.enqueue({
+      traceId: "tsched",
+      kind: "text",
+      stage: "schedule",
+      phase: "fire.start",
+      ts: 0,
+    });
+    await vi.advanceTimersByTimeAsync(250);
+
+    const schedulesBox = doc.getElementById("box-schedules")!;
+    expect(schedulesBox.classList.contains("ignite")).toBe(true);
+  });
+
+  it("redis.write.start lights UPSTASH REDIS (the seed script's #125 path)", async () => {
+    // Same shape as schedule above — the seed sends `redis
+    // write.start` / `write.end` so the bottom UPSTASH REDIS box
+    // lights up during the canonical sequence.
+    const doc = makeDiagramDoc();
+    const engine = createEngine(doc);
+
+    engine.enqueue({
+      traceId: "tredis",
+      kind: "text",
+      stage: "redis",
+      phase: "write.start",
+      ts: 0,
+    });
+    await vi.advanceTimersByTimeAsync(250);
+
+    const redisBox = doc.getElementById("box-redis")!;
+    expect(redisBox.classList.contains("ignite")).toBe(true);
+  });
 });
 
 /**
