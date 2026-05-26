@@ -108,7 +108,12 @@ import {
   PICKUP_NOT_RECIPIENT_ERROR_CODE,
   type ConfirmPickupResult,
 } from "../pickup.js";
-import type { Package, PackageCarrier, Resident } from "../redis.js";
+import type {
+  Package,
+  PackageCarrier,
+  ReceptionRequest,
+  Resident,
+} from "../redis.js";
 import { emitTrace } from "../trace.js";
 import {
   buildRegistrationConfirmationDm,
@@ -132,6 +137,7 @@ import {
   buildDmTextPickupMultiplePackagesText,
   buildDmTextPickupNoOpenPackagesText,
   buildDmTextPickupRetryText,
+  buildDmTextPickupWaitingOnVolunteerText,
   buildFlow1ClarificationSynthetic,
   buildGroupAckText,
   buildHolderConfirmationDmText,
@@ -486,6 +492,48 @@ export interface ProcessUpdateDeps {
   readonly listOpenPackagesForRecipient: (
     caller: Resident,
   ) => Promise<readonly Package[]>;
+  /**
+   * v2.1 #122: list `matched` ReceptionRequests on the caller's
+   * street where the caller is the requester (their package is on the
+   * way and a volunteer has already claimed it, but the volunteer
+   * hasn't reported the arrival yet). Used exclusively by the
+   * DM-text pickup-confirmation 0-match branch to upgrade the
+   * generic "no open packages" DM to a context-aware "waiting on
+   * volunteer" DM that names the volunteer.
+   *
+   * Returns matched-status RRs sorted most-recent-first (caller picks
+   * the first when there are several). Implemented in the factory via
+   * `listReceptionRequestsForStreet` + an in-memory filter on
+   * `requesterResidentId === caller.id` + `status === "matched"`.
+   * Same spike-scale tradeoff as `listOpenPackagesForRecipient` — a
+   * full street scan per query is fine; this only fires on the
+   * 0-package branch which is itself a rare path.
+   *
+   * Throws bubble up; the caller catches them and falls through to
+   * the existing "no open packages" DM (no regression on the pre-#122
+   * UX when the new lookup hiccups).
+   */
+  readonly listMatchedReceptionRequestsForRequester: (
+    caller: Resident,
+  ) => Promise<readonly ReceptionRequest[]>;
+  /**
+   * v2.1 #122: resolve a Resident by their stored platform id (the
+   * `Resident.id` / `Resident.platformId` string, NOT the numeric
+   * Telegram user id consumed by `getRegisteredResident`). Used by
+   * the DM-text pickup-confirmation "waiting on volunteer" branch
+   * to look up the matched RR's volunteer record so the DM can
+   * name them.
+   *
+   * Implemented in the factory via `lib/redis.ts::getResident`.
+   *
+   * Returning `null` on miss is normal — the channel falls back to
+   * the volunteer-name-free phrasing rather than throwing. Throws
+   * bubble up; the caller treats a thrown lookup as "unresolvable"
+   * and uses the same fallback.
+   */
+  readonly getResidentByPlatformId: (
+    platformId: string,
+  ) => Promise<Resident | null>;
   /**
    * Resolves a Telegram `user_id` to the full `Resident` record (or
    * `null` if unregistered). Consumed by the Flow 2 v2 channel path:
@@ -1710,8 +1758,15 @@ async function routeDmTextThroughClassifier(
  *
  *   - Unregistered caller     → fallthrough (agent will ask them to
  *                                /register).
- *   - 0 open packages         → DM "you have no open packages" +
- *                                handled (no agent).
+ *   - 0 open packages         → v2.1 #122: check for `matched`
+ *                                ReceptionRequests where the caller
+ *                                is the requester. If ≥1 match, DM
+ *                                "your package isn't here yet — X is
+ *                                collecting it for you" naming the
+ *                                volunteer (most-recent RR wins).
+ *                                Otherwise fall back to the pre-#122
+ *                                "you have no open packages" DM.
+ *                                Either way: handled (no agent).
  *   - 2+ open packages        → DM "tap [Abgeholt] in the per-package
  *                                DM above" + handled (v2.1 #115). DM
  *                                text alone can't disambiguate; the
@@ -1773,6 +1828,61 @@ async function routeDmTextPickupConfirmation(
   }
 
   if (open.length === 0) {
+    // v2.1 #122: before sending the generic "no open packages" DM,
+    // check whether the caller actually has a `matched` ReceptionRequest
+    // as requester. If yes, their package IS on the way — a volunteer
+    // has claimed but not yet reported. Send the context-aware
+    // "waiting on volunteer" DM (names the volunteer when resolvable)
+    // instead of the misleading "no open packages" copy.
+    //
+    // Either lookup throwing is non-fatal — fall through to the
+    // pre-#122 generic DM so the new branch can never regress the
+    // existing 0-match UX.
+    let matched: readonly ReceptionRequest[] = [];
+    try {
+      matched =
+        await deps.listMatchedReceptionRequestsForRequester(caller);
+    } catch (err) {
+      console.error(
+        "[flow1-pickup-dm] listMatchedReceptionRequestsForRequester failed for userId",
+        inbound.fromUserId,
+        "error:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+
+    if (matched.length > 0) {
+      // Most-recent-first ordering is the factory's contract; pick the
+      // first entry as the canonical "package the requester has in mind".
+      const req = matched[0]!;
+      let volunteerName: string | null = null;
+      if (req.volunteerResidentId) {
+        try {
+          const volunteer = await deps.getResidentByPlatformId(
+            req.volunteerResidentId,
+          );
+          volunteerName = volunteer?.name ?? null;
+        } catch (err) {
+          console.error(
+            "[flow1-pickup-dm] getResidentByPlatformId failed for volunteer",
+            req.volunteerResidentId,
+            "error:",
+            err instanceof Error ? err.message : err,
+          );
+        }
+      }
+      await deps
+        .sendDirectMessage(
+          inbound.chatId,
+          buildDmTextPickupWaitingOnVolunteerText({
+            volunteerName,
+            language,
+          }),
+        )
+        .catch(() => undefined);
+      return { kind: "handled" };
+    }
+
     await deps
       .sendDirectMessage(
         inbound.chatId,

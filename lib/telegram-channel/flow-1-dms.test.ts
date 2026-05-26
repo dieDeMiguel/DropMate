@@ -6,6 +6,7 @@ import {
   buildDmTextPickupMultiplePackagesText,
   buildDmTextPickupNoOpenPackagesText,
   buildDmTextPickupRetryText,
+  buildDmTextPickupWaitingOnVolunteerText,
   buildFlow1ClarificationSynthetic,
   buildGroupAckText,
   buildHolderConfirmationDmText,
@@ -246,6 +247,84 @@ describe("flow-1-dms", () => {
     it("returns English for 'en'", () => {
       expect(buildDmTextPickupRetryText("en")).toBe(
         "Something went wrong. Please try again in a moment.",
+      );
+    });
+  });
+
+  // v2.1 #122: defensive "waiting on volunteer" DM the channel sends
+  // when the 0-match pickup branch fires but the caller has a matched
+  // ReceptionRequest as requester.
+  describe("buildDmTextPickupWaitingOnVolunteerText (v2.1 #122)", () => {
+    it("renders the German variant naming the volunteer by default", () => {
+      expect(
+        buildDmTextPickupWaitingOnVolunteerText({
+          volunteerName: "Melanie Torena",
+          language: null,
+        }),
+      ).toBe(
+        "Dein Paket ist noch nicht da – Melanie Torena nimmt es für dich an. Ich melde mich, sobald sie es übergibt.",
+      );
+    });
+    it("renders English for 'en'", () => {
+      expect(
+        buildDmTextPickupWaitingOnVolunteerText({
+          volunteerName: "Melanie Torena",
+          language: "en",
+        }),
+      ).toBe(
+        "Your package isn't here yet — Melanie Torena is collecting it for you. I'll DM you the moment they hand it over.",
+      );
+    });
+    it("renders Spanish for 'es'", () => {
+      expect(
+        buildDmTextPickupWaitingOnVolunteerText({
+          volunteerName: "Melanie Torena",
+          language: "es",
+        }),
+      ).toBe(
+        "Tu paquete aún no ha llegado — Melanie Torena lo está recogiendo para ti. Te aviso en cuanto te lo entregue.",
+      );
+    });
+    it("renders Turkish for 'tr'", () => {
+      expect(
+        buildDmTextPickupWaitingOnVolunteerText({
+          volunteerName: "Melanie Torena",
+          language: "tr",
+        }),
+      ).toBe(
+        "Paketin henüz gelmedi — Melanie Torena onu senin için alıyor. Sana teslim eder etmez yazarım.",
+      );
+    });
+    it("falls back to German for unsupported languages", () => {
+      expect(
+        buildDmTextPickupWaitingOnVolunteerText({
+          volunteerName: "Melanie Torena",
+          language: "ja",
+        }),
+      ).toBe(
+        "Dein Paket ist noch nicht da – Melanie Torena nimmt es für dich an. Ich melde mich, sobald sie es übergibt.",
+      );
+    });
+    it("falls back to the volunteer-name-free phrasing when the volunteer name is null", () => {
+      expect(
+        buildDmTextPickupWaitingOnVolunteerText({
+          volunteerName: null,
+          language: "en",
+        }),
+      ).toBe(
+        "Your package isn't here yet — a neighbour is collecting it for you. I'll DM you the moment they hand it over.",
+      );
+    });
+    it("falls back to the volunteer-name-free phrasing when the volunteer name is whitespace", () => {
+      // Defends against `getResident().name` returning an empty / whitespace
+      // string — render the generic phrasing rather than a broken sentence.
+      expect(
+        buildDmTextPickupWaitingOnVolunteerText({
+          volunteerName: "   ",
+          language: "de",
+        }),
+      ).toBe(
+        "Dein Paket ist noch nicht da – ein:e Nachbar:in nimmt es für dich an. Ich melde mich, sobald es übergeben wird.",
       );
     });
   });

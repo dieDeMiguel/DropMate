@@ -243,6 +243,52 @@ export function buildDmTextPickupRetryText(
 }
 
 /**
+ * v2.1 #122: defensive copy for the 0-match branch when the caller
+ * actually has a `matched` ReceptionRequest as requester — there is
+ * no held Package for them yet because the volunteer hasn't reported
+ * the arrival. The pre-#122 copy ("you have no open packages") was
+ * confusing in this scenario; the bot has the context to say
+ * something useful instead. Names the volunteer; no keyboard, no
+ * state change — pure informational DM.
+ *
+ * Falls back to a volunteer-name-free phrasing when the volunteer
+ * record is unresolvable (e.g. `getResident` returned null mid-race).
+ */
+const DM_TEXT_PICKUP_WAITING_ON_VOLUNTEER: Readonly<
+  Record<SupportedLanguage, (volunteerName: string) => string>
+> = {
+  de: (volunteerName) =>
+    `Dein Paket ist noch nicht da – ${volunteerName} nimmt es für dich an. Ich melde mich, sobald sie es übergibt.`,
+  en: (volunteerName) =>
+    `Your package isn't here yet — ${volunteerName} is collecting it for you. I'll DM you the moment they hand it over.`,
+  es: (volunteerName) =>
+    `Tu paquete aún no ha llegado — ${volunteerName} lo está recogiendo para ti. Te aviso en cuanto te lo entregue.`,
+  tr: (volunteerName) =>
+    `Paketin henüz gelmedi — ${volunteerName} onu senin için alıyor. Sana teslim eder etmez yazarım.`,
+};
+
+const DM_TEXT_PICKUP_WAITING_ON_VOLUNTEER_GENERIC: Readonly<
+  Record<SupportedLanguage, string>
+> = {
+  de: "Dein Paket ist noch nicht da – ein:e Nachbar:in nimmt es für dich an. Ich melde mich, sobald es übergeben wird.",
+  en: "Your package isn't here yet — a neighbour is collecting it for you. I'll DM you the moment they hand it over.",
+  es: "Tu paquete aún no ha llegado — un/a vecino/a lo está recogiendo para ti. Te aviso en cuanto te lo entreguen.",
+  tr: "Paketin henüz gelmedi — bir komşun onu senin için alıyor. Sana teslim edilir edilmez yazarım.",
+};
+
+export function buildDmTextPickupWaitingOnVolunteerText(args: {
+  readonly volunteerName: string | null | undefined;
+  readonly language: string | null | undefined;
+}): string {
+  const language = pickLanguage(args.language);
+  const trimmed = args.volunteerName?.trim();
+  if (!trimmed) {
+    return DM_TEXT_PICKUP_WAITING_ON_VOLUNTEER_GENERIC[language];
+  }
+  return DM_TEXT_PICKUP_WAITING_ON_VOLUNTEER[language](trimmed);
+}
+
+/**
  * v2.1 #109 (Slice 3 of #105): localised group question the channel
  * posts when a Flow 1 inbound's recipient name doesn't resolve to any
  * known street identity (`recipientResolution.kind === "unknown"`). The
