@@ -22,7 +22,13 @@
  */
 
 // @ts-expect-error — JS module, no .d.ts; vitest resolves it at runtime.
-import { createEngine, STAGE_PLAN, formatLogLine } from "../public/diagram.js";
+import {
+  createEngine,
+  STAGE_PLAN,
+  formatLogLine,
+  createSseConnector,
+// @ts-expect-error — JS module, no .d.ts; vitest resolves it at runtime.
+} from "../public/diagram.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 interface StubElement {
@@ -502,5 +508,242 @@ describe("createEngine — synthetic trace stream", () => {
 
     const toolsBox = doc.getElementById("box-tools")!;
     expect(toolsBox.classList.contains("ignite")).toBe(true);
+  });
+});
+
+/**
+ * SSE connector — manual exponential-backoff reconnect (#126).
+ *
+ * EventSource's built-in reconnect handles network blips but cannot
+ * recover once it transitions to readyState=CLOSED (Vercel function
+ * timeout, server explicit `controller.close()`, prolonged offline).
+ * The diagram tab was going dark in production after sitting idle —
+ * the connector re-instantiates the EventSource itself, with backoff.
+ *
+ * Tests inject a fake EventSource that captures listeners + lets us
+ * fire synthetic open/message/error/heartbeat events, plus a manual
+ * scheduleReconnect we drain ourselves. No fake timers needed.
+ */
+describe("createSseConnector — auto-reconnect with exponential backoff", () => {
+  interface FakeEventSource {
+    url: string;
+    closed: boolean;
+    listeners: Map<string, Array<(e: any) => void>>;
+    fire(type: string, payload?: any): void;
+  }
+
+  function makeFakeEventSourceClass(instances: FakeEventSource[]) {
+    return class {
+      url: string;
+      closed = false;
+      listeners = new Map<string, Array<(e: any) => void>>();
+      constructor(url: string) {
+        this.url = url;
+        instances.push(this as unknown as FakeEventSource);
+      }
+      addEventListener(type: string, fn: (e: any) => void) {
+        const arr = this.listeners.get(type) ?? [];
+        arr.push(fn);
+        this.listeners.set(type, arr);
+      }
+      close() {
+        this.closed = true;
+      }
+      fire(type: string, payload?: any) {
+        const arr = this.listeners.get(type) ?? [];
+        for (const fn of arr) fn(payload ?? { type });
+      }
+    };
+  }
+
+  it("connects on construction and reports `live` after open", () => {
+    const instances: FakeEventSource[] = [];
+    const FakeES = makeFakeEventSourceClass(instances);
+    const statuses: string[] = [];
+    const connector = createSseConnector({
+      url: "/api/trace",
+      EventSource: FakeES,
+      onStatus: (s: string) => statuses.push(s),
+      onEvent: () => {},
+      scheduleReconnect: () => 0,
+    });
+    expect(instances).toHaveLength(1);
+    expect(instances[0]!.url).toBe("/api/trace");
+    expect(statuses).toEqual(["connecting"]);
+
+    instances[0]!.fire("open");
+    expect(statuses[statuses.length - 1]).toBe("live");
+
+    connector.close();
+  });
+
+  it("forwards `message` events to onEvent and resets backoff", () => {
+    const instances: FakeEventSource[] = [];
+    const FakeES = makeFakeEventSourceClass(instances);
+    const events: any[] = [];
+    let scheduled: Array<{ fn: () => void; delay: number }> = [];
+    const connector = createSseConnector({
+      url: "/api/trace",
+      EventSource: FakeES,
+      onStatus: () => {},
+      onEvent: (e: any) => events.push(e),
+      scheduleReconnect: (fn: () => void, delay: number) => {
+        scheduled.push({ fn, delay });
+        return scheduled.length - 1;
+      },
+    });
+
+    // Bump the backoff counter with two errors, then a successful
+    // message must wipe it before the NEXT error fires the 1s delay.
+    instances[0]!.fire("error");
+    scheduled[0]!.fn(); // run the queued reconnect → opens instance #1
+    instances[1]!.fire("error");
+    scheduled[1]!.fn(); // → opens instance #2
+    expect(connector._getAttempts()).toBe(2);
+
+    instances[2]!.fire("message", { data: '{"stage":"channel"}' });
+    expect(events).toHaveLength(1);
+    expect(connector._getAttempts()).toBe(0);
+
+    // Now the next error must enqueue with a 1s delay again, not 4s.
+    instances[2]!.fire("error");
+    expect(scheduled[scheduled.length - 1]!.delay).toBe(1000);
+
+    connector.close();
+  });
+
+  it("uses exponential backoff: 1s → 2s → 4s → 8s, cap 10s", () => {
+    const instances: FakeEventSource[] = [];
+    const FakeES = makeFakeEventSourceClass(instances);
+    const scheduled: Array<{ fn: () => void; delay: number }> = [];
+    const connector = createSseConnector({
+      url: "/api/trace",
+      EventSource: FakeES,
+      onStatus: () => {},
+      onEvent: () => {},
+      scheduleReconnect: (fn: () => void, delay: number) => {
+        scheduled.push({ fn, delay });
+        return scheduled.length - 1;
+      },
+    });
+
+    // Fire 6 consecutive errors (each one followed by running the
+    // queued reconnect so the next attempt has a real EventSource).
+    const expectedDelays = [1_000, 2_000, 4_000, 8_000, 10_000, 10_000];
+    for (let i = 0; i < expectedDelays.length; i++) {
+      instances[i]!.fire("error");
+      expect(scheduled[i]!.delay, `delay #${i}`).toBe(expectedDelays[i]);
+      scheduled[i]!.fn();
+    }
+
+    // 7 EventSource instances total: initial + 6 reconnects.
+    expect(instances).toHaveLength(7);
+
+    connector.close();
+  });
+
+  it("closes the old EventSource before re-instantiating on error", () => {
+    const instances: FakeEventSource[] = [];
+    const FakeES = makeFakeEventSourceClass(instances);
+    const scheduled: Array<{ fn: () => void; delay: number }> = [];
+    const connector = createSseConnector({
+      url: "/api/trace",
+      EventSource: FakeES,
+      onStatus: () => {},
+      onEvent: () => {},
+      scheduleReconnect: (fn: () => void, delay: number) => {
+        scheduled.push({ fn, delay });
+        return scheduled.length - 1;
+      },
+    });
+
+    instances[0]!.fire("error");
+    expect(instances[0]!.closed).toBe(true);
+    scheduled[0]!.fn();
+    expect(instances).toHaveLength(2);
+    expect(instances[1]!.closed).toBe(false);
+
+    connector.close();
+  });
+
+  it("treats `heartbeat` as a healthy-connection signal: status=live + backoff reset", () => {
+    const instances: FakeEventSource[] = [];
+    const FakeES = makeFakeEventSourceClass(instances);
+    const statuses: string[] = [];
+    const scheduled: Array<{ fn: () => void; delay: number }> = [];
+    const connector = createSseConnector({
+      url: "/api/trace",
+      EventSource: FakeES,
+      onStatus: (s: string) => statuses.push(s),
+      onEvent: () => {},
+      scheduleReconnect: (fn: () => void, delay: number) => {
+        scheduled.push({ fn, delay });
+        return scheduled.length - 1;
+      },
+    });
+
+    // Drive attempts up via two errors.
+    instances[0]!.fire("error");
+    scheduled[0]!.fn();
+    instances[1]!.fire("error");
+    scheduled[1]!.fn();
+    expect(connector._getAttempts()).toBe(2);
+
+    // Heartbeat arrives on instance #2 → flip back to live + reset.
+    instances[2]!.fire("heartbeat");
+    expect(statuses[statuses.length - 1]).toBe("live");
+    expect(connector._getAttempts()).toBe(0);
+
+    connector.close();
+  });
+
+  it("does NOT forward `heartbeat` to onEvent (server keep-alive only)", () => {
+    const instances: FakeEventSource[] = [];
+    const FakeES = makeFakeEventSourceClass(instances);
+    const events: any[] = [];
+    const connector = createSseConnector({
+      url: "/api/trace",
+      EventSource: FakeES,
+      onStatus: () => {},
+      onEvent: (e: any) => events.push(e),
+      scheduleReconnect: () => 0,
+    });
+
+    instances[0]!.fire("heartbeat", { data: "{}" });
+    expect(events).toHaveLength(0);
+
+    connector.close();
+  });
+
+  it("close() stops further reconnects + closes the active EventSource", () => {
+    const instances: FakeEventSource[] = [];
+    const FakeES = makeFakeEventSourceClass(instances);
+    const scheduled: Array<{ fn: () => void; delay: number }> = [];
+    let cancelled = false;
+    const connector = createSseConnector({
+      url: "/api/trace",
+      EventSource: FakeES,
+      onStatus: () => {},
+      onEvent: () => {},
+      scheduleReconnect: (fn: () => void, delay: number) => {
+        scheduled.push({ fn, delay });
+        return scheduled.length - 1;
+      },
+      cancelReconnect: () => {
+        cancelled = true;
+      },
+    });
+
+    instances[0]!.fire("error");
+    expect(scheduled).toHaveLength(1);
+
+    connector.close();
+    expect(cancelled).toBe(true);
+
+    // Running the queued reconnect AFTER close must be a no-op —
+    // no new EventSource gets created.
+    scheduled[0]!.fn();
+    expect(instances).toHaveLength(1);
+    expect(instances[0]!.closed).toBe(true);
   });
 });

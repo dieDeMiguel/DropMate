@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { emitTrace, runWithTrace } from "../trace.js";
 
@@ -50,6 +50,47 @@ describe("handleTraceSseRequest", () => {
     // doesn't leak listeners across tests.
     controller.abort();
     await reader.cancel().catch(() => undefined);
+  });
+
+  it("emits a named `heartbeat` event every 25s to keep the socket warm (#126)", async () => {
+    // Per #126: the keep-alive must be a NAMED SSE event (visible in
+    // DevTools) rather than a `:` comment (invisible). The client
+    // ignores it (no `heartbeat` listener), but the operator can
+    // confirm the connection is healthy on production from DevTools
+    // alone.
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const req = new Request("http://localhost/api/trace", {
+        signal: controller.signal,
+      });
+      const res = handleTraceSseRequest(req);
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+
+      // Drain the initial `: connected` chunk so the heartbeat timer is armed.
+      const initial = await reader.read();
+      expect(decoder.decode(initial.value)).toContain(": connected");
+
+      // Advance the clock past one heartbeat interval (25s + slack).
+      await vi.advanceTimersByTimeAsync(26_000);
+
+      const next = await reader.read();
+      expect(next.done).toBe(false);
+      const chunk = decoder.decode(next.value);
+      // Named event with empty JSON payload, terminated by the
+      // SSE-required blank line.
+      expect(chunk).toContain("event: heartbeat\n");
+      expect(chunk).toContain("data: {}\n");
+      // Regression pin: the legacy `: ping` comment shape must not
+      // come back — DevTools wouldn't render it as an event.
+      expect(chunk).not.toContain(": ping");
+
+      controller.abort();
+      await reader.cancel().catch(() => undefined);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("unsubscribes from the bus when the client aborts", async () => {

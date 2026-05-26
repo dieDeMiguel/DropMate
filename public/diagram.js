@@ -340,6 +340,117 @@ export function formatLogLine(event, now) {
   return ts + " " + event.stage + "." + event.phase + " trace=" + traceShort + " " + (event.kind || "text") + extras;
 }
 
+/**
+ * SSE connector with manual exponential-backoff reconnect (#126).
+ *
+ * EventSource's built-in reconnect handles transient network blips, but
+ * Vercel's edge can outright `close()` a streaming response (function
+ * timeout, server restart, idle-tab throttling). Once the browser flips
+ * to readyState=CLOSED we never recover — leaving the diagram tab dark
+ * on the next live event.
+ *
+ * The fix: on every error we close the current source ourselves and
+ * re-instantiate after a backoff delay (1s → 2s → 4s → 8s, cap 10s).
+ * Each successful `message` or `heartbeat` resets the backoff counter,
+ * so a stable session always retries from 1s on the next dropout.
+ *
+ * Exported for tests, which inject a fake `EventSource` constructor +
+ * a synchronous `scheduleReconnect` to drive the state machine without
+ * real timers.
+ */
+export function createSseConnector(options) {
+  const {
+    url,
+    onEvent,
+    onStatus,
+    EventSource: ES,
+    scheduleReconnect = (fn, delay) => setTimeout(fn, delay),
+    cancelReconnect = (handle) => clearTimeout(handle),
+  } = options;
+
+  let attempts = 0;
+  let closed = false;
+  let source = null;
+  let reconnectHandle = null;
+
+  function resetBackoff() {
+    attempts = 0;
+  }
+
+  function nextDelay() {
+    // 2^attempts seconds, clamped at 10s. attempts=0 → 1s, =1 → 2s,
+    // =2 → 4s, =3 → 8s, ≥4 → 10s.
+    const raw = 1000 * Math.pow(2, attempts);
+    return Math.min(10_000, raw);
+  }
+
+  function connect() {
+    if (closed) return;
+    if (typeof onStatus === "function") {
+      onStatus(attempts === 0 ? "connecting" : "reconnecting");
+    }
+    const src = new ES(url);
+    source = src;
+
+    src.addEventListener("open", () => {
+      if (closed) return;
+      if (typeof onStatus === "function") onStatus("live");
+    });
+
+    src.addEventListener("message", (e) => {
+      if (closed) return;
+      // Any message-bearing event proves the connection is healthy.
+      // Reset backoff so the NEXT dropout retries from 1s.
+      resetBackoff();
+      if (typeof onEvent === "function") onEvent(e);
+    });
+
+    src.addEventListener("heartbeat", () => {
+      if (closed) return;
+      // Server-side keep-alive (#126). The browser may not have fired
+      // `open` if the connection was reconnecting in the background,
+      // so flip status to live on first heartbeat too.
+      resetBackoff();
+      if (typeof onStatus === "function") onStatus("live");
+    });
+
+    src.addEventListener("error", () => {
+      if (closed) return;
+      try {
+        src.close();
+      } catch {
+        /* already closed */
+      }
+      const delay = nextDelay();
+      attempts++;
+      if (typeof onStatus === "function") onStatus("reconnecting");
+      reconnectHandle = scheduleReconnect(connect, delay);
+    });
+  }
+
+  connect();
+
+  return {
+    close() {
+      closed = true;
+      if (reconnectHandle !== null) {
+        cancelReconnect(reconnectHandle);
+        reconnectHandle = null;
+      }
+      if (source) {
+        try {
+          source.close();
+        } catch {
+          /* already closed */
+        }
+      }
+    },
+    // Test-only seams.
+    _getAttempts: () => attempts,
+    _getSource: () => source,
+  };
+}
+
 // Browser boot. Skipped under jsdom-with-no-EventSource (test env).
 if (typeof window !== "undefined" && typeof EventSource !== "undefined") {
   const engine = createEngine(document);
@@ -368,24 +479,30 @@ if (typeof window !== "undefined" && typeof EventSource !== "undefined") {
     logBody.scrollTop = logBody.scrollHeight;
   }
 
-  const source = new EventSource("/api/trace");
-  source.addEventListener("open", () => {
-    if (statusEl) {
+  function applyStatus(state) {
+    if (!statusEl) return;
+    if (state === "live") {
       statusEl.textContent = "live";
       statusEl.classList.add("connected");
-    }
-  });
-  source.addEventListener("error", () => {
-    if (statusEl) {
+    } else if (state === "reconnecting") {
       statusEl.textContent = "reconnecting…";
       statusEl.classList.remove("connected");
+    } else {
+      statusEl.textContent = "connecting…";
+      statusEl.classList.remove("connected");
     }
-  });
-  source.addEventListener("message", (e) => {
-    let event;
-    try { event = JSON.parse(e.data); } catch { return; }
-    if (!event || typeof event.stage !== "string") return;
-    appendLog(event);
-    engine.enqueue(event);
+  }
+
+  createSseConnector({
+    url: "/api/trace",
+    EventSource,
+    onStatus: applyStatus,
+    onEvent: (e) => {
+      let event;
+      try { event = JSON.parse(e.data); } catch { return; }
+      if (!event || typeof event.stage !== "string") return;
+      appendLog(event);
+      engine.enqueue(event);
+    },
   });
 }

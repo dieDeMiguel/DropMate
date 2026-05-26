@@ -47,11 +47,18 @@ export function handleTraceSseRequest(req: Request): Response {
       });
 
       // Heartbeat every 25s so intermediaries (Vercel, browsers) don't
-      // idle-close the stream before the function's 300s ceiling. SSE
-      // comments are spec-blessed keep-alives.
+      // idle-close the stream before the function's 300s ceiling.
+      //
+      // Per #126: emit as a NAMED event (`event: heartbeat\ndata: {}`)
+      // rather than an SSE comment. Named events are visible in browser
+      // DevTools, so an operator can confirm the keep-alive is firing
+      // without server-log access. The client doesn't register a
+      // `heartbeat` listener, so the engine ignores the payload — the
+      // event exists purely to keep the socket warm + reset the
+      // client's reconnect backoff on receipt.
       const heartbeat = setInterval(() => {
         try {
-          controller.enqueue(encoder.encode(": ping\n\n"));
+          controller.enqueue(encoder.encode("event: heartbeat\ndata: {}\n\n"));
         } catch {
           clearInterval(heartbeat);
         }
