@@ -1,5 +1,5 @@
 /**
- * Dev-only synthetic trace seed (#104).
+ * Dev-only synthetic trace seed (#104, extended in #125 for prod demo use).
  *
  * `POST /api/trace/dev/emit` lets the booth-demo diagram light up
  * without real Telegram traffic. In `pnpm dev`, the bot's webhook
@@ -10,12 +10,25 @@
  * real webhook uses, so the diagram (which subscribes via
  * `/api/trace`) renders it identically to a production event.
  *
- * Production guard: returns 404 when `process.env.NODE_ENV` is
- * `"production"`. The route stays mounted unconditionally so the
- * factory shape doesn't fork on NODE_ENV; the handler short-circuits
- * instead. Deployments that don't set NODE_ENV (custom hosts, Docker)
- * default to permissive — the assumption is that anything serving
- * traffic publicly should set `NODE_ENV=production`.
+ * Production access is gated by an `X-Demo-Token` header (#125). When
+ * `NODE_ENV === "production"`:
+ *
+ *   - If `DEMO_TRACE_TOKEN` env var is unset → 404 (we can't authenticate
+ *     so we can't allow the call; treat the endpoint as nonexistent).
+ *   - If the `X-Demo-Token` header is missing or doesn't match → 404.
+ *   - If it matches → proceed exactly as the dev path does.
+ *
+ * The 404 response is a plain `"Not Found"` body — byte-identical for
+ * the prod-no-token path and the prod-wrong-token path — so an
+ * outsider probing the URL can't tell whether an authenticated
+ * endpoint exists. Schedules `defineSchedule` and other primitives
+ * never expose existence either, so the diagram demo endpoint
+ * shouldn't be the exception.
+ *
+ * Outside production (NODE_ENV unset, "development", "test", Docker
+ * builds without an explicit env), the endpoint stays permissive —
+ * no token required — so the local `pnpm seed-diagram` flow keeps
+ * working as it did pre-#125.
  *
  * Request body shape:
  *
@@ -32,11 +45,21 @@
  * scope per request is fine: a typical seed run fires events serially
  * and the diagram already groups inbound events by `traceId`.
  *
- * @see scripts/seed-diagram.sh — the canonical seed sequence
+ * Blast radius if `DEMO_TRACE_TOKEN` leaks: an attacker can pollute
+ * the booth-demo diagram's visible trace log for the duration of
+ * their session. No Redis writes, no Telegram sends, no Package or
+ * ReceptionRequest mutations — the endpoint's only side-effect is
+ * `getBus().emit("trace", …)`. Recoverable by a page reload.
+ *
+ * @see scripts/seed-diagram.sh — the canonical seed sequence (sends header)
+ * @see docs/booth-demo.md — operator docs for `DEMO_TRACE_TOKEN`
  * @see lib/telegram-channel/trace-routes.ts — the SSE consumer side
  */
 
 import { emitTrace, runWithTrace, type TraceKind } from "../trace.js";
+
+const DEMO_TOKEN_HEADER = "x-demo-token";
+const NOT_FOUND_BODY = "Not Found";
 
 const VALID_KINDS: ReadonlyArray<TraceKind> = ["text", "photo", "callback"];
 
@@ -49,7 +72,8 @@ interface DevEmitBody {
 }
 
 /**
- * Handle a dev-emit POST. Returns 404 in production, 400 on malformed
+ * Handle a dev-emit POST. In production: 404 unless `X-Demo-Token`
+ * matches `DEMO_TRACE_TOKEN`. Outside production: 400 on malformed
  * input, 204 on success. The body is intentionally permissive: any
  * `stage` / `phase` string is accepted, including ones the diagram
  * has no matching box for (the diagram silently drops unknown stages,
@@ -58,8 +82,8 @@ interface DevEmitBody {
 export async function handleTraceDevEmitRequest(
   req: Request,
 ): Promise<Response> {
-  if (process.env.NODE_ENV === "production") {
-    return new Response("Not Found", { status: 404 });
+  if (process.env.NODE_ENV === "production" && !isAuthorizedForProd(req)) {
+    return notFound();
   }
 
   let body: unknown;
@@ -112,4 +136,41 @@ function jsonError(status: number, message: string): Response {
     status,
     headers: { "content-type": "application/json; charset=utf-8" },
   });
+}
+
+function notFound(): Response {
+  return new Response(NOT_FOUND_BODY, { status: 404 });
+}
+
+/**
+ * Compare two strings in constant time so a probe can't infer the
+ * configured token byte-by-byte from response timing. The blast
+ * radius here is small (trace-bus pollution, not data exfil), but
+ * a constant-time check is cheap and idiomatic.
+ *
+ * Returns false immediately on length mismatch — that's not a timing
+ * leak because the length of `DEMO_TRACE_TOKEN` isn't a secret worth
+ * protecting (any reasonable token is the same length across calls).
+ */
+function constantTimeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+function isAuthorizedForProd(req: Request): boolean {
+  const configured = process.env.DEMO_TRACE_TOKEN;
+  if (typeof configured !== "string" || configured.length === 0) {
+    // No token configured ⇒ no way to authenticate ⇒ treat as nonexistent.
+    // Surfacing a 500 ("misconfigured") would leak the route's existence.
+    return false;
+  }
+  const supplied = req.headers.get(DEMO_TOKEN_HEADER);
+  if (typeof supplied !== "string" || supplied.length === 0) {
+    return false;
+  }
+  return constantTimeEqual(supplied, configured);
 }

@@ -117,22 +117,74 @@ What the script does:
 - POSTs synthetic events to `/api/trace/dev/emit` with a shared
   `traceId` so the diagram groups them into one trace.
 - Walks the canonical sequence `channel → registration → classifier
-  → vision → flow2 (create + accept) → agent → dm` with a 600ms
-  hop delay matching the diagram's `MIN_HOP_MS`.
+  → vision → flow2 (create + accept) → agent → redis → schedule →
+  dm`, lighting every actor box on the v2.1 #124 layout (including
+  `ASH SCHEDULES` and `UPSTASH REDIS`) with a 600ms hop delay
+  matching the diagram's `MIN_HOP_MS`.
 
-Production guard: the route returns 404 when `NODE_ENV=production`.
-Smoke-check from any machine:
+Local dev (`NODE_ENV` unset or `development`) is permissive — no
+token required.
+
+## Production demo seeding (#125 — Slice 2 of #123)
+
+Sales-engineering demos hit production directly. The `4h / 48h / 3d
+/ 7d` schedules fire too rarely to be observable in a ~10-minute
+pitch, so without a way to trigger synthetic events on prod the
+`ASH SCHEDULES` box never lights up during a demo. The same dev-emit
+endpoint accepts authenticated production traffic when a demo token
+is configured.
+
+### `DEMO_TRACE_TOKEN`
+
+- **What it is:** a random shared secret. The `/api/trace/dev/emit`
+  endpoint accepts a POST in production iff the request includes an
+  `X-Demo-Token` header whose value matches `DEMO_TRACE_TOKEN`. Any
+  other request (missing header, wrong header, or unset env var)
+  receives a plain `404 Not Found` — byte-identical to a missing
+  route, so an outsider can't tell whether an authenticated endpoint
+  lives at this path.
+- **Where to set it:** Vercel project env (Project → Settings →
+  Environment Variables → Production). Keep it out of the repo; the
+  `.env`/`vercel env pull` flow is the operator's tool of choice.
+- **Blast radius if it leaks:** the only side effect of a successful
+  call is publishing trace events on the in-process bus that the SSE
+  feed (`/api/trace`) drains. No Redis writes, no Telegram sends,
+  no Package or ReceptionRequest mutations. The worst an attacker
+  can do is pollute the booth-demo diagram's visible log for the
+  duration of their session. Rotate the token periodically; a single
+  page reload recovers from any contamination.
+
+### Usage from a laptop
 
 ```bash
-curl -X POST https://drop-mate-delta.vercel.app/api/trace/dev/emit \
-  -H 'content-type: application/json' \
-  -d '{"stage":"channel","phase":"start"}'
-# → 404 Not Found
+DEMO_TRACE_TOKEN=… \
+EMIT_URL=https://drop-mate-delta.vercel.app/api/trace/dev/emit \
+pnpm seed-diagram
 ```
 
-Implementation:
+Or pass the token explicitly via `--token`:
 
-- `lib/telegram-channel/trace-dev-routes.ts` — handler + production
-  guard.
+```bash
+EMIT_URL=https://drop-mate-delta.vercel.app/api/trace/dev/emit \
+pnpm seed-diagram --token "$(vercel env pull --yes && grep ^DEMO_TRACE_TOKEN .env.local | cut -d= -f2)"
+```
+
+### Smoke-check the production guard
+
+```bash
+# Wrong / missing token → 404 (byte-identical to a missing route).
+curl -i -X POST https://drop-mate-delta.vercel.app/api/trace/dev/emit \
+  -H 'content-type: application/json' \
+  -d '{"stage":"channel","phase":"start"}'
+# → HTTP/2 404
+# → Not Found
+```
+
+### Implementation
+
+- `lib/telegram-channel/trace-dev-routes.ts` — handler, production
+  guard, constant-time token check.
 - `lib/telegram-channel/factory.ts` — mounts the POST route.
-- `scripts/seed-diagram.sh` — the canonical seed sequence.
+- `scripts/seed-diagram.sh` — canonical seed sequence; accepts
+  `--token` and reads `DEMO_TRACE_TOKEN` from the environment;
+  attaches `X-Demo-Token` automatically when present.
