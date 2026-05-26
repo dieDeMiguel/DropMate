@@ -7,14 +7,19 @@
   <style>
     :root {
       --bg: #07070d;
-      --idle: #2a2a3a;
-      --idle-fill: rgba(42, 42, 58, 0.18);
+      /* #119 / #124: idle gray bumped from #2a2a3a (~1.4:1 vs --bg)
+         to #707090 (~4.3:1) so cables clear WCAG AA 1.4.11. */
+      --idle: #707090;
+      --idle-fill: rgba(112, 112, 144, 0.10);
       --text-accent: #00e5ff;
       --photo-accent: #ffb547;
       --callback-accent: #ff5cf2;
       --error-accent: #ff3860;
-      --label: #6a6a8a;
-      --label-bright: #d8d8ff;
+      /* #124: --label bumped from #6a6a8a (~3.96:1) to #8c8caa
+         (~5.6:1) so inside-box text clears AA 1.4.3 normal-text. */
+      --label: #8c8caa;
+      --label-bright: #e6e6ff;
+      --substrate: rgba(120, 120, 150, 0.30);
     }
     * { box-sizing: border-box; }
     html, body { margin: 0; padding: 0; background: var(--bg); color: #e6e6f0; font-family: ui-monospace, "SF Mono", Menlo, monospace; height: 100%; overflow: hidden; }
@@ -46,7 +51,7 @@
       letter-spacing: 0.32em;
       text-transform: uppercase;
       color: var(--label);
-      opacity: 0.7;
+      opacity: 0.85;
       padding-bottom: 0.45rem;
       margin-bottom: 0.45rem;
       border-bottom: 1px solid var(--idle);
@@ -90,13 +95,34 @@
     }
     @keyframes heartbeat {
       0%, 100% { stroke: var(--idle); filter: none; }
-      50% { stroke: #3d3d55; filter: drop-shadow(0 0 4px #3d3d55); }
+      50% { stroke: #8d8db0; filter: drop-shadow(0 0 4px #8d8db0); }
     }
-    rect.edge { stroke: #1f1f30; }
+    rect.edge { stroke: #5e5e7e; }
     rect.edge.heartbeat { animation-duration: 4s; }
     rect.edge.ignite { stroke: var(--accent, var(--text-accent)); fill: rgba(0, 229, 255, 0.04); }
 
-    rect.box.flash-error {
+    /* AI Gateway model badges — child boxes that light independently
+       per #124 (gemini-2.5-flash on classifier/vision, claude-opus-4.7
+       on agent). The outer .gateway-frame stays dim until either
+       badge fires; lighting is mediated by the engine, not CSS. */
+    rect.badge {
+      fill: rgba(112, 112, 144, 0.08);
+      stroke: var(--idle);
+      stroke-width: 1.4;
+      transition: stroke 200ms ease, fill 200ms ease, filter 200ms ease;
+    }
+    rect.badge.ignite {
+      stroke: var(--accent, var(--text-accent));
+      fill: rgba(0, 229, 255, 0.10);
+      filter: drop-shadow(0 0 8px var(--accent, var(--text-accent)));
+    }
+    rect.badge.hold {
+      stroke: var(--accent, var(--text-accent));
+      filter: drop-shadow(0 0 5px var(--accent, var(--text-accent)));
+    }
+
+    rect.box.flash-error,
+    rect.badge.flash-error {
       stroke: var(--error-accent);
       fill: rgba(255, 56, 96, 0.08);
       filter: drop-shadow(0 0 12px var(--error-accent));
@@ -109,31 +135,43 @@
     }
 
     text.label {
-      fill: var(--label);
-      font-size: 12px;
-      letter-spacing: 0.18em;
+      fill: var(--label-bright);
+      font-size: 15px;
+      letter-spacing: 0.20em;
       text-transform: uppercase;
       text-anchor: middle;
-      font-weight: 500;
+      font-weight: 600;
+      font-family: ui-sans-serif, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
       transition: fill 200ms ease;
       pointer-events: none;
     }
-    text.label.ignite { fill: var(--label-bright); }
-    text.label.hold { fill: var(--label-bright); }
+    text.label.ignite { fill: var(--accent, var(--label-bright)); }
+    text.label.hold { fill: var(--accent, var(--label-bright)); }
     text.sub {
       fill: var(--label);
-      font-size: 9px;
-      letter-spacing: 0.12em;
+      font-size: 11px;
+      letter-spacing: 0.04em;
       text-anchor: middle;
-      opacity: 0.55;
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
       pointer-events: none;
+    }
+    text.badge-label {
+      fill: var(--label-bright);
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      text-anchor: middle;
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      pointer-events: none;
+      transition: fill 200ms ease;
     }
 
     path.cable {
       fill: none;
       stroke: var(--idle);
       stroke-width: 2;
-      stroke-linecap: round;
+      /* #119 / #124: butt caps so a 1-px nub doesn't extend past the
+         box border into the box interior. */
+      stroke-linecap: butt;
       stroke-linejoin: round;
       transition: stroke 200ms ease, filter 200ms ease;
     }
@@ -153,13 +191,24 @@
     }
 
     text.zone {
-      fill: #3d3d55;
+      fill: #5d5d77;
       font-size: 10px;
       letter-spacing: 0.42em;
       text-transform: uppercase;
       text-anchor: start;
       pointer-events: none;
-      opacity: 0.7;
+      opacity: 0.85;
+    }
+
+    text.substrate {
+      fill: var(--substrate);
+      font-size: 10px;
+      letter-spacing: 0.34em;
+      text-transform: uppercase;
+      text-anchor: middle;
+      font-family: ui-sans-serif, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+      font-weight: 500;
+      pointer-events: none;
     }
 
     footer { display: flex; justify-content: space-between; align-items: center; width: 100%; max-width: 1240px; font-size: 0.7rem; letter-spacing: 0.18em; text-transform: uppercase; color: var(--label); }
@@ -175,115 +224,118 @@
   </style>
 </head>
 <body>
-  <h1>DropMate · live diagram<span class="version">v2.1 channel-deterministic</span></h1>
+  <h1>DropMate · live diagram<span class="version">v2.1 vercel-primitives</span></h1>
   <div class="stage">
     <div class="diagram">
     <!--
-      v2.1 box layout (#102): five branch boxes hang off CHANNEL.
-      The narrative is "the agent is a sidekick, not the star" —
-      registration / classifier / vision / flow 2 lib all land DMs
-      without invoking the agent. AGENT (lower right) only lights on
-      true fallthrough: Flow 1, Flow 3, language/pickup/delete, cron
-      synthetics.
+      v2.1 #124 box layout — Vercel-primitives GTM redesign.
+
+      Story: an Ash agent on Vercel deployed primitives. The boxes
+      name the primitives, not the application's internal roles:
+
+        TELEGRAM            (external)
+                 ↓
+        ASH CHANNEL         (telegram.ts)
+                 ↓
+        ┌──────────┬──────────┬──────────────────┬──────────────┐
+        ASH TOOLS  ASH AGENT  VERCEL AI GATEWAY  ASH SCHEDULES
+        defineTool defineAgent · gemini-2.5-flash defineSchedule
+                              · claude-opus-4.7
+        └──────────┴──────────┴──────────────────┴──────────────┘
+                 ↓
+        UPSTASH REDIS       (Vercel Marketplace)
+
+        ── Running on Vercel · Fluid Compute · Sandbox · OTel @vercel/otel ──
+
+      The two AI Gateway model badges (gemini, claude) ignite
+      INDEPENDENTLY per the stage map in public/diagram.js — gemini
+      on classifier/vision, claude on agent. The frame lights when
+      either badge fires.
     -->
-    <svg viewBox="0 0 1000 720" role="img" aria-label="trace pipeline v2.1" preserveAspectRatio="xMidYMid meet">
+    <svg viewBox="0 0 1000 720" role="img" aria-label="trace pipeline v2.1 vercel-primitives" preserveAspectRatio="xMidYMid meet">
       <text class="zone" x="20" y="40">Telegram</text>
-      <text class="zone" x="20" y="200">Vercel</text>
-      <text class="zone" x="20" y="640">External</text>
+      <text class="zone" x="20" y="230">Vercel</text>
 
       <!--
         Cables drawn BEFORE boxes so endpoints overlay cleanly.
 
-        Inbound:
-          TELEGRAM (500,80) → CHANNEL (500,180)
-        Branches (channel at 500,250):
-          CHANNEL → REGISTRATION (120,400)
-          CHANNEL → CLASSIFIER  (310,400)
-          CHANNEL → VISION      (500,400)
-          CHANNEL → FLOW 2 LIB  (690,400)
-          CHANNEL → AGENT       (880,400)
-        Outbound:
-          CHANNEL → TELEGRAM (return; channel-deterministic DMs)
-          AGENT → TELEGRAM (return; drain after ash.turn)
-        External:
-          VISION → AI GATEWAY (920,680)
-          AGENT → AI GATEWAY
-          FLOW 2 LIB → REDIS (80,680)
-          REGISTRATION → REDIS
+        Box rectangles (for endpoint reference):
+          TELEGRAM:     x=380, y=30,  w=240, h=50   (bottom edge y=80,  center x=500)
+          ASH CHANNEL:  x=380, y=130, w=240, h=80   (top y=130, bottom y=210, center x=500)
+          ASH TOOLS:    x=40,  y=300, w=200, h=140  (top y=300, bottom y=440, center x=140)
+          ASH AGENT:    x=260, y=300, w=200, h=140  (top y=300, bottom y=440, center x=360)
+          AI GATEWAY:   x=480, y=300, w=240, h=160  (top y=300, bottom y=460, center x=600)
+          ASH SCHEDULES:x=740, y=300, w=220, h=140  (top y=300, bottom y=440, center x=850)
+          UPSTASH REDIS:x=380, y=510, w=240, h=60   (top y=510, center x=500, y=540)
+
+        Every endpoint lands ON a box border (no interior penetration).
+        Combined with stroke-linecap: butt, no visible cap pokes inside.
       -->
 
-      <!-- TELEGRAM → CHANNEL -->
-      <path class="cable" id="cable-telegram-channel" d="M500 80 L500 180" />
-      <!-- CHANNEL → branches -->
-      <path class="cable" id="cable-channel-registration" d="M440 270 L200 270 L200 400" />
-      <path class="cable" id="cable-channel-classifier"   d="M460 290 L350 290 L350 400" />
-      <path class="cable" id="cable-channel-vision"       d="M500 320 L500 400" />
-      <path class="cable" id="cable-channel-flow2"        d="M540 290 L650 290 L650 400" />
-      <path class="cable" id="cable-channel-agent"        d="M560 270 L840 270 L840 400" />
-      <!-- CHANNEL → TELEGRAM (deterministic DM return path) -->
-      <path class="cable" id="cable-channel-telegram"     d="M440 200 L80 200 L80 90 L400 90" />
-      <!-- AGENT → TELEGRAM (agent drain) -->
-      <path class="cable" id="cable-agent-telegram"       d="M840 400 L840 90 L600 90" />
-      <!-- VISION → AI GATEWAY -->
-      <path class="cable" id="cable-vision-gateway"       d="M500 480 L500 540 L840 540 L840 660" />
-      <!-- AGENT → AI GATEWAY -->
-      <path class="cable" id="cable-agent-gateway"        d="M840 480 L840 660" />
-      <!-- FLOW2 → REDIS -->
-      <path class="cable" id="cable-flow2-redis"          d="M650 480 L650 540 L160 540 L160 660" />
-      <!-- REGISTRATION → REDIS -->
-      <path class="cable" id="cable-registration-redis"   d="M200 480 L200 660" />
+      <!-- TELEGRAM ↔ ASH CHANNEL (inbound origin) -->
+      <path class="cable" id="cable-telegram-channel" d="M500 80 L500 130" />
+
+      <!-- ASH CHANNEL → branches (exits from channel bottom edge y=210) -->
+      <path class="cable" id="cable-channel-tools"      d="M440 210 L440 270 L140 270 L140 300" />
+      <path class="cable" id="cable-channel-agent"      d="M480 210 L480 280 L360 280 L360 300" />
+      <path class="cable" id="cable-channel-gateway"    d="M520 210 L520 280 L600 280 L600 300" />
+      <path class="cable" id="cable-channel-schedules"  d="M560 210 L560 270 L850 270 L850 300" />
+
+      <!-- ASH CHANNEL → TELEGRAM (return path: channel-deterministic DMs) -->
+      <path class="cable" id="cable-channel-telegram"   d="M380 170 L80 170 L80 55 L380 55" />
+
+      <!-- middle row → UPSTASH REDIS (state writes) -->
+      <path class="cable" id="cable-tools-redis"        d="M180 440 L180 540 L380 540" />
+      <path class="cable" id="cable-agent-redis"        d="M420 440 L420 490 L460 490 L460 510" />
+      <path class="cable" id="cable-schedules-redis"    d="M820 440 L820 540 L620 540" />
 
       <!-- TELEGRAM (origin + destination, top edge) -->
-      <rect class="box edge heartbeat" id="box-telegram" x="400" y="30" width="200" height="50" rx="6" />
-      <text class="label" id="label-telegram" x="500" y="60">Telegram</text>
+      <rect class="box edge heartbeat" id="box-telegram" x="380" y="30" width="240" height="50" rx="6" />
+      <text class="label" id="label-telegram" x="500" y="62">Telegram</text>
 
-      <!-- CHANNEL (orchestrator, the v2.1 star) -->
-      <rect class="box heartbeat" id="box-channel" x="400" y="180" width="200" height="120" rx="6" />
-      <text class="label" id="label-channel" x="500" y="225">Channel</text>
-      <text class="sub" id="sub-channel" x="500" y="244">process-update</text>
-      <text class="sub" id="sub-channel-2" x="500" y="260">verify · parse · route</text>
+      <!-- ASH CHANNEL (orchestrator) -->
+      <rect class="box heartbeat" id="box-channel" x="380" y="130" width="240" height="80" rx="6" />
+      <text class="label" id="label-channel" x="500" y="167">Ash Channel</text>
+      <text class="sub" id="sub-channel" x="500" y="190">telegram.ts</text>
 
-      <!-- REGISTRATION branch -->
-      <rect class="box heartbeat" id="box-registration" x="120" y="400" width="160" height="80" rx="6" />
-      <text class="label" id="label-registration" x="200" y="438">Registration</text>
-      <text class="sub" id="sub-registration" x="200" y="456">/register · free-text</text>
-      <text class="sub" id="sub-registration-2" x="200" y="470">channel-deterministic</text>
+      <!-- ASH TOOLS -->
+      <rect class="box heartbeat" id="box-tools" x="40" y="300" width="200" height="140" rx="6" />
+      <text class="label" id="label-tools" x="140" y="345">Ash Tools</text>
+      <text class="sub" id="sub-tools" x="140" y="370">defineTool</text>
 
-      <!-- CLASSIFIER branch -->
-      <rect class="box heartbeat" id="box-classifier" x="290" y="400" width="120" height="80" rx="6" />
-      <text class="label" id="label-classifier" x="350" y="438">Classifier</text>
-      <text class="sub" id="sub-classifier" x="350" y="456">classify_dm_intent</text>
-      <text class="sub" id="sub-classifier-2" x="350" y="470">vision-free DM</text>
+      <!-- ASH AGENT -->
+      <rect class="box heartbeat" id="box-agent" x="260" y="300" width="200" height="140" rx="6" />
+      <text class="label" id="label-agent" x="360" y="345">Ash Agent</text>
+      <text class="sub" id="sub-agent" x="360" y="370">defineAgent</text>
 
-      <!-- VISION branch -->
-      <rect class="box heartbeat" id="box-vision" x="440" y="400" width="120" height="80" rx="6" />
-      <text class="label" id="label-vision" x="500" y="438">Vision</text>
-      <text class="sub" id="sub-vision" x="500" y="456">parse_tracking_page</text>
-      <text class="sub" id="sub-vision-2" x="500" y="470">parse_label (Flow 1)</text>
+      <!-- VERCEL AI GATEWAY (frame + two model badges) -->
+      <rect class="box heartbeat" id="box-ai-gateway" x="480" y="300" width="240" height="160" rx="6" />
+      <text class="label" id="label-ai-gateway" x="600" y="338">Vercel AI Gateway</text>
+      <!-- gemini badge (lights on classifier/vision) -->
+      <rect class="badge" id="box-ai-gateway-gemini" x="500" y="360" width="200" height="32" rx="4" />
+      <text class="badge-label" id="label-ai-gateway-gemini" x="600" y="381">gemini-2.5-flash</text>
+      <!-- claude badge (lights on agent) -->
+      <rect class="badge" id="box-ai-gateway-claude" x="500" y="410" width="200" height="32" rx="4" />
+      <text class="badge-label" id="label-ai-gateway-claude" x="600" y="431">claude-opus-4.7</text>
 
-      <!-- FLOW 2 LIB branch -->
-      <rect class="box heartbeat" id="box-flow2" x="590" y="400" width="120" height="80" rx="6" />
-      <text class="label" id="label-flow2" x="650" y="438">Flow 2 Lib</text>
-      <text class="sub" id="sub-flow2" x="650" y="456">create · accept</text>
-      <text class="sub" id="sub-flow2-2" x="650" y="470">reject · vlc</text>
+      <!-- ASH SCHEDULES -->
+      <rect class="box heartbeat" id="box-schedules" x="740" y="300" width="220" height="140" rx="6" />
+      <text class="label" id="label-schedules" x="850" y="345">Ash Schedules</text>
+      <text class="sub" id="sub-schedules" x="850" y="370">defineSchedule</text>
 
-      <!-- AGENT branch (only lit on fallthrough) -->
-      <rect class="box heartbeat" id="box-agent" x="740" y="400" width="200" height="80" rx="6" />
-      <text class="label" id="label-agent" x="840" y="438">Agent</text>
-      <text class="sub" id="sub-agent" x="840" y="456">ash.turn</text>
-      <text class="sub" id="sub-agent-2" x="840" y="470">flow 1 · flow 3 · cron</text>
+      <!-- UPSTASH REDIS (Vercel Marketplace, bottom edge) -->
+      <rect class="box edge heartbeat" id="box-redis" x="380" y="510" width="240" height="60" rx="6" />
+      <text class="label" id="label-redis" x="500" y="540">Upstash Redis</text>
+      <text class="sub" id="sub-redis" x="500" y="560">Vercel Marketplace</text>
 
-      <!-- REDIS (bottom-left edge) -->
-      <rect class="box edge heartbeat" id="box-redis" x="80" y="660" width="160" height="50" rx="6" />
-      <text class="label" id="label-redis" x="160" y="690">Upstash · Redis</text>
-
-      <!-- AI GATEWAY (bottom-right edge) -->
-      <rect class="box edge heartbeat" id="box-ai-gateway" x="760" y="660" width="160" height="50" rx="6" />
-      <text class="label" id="label-ai-gateway" x="840" y="690">AI Gateway</text>
+      <!-- Substrate strip (dim, always-on; ~30% opacity per #124) -->
+      <text class="substrate" id="substrate-strip" x="500" y="615">
+        Running on Vercel · Fluid Compute · Sandbox · OTel @vercel/otel
+      </text>
     </svg>
     </div>
     <aside id="trace-log" aria-label="trace log">
-      <header>Trace log</header>
+      <header>Vercel Observability · Agent Runs Trace</header>
       <div id="trace-log-body"></div>
     </aside>
   </div>
