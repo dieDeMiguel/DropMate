@@ -1,27 +1,25 @@
 /**
- * DropMate live-diagram engine (v2.1 #102).
+ * DropMate live-diagram engine (v2.1 #124 Vercel-primitives layout).
  *
  * Consumes the SSE feed at `/api/trace` (lib/telegram-channel/trace-routes.ts)
- * and renders each trace event by lighting the matching SVG box + cable
+ * and renders each trace event by lighting the matching SVG boxes + cable
  * defined in public/index.html.
  *
- * The v2.1 story this diagram tells:
+ * The v2.1 #124 story this diagram tells:
  *
- *   - CHANNEL is the star — every inbound passes through it.
- *   - REGISTRATION / CLASSIFIER / VISION / FLOW 2 LIB are the
- *     channel-deterministic branches. Each lights up without
- *     invoking the agent.
- *   - AGENT only lights when the channel falls through (Flow 1,
- *     Flow 3, language/pickup/delete, cron synthetics).
+ *   - The whole pipeline runs on Vercel primitives. Box labels name
+ *     primitives, not application-internal roles.
+ *   - TELEGRAM (external) → ASH CHANNEL (telegram.ts) is the inbound.
+ *   - ASH TOOLS / ASH AGENT / VERCEL AI GATEWAY / ASH SCHEDULES are
+ *     the four primitives the channel can hand off to.
+ *   - VERCEL AI GATEWAY has TWO model badges (gemini-2.5-flash and
+ *     claude-opus-4.7) that ignite independently — gemini on
+ *     classifier/vision tool calls, claude on agent turns.
+ *   - UPSTASH REDIS (Vercel Marketplace) is the bottom state sink.
  *
  * Exported as both an IIFE (auto-boots when loaded in a browser with
  * a real `EventSource` + `document`) and a small set of named exports
- * for unit tests (`createEngine`, `STAGE_PLAN`). The engine is the
- * pure-function core; the IIFE is the DOM-attaching boot wrapper.
- *
- * Same shape as the pre-v2.1 diagram (preserved at tag
- * main-pre-v2.1-promotion). The change is what STAGES exist and which
- * boxes/cables they map to.
+ * for unit tests (`createEngine`, `STAGE_PLAN`).
  */
 
 const MIN_HOP_MS = 600;
@@ -31,35 +29,49 @@ const POST_HOLD_MS = 2000;
 const POST_FADE_MS = 2000;
 // Origin (Telegram) doesn't emit its own event — the delivery from
 // Telegram → Vercel is effectively instant. Hold ignite longer so a
-// visitor sees the trace started from Telegram before it cascades
-// to the channel.
+// visitor sees the trace started from Telegram before it cascades.
 const ORIGIN_IGNITE_MS = 1500;
 
 /**
- * Stage → box + cable map. Each emitTrace call in production code
- * (lib/telegram-channel/process-update.ts) names a stage; the engine
- * looks up where to ignite the box and which cable to run.
+ * Stage → boxes + cable map.
  *
- * Stages emitted as `<stage>.start` re-ignite + run the cable; stages
- * emitted as `<stage>.end` lock the box in hold state; `.error` /
- * `.vlc` flash red briefly.
+ * `box` is either a string (single target) or an array (multi-target,
+ * for stages that light a primary box AND a child badge — e.g. `agent`
+ * lights both the ASH AGENT box and the claude-opus-4.7 badge inside
+ * the VERCEL AI GATEWAY frame). The first id in the array is the
+ * "primary" — error flashes target it.
  *
- * Outbound paths (CHANNEL→TELEGRAM, AGENT→TELEGRAM) are routed via
- * the `dm` and `agent` stages respectively; both light the TELEGRAM
- * destination box too (the diagram has one box for both inbound
- * source and outbound destination — same chat platform).
+ * `cable` is the single cable that animates on `<stage>.start` events.
+ * Multi-target stages still animate one cable (the primary path); the
+ * other boxes light up via the ignite mechanism without their own
+ * cable animation, which keeps the visual focused.
+ *
+ * Stage → primitive mapping (per #124 issue body):
+ *
+ *   channel       → ASH CHANNEL
+ *   classifier    → AI GATEWAY (gemini-2.5-flash badge)
+ *   vision        → AI GATEWAY (gemini-2.5-flash badge)
+ *   agent         → ASH AGENT + AI GATEWAY (claude-opus-4.7 badge)
+ *   flow1         → ASH TOOLS
+ *   flow2         → ASH TOOLS
+ *   dm            → TELEGRAM (return cable)
+ *   registration  → ASH TOOLS
+ *   pickup        → ASH TOOLS         (forward-looking; not emitted today)
+ *   redis         → UPSTASH REDIS     (forward-looking; not emitted today)
+ *   schedule      → ASH SCHEDULES     (wired in #125 Slice 2)
  */
 export const STAGE_PLAN = Object.freeze({
-  channel:      { box: "channel",      cable: "cable-telegram-channel" },
-  registration: { box: "registration", cable: "cable-channel-registration" },
-  classifier:   { box: "classifier",   cable: "cable-channel-classifier" },
-  vision:       { box: "vision",       cable: "cable-channel-vision" },
-  flow2:        { box: "flow2",        cable: "cable-channel-flow2" },
-  agent:        { box: "agent",        cable: "cable-channel-agent" },
-  // `dm` events fire when the channel sends a deterministic outbound
-  // DM (Flow 2 ack/vlc, registration confirmation, volunteer-accept
-  // pair). Light TELEGRAM as the destination and run the return cable.
-  dm:           { box: "telegram",     cable: "cable-channel-telegram" },
+  channel:      { box: "channel", cable: "cable-telegram-channel" },
+  classifier:   { box: ["ai-gateway-gemini", "ai-gateway"], cable: "cable-channel-gateway" },
+  vision:       { box: ["ai-gateway-gemini", "ai-gateway"], cable: "cable-channel-gateway" },
+  agent:        { box: ["agent", "ai-gateway-claude", "ai-gateway"], cable: "cable-channel-agent" },
+  flow1:        { box: "tools", cable: "cable-channel-tools" },
+  flow2:        { box: "tools", cable: "cable-channel-tools" },
+  dm:           { box: "telegram", cable: "cable-channel-telegram" },
+  registration: { box: "tools", cable: "cable-channel-tools" },
+  pickup:       { box: "tools", cable: "cable-channel-tools" },
+  redis:        { box: "redis", cable: "cable-agent-redis" },
+  schedule:     { box: "schedules", cable: "cable-channel-schedules" },
 });
 
 const ACCENT_VAR = Object.freeze({
@@ -68,18 +80,18 @@ const ACCENT_VAR = Object.freeze({
   callback: "var(--callback-accent)",
 });
 
+function targetBoxIds(plan) {
+  return Array.isArray(plan.box) ? plan.box : [plan.box];
+}
+
 /**
  * Create an engine that drives a DOM. The default boot wraps this
- * with `document` and a real `EventSource`. Tests pass a jsdom-backed
- * document and call `engine.enqueue(event)` directly.
- *
- * The engine intentionally does NOT manage the EventSource — that
- * keeps it framework-agnostic and trivially testable. The boot
- * wrapper handles the network plumbing.
+ * with `document` and a real `EventSource`. Tests pass a hand-rolled
+ * document stub and call `engine.enqueue(event)` directly.
  */
 export function createEngine(doc) {
   const $ = (id) => doc.getElementById(id);
-  const allBoxes = Array.from(doc.querySelectorAll("rect.box"));
+  const allBoxes = Array.from(doc.querySelectorAll("rect.box, rect.badge"));
   const allCables = Array.from(doc.querySelectorAll("path.cable"));
   const traceIdEl = $("trace-id");
 
@@ -99,7 +111,7 @@ export function createEngine(doc) {
       c.classList.remove("run", "hold");
       c.style.removeProperty("--accent");
     }
-    for (const l of doc.querySelectorAll("text.label")) {
+    for (const l of doc.querySelectorAll("text.label, text.badge-label")) {
       l.classList.remove("ignite", "hold");
     }
     for (const [id, text] of idleSubText.entries()) {
@@ -225,21 +237,30 @@ export function createEngine(doc) {
     }
     const plan = STAGE_PLAN[event.stage];
     if (!plan) return;
-    const box = $("box-" + plan.box);
-    const label = $("label-" + plan.box);
+
+    const ids = targetBoxIds(plan);
+    const targets = [];
+    for (const id of ids) {
+      const box = $("box-" + id);
+      if (!box) continue;
+      targets.push({ box, label: $("label-" + id) });
+    }
+    if (targets.length === 0) return;
+    const primary = targets[0];
+
     const cable = plan.cable ? $(plan.cable) : null;
-    if (!box) return;
-    box.style.setProperty("--accent", accent);
+    for (const t of targets) t.box.style.setProperty("--accent", accent);
     if (cable) cable.style.setProperty("--accent", accent);
 
-    // Phase: "start" → ignite + run cable; "end" → lock in hold;
-    // "error" / "vlc" / "reject.*" → flash red briefly.
+    // Phase: "start" / ".start" → ignite + run cable; "end" / ".end"
+    // → lock in hold; "error" / "vlc" / "reject.*" → flash red on
+    // the primary box.
     if (
       event.phase === "error" ||
       event.phase === "vlc" ||
       (typeof event.phase === "string" && event.phase.startsWith("reject"))
     ) {
-      flashError(box, label);
+      flashError(primary.box, primary.label);
       return;
     }
     if (
@@ -252,22 +273,28 @@ export function createEngine(doc) {
         cable.classList.add("run");
         setTimeout(() => cable.classList.replace("run", "hold"), MIN_HOP_MS);
       }
-      box.classList.remove("heartbeat", "hold");
-      box.classList.add("ignite");
-      if (label) label.classList.add("ignite");
+      for (const t of targets) {
+        t.box.classList.remove("heartbeat", "hold");
+        t.box.classList.add("ignite");
+        if (t.label) t.label.classList.add("ignite");
+      }
       setTimeout(() => {
-        if (box.classList.contains("ignite")) {
-          box.classList.replace("ignite", "hold");
-          if (label) label.classList.replace("ignite", "hold");
+        for (const t of targets) {
+          if (t.box.classList.contains("ignite")) {
+            t.box.classList.replace("ignite", "hold");
+            if (t.label) t.label.classList.replace("ignite", "hold");
+          }
         }
       }, MIN_HOP_MS);
     } else if (
       event.phase === "end" ||
       (typeof event.phase === "string" && event.phase.endsWith(".end"))
     ) {
-      if (!box.classList.contains("ignite") && !box.classList.contains("hold")) {
-        box.classList.add("hold");
-        if (label) label.classList.add("hold");
+      for (const t of targets) {
+        if (!t.box.classList.contains("ignite") && !t.box.classList.contains("hold")) {
+          t.box.classList.add("hold");
+          if (t.label) t.label.classList.add("hold");
+        }
       }
       if (cable && !cable.classList.contains("run")) {
         cable.classList.add("hold");
