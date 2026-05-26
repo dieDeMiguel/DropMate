@@ -729,6 +729,205 @@ describe("classify_dm_intent — v2.1 #110 pickup-confirmation cases (DE/EN/ES/T
   });
 });
 
+describe("classify_dm_intent — v2.1 #121 flow2-volunteer-early-arrival cases (DE/EN/ES/TR)", () => {
+  beforeEach(() => {
+    generateObjectMock.mockReset();
+  });
+
+  it("DE: 'Hab das Paket schon' → kind: 'flow2-volunteer-early-arrival' high confidence", async () => {
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        kind: "flow2-volunteer-early-arrival",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "volunteer reports possession of neighbour's package",
+      },
+    });
+
+    const result = (await runExecute({
+      text: "Hab das Paket schon",
+      languageHint: "de",
+    })) as { kind: string; confidence: string };
+
+    expect(result.kind).toBe("flow2-volunteer-early-arrival");
+    expect(result.confidence).toBe("high");
+  });
+
+  it("DE: 'Paket von Diego ist angekommen, ich habs' → kind: 'flow2-volunteer-early-arrival' high confidence", async () => {
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        kind: "flow2-volunteer-early-arrival",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "explicit early arrival + possession",
+      },
+    });
+
+    const result = (await runExecute({
+      text: "Paket von Diego ist angekommen, ich habs",
+      languageHint: "de",
+    })) as { kind: string };
+
+    expect(result.kind).toBe("flow2-volunteer-early-arrival");
+  });
+
+  it("EN: 'package from Diego arrived earlier, I have it already' → kind: 'flow2-volunteer-early-arrival' high confidence", async () => {
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        kind: "flow2-volunteer-early-arrival",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "explicit early arrival + possession",
+      },
+    });
+
+    const result = (await runExecute({
+      text: "package from Diego arrived earlier, I have it already",
+      languageHint: "en",
+    })) as { kind: string; confidence: string };
+
+    expect(result.kind).toBe("flow2-volunteer-early-arrival");
+    expect(result.confidence).toBe("high");
+  });
+
+  it("EN: 'got it - thanks!' → kind: 'flow2-volunteer-early-arrival' high confidence", async () => {
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        kind: "flow2-volunteer-early-arrival",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "possession + ack",
+      },
+    });
+
+    const result = (await runExecute({
+      text: "got it - thanks!",
+      languageHint: "en",
+    })) as { kind: string };
+
+    expect(result.kind).toBe("flow2-volunteer-early-arrival");
+  });
+
+  it("ES: 'ya lo tengo' → kind: 'flow2-volunteer-early-arrival' high confidence", async () => {
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        kind: "flow2-volunteer-early-arrival",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "possession",
+      },
+    });
+
+    const result = (await runExecute({
+      text: "ya lo tengo",
+      languageHint: "es",
+    })) as { kind: string };
+
+    expect(result.kind).toBe("flow2-volunteer-early-arrival");
+  });
+
+  it("TR: 'paketi aldım' (volunteer context) → kind: 'flow2-volunteer-early-arrival' high confidence", async () => {
+    // Note: same surface text as a pickup-confirmation 'paketi aldım'.
+    // The model decides which branch via context — the channel does the
+    // disambiguation downstream via volunteer-vs-recipient resolution.
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        kind: "flow2-volunteer-early-arrival",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "possession (volunteer reporting)",
+      },
+    });
+
+    const result = (await runExecute({
+      text: "paketi aldım",
+      languageHint: "tr",
+    })) as { kind: string };
+
+    expect(result.kind).toBe("flow2-volunteer-early-arrival");
+  });
+
+  it("DE fuzzy: 'es kam an' alone → medium confidence (no possession signal)", async () => {
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        kind: "flow2-volunteer-early-arrival",
+        absenceSignal: false,
+        confidence: "medium",
+        reason: "early arrival without explicit possession",
+      },
+    });
+
+    const result = (await runExecute({
+      text: "es kam an",
+    })) as { kind: string; confidence: string };
+
+    expect(result.kind).toBe("flow2-volunteer-early-arrival");
+    expect(result.confidence).toBe("medium");
+  });
+
+  it("carrier hint when present: 'Hab das DHL-Paket schon' → carrier 'DHL'", async () => {
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        kind: "flow2-volunteer-early-arrival",
+        absenceSignal: false,
+        carrier: "DHL",
+        confidence: "high",
+        reason: "possession + DHL carrier mentioned",
+      },
+    });
+
+    const result = (await runExecute({
+      text: "Hab das DHL-Paket schon",
+    })) as { kind: string; carrier: string; confidence: string };
+
+    expect(result.kind).toBe("flow2-volunteer-early-arrival");
+    expect(result.carrier).toBe("DHL");
+  });
+
+  it("system prompt names the early-arrival canonical phrasings in DE/EN/ES/TR", async () => {
+    generateObjectMock.mockReset();
+    generateObjectMock.mockResolvedValue({
+      object: {
+        kind: "other",
+        absenceSignal: false,
+        confidence: "low",
+        reason: "test stub",
+      },
+    });
+    await runExecute({ text: "anything" });
+    const call = generateObjectMock.mock.calls[0]![0];
+    expect(call.system).toMatch(/Hab das Paket schon/);
+    expect(call.system).toMatch(/got it - thanks!/);
+    expect(call.system).toMatch(/ya lo tengo/);
+    // 'paketi aldım' is also listed under pickup-confirmation; the
+    // important thing is the early-arrival section names a Turkish
+    // example. 'paket bende' is unique to that section.
+    expect(call.system).toMatch(/paket bende/);
+  });
+
+  it("system prompt distinguishes early-arrival from pickup-confirmation explicitly", async () => {
+    // Regression pin: the new kind risks bleeding into 'pickup-confirmation'
+    // because both are about possession of a package. The system prompt
+    // must call out that pickup-confirmation is the RECIPIENT closing
+    // their own pickup, while early-arrival is the VOLUNTEER receiving
+    // someone else's package.
+    generateObjectMock.mockReset();
+    generateObjectMock.mockResolvedValue({
+      object: {
+        kind: "other",
+        absenceSignal: false,
+        confidence: "low",
+        reason: "test stub",
+      },
+    });
+    await runExecute({ text: "anything" });
+    const call = generateObjectMock.mock.calls[0]![0];
+    // The prompt distinguishes via the actor (recipient vs volunteer).
+    expect(call.system).toMatch(/RECIPIENT/);
+    expect(call.system).toMatch(/volunteer/);
+  });
+});
+
 describe("classify_dm_intent — negative cases (NOT Flow 2)", () => {
   beforeEach(() => {
     generateObjectMock.mockReset();

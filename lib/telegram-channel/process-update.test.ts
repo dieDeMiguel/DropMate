@@ -89,6 +89,7 @@ interface BuiltDeps {
   confirmPickup: ReturnType<typeof vi.fn>;
   listOpenPackagesForRecipient: ReturnType<typeof vi.fn>;
   listMatchedReceptionRequestsForRequester: ReturnType<typeof vi.fn>;
+  listMatchedReceptionRequestsForVolunteer: ReturnType<typeof vi.fn>;
   getResidentByPlatformId: ReturnType<typeof vi.fn>;
   editGroupCard: ReturnType<typeof vi.fn>;
   sendDirectMessage: ReturnType<typeof vi.fn>;
@@ -127,6 +128,8 @@ function buildDeps(overrides: {
   openPackagesForRecipientError?: Error;
   matchedReceptionRequestsForRequester?: readonly ReceptionRequest[];
   matchedReceptionRequestsForRequesterError?: Error;
+  matchedReceptionRequestsForVolunteer?: readonly ReceptionRequest[];
+  matchedReceptionRequestsForVolunteerError?: Error;
   residentByPlatformId?: Resident | null;
   residentByPlatformIdError?: Error;
 } = {}): BuiltDeps {
@@ -339,6 +342,21 @@ function buildDeps(overrides: {
           .mockResolvedValue(
             overrides.matchedReceptionRequestsForRequester ?? [],
           );
+  // v2.1 #121: default to "no matched RR as volunteer" so the existing
+  // suite is untouched. Tests exercising the
+  // flow2-volunteer-early-arrival path override this explicitly.
+  const listMatchedReceptionRequestsForVolunteer =
+    overrides.matchedReceptionRequestsForVolunteerError
+      ? vi
+          .fn()
+          .mockRejectedValue(
+            overrides.matchedReceptionRequestsForVolunteerError,
+          )
+      : vi
+          .fn()
+          .mockResolvedValue(
+            overrides.matchedReceptionRequestsForVolunteer ?? [],
+          );
   const getResidentByPlatformId = overrides.residentByPlatformIdError
     ? vi.fn().mockRejectedValue(overrides.residentByPlatformIdError)
     : vi
@@ -456,6 +474,7 @@ function buildDeps(overrides: {
     confirmPickup,
     listOpenPackagesForRecipient,
     listMatchedReceptionRequestsForRequester,
+    listMatchedReceptionRequestsForVolunteer,
     getResidentByPlatformId,
     editGroupCard,
     sendDirectMessage,
@@ -484,6 +503,7 @@ function buildDeps(overrides: {
       confirmPickup,
       listOpenPackagesForRecipient,
       listMatchedReceptionRequestsForRequester,
+      listMatchedReceptionRequestsForVolunteer,
       getResidentByPlatformId,
       editGroupCard,
       sendDirectMessage,
@@ -4551,6 +4571,613 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
     expect(listOpenPackagesForRecipient).not.toHaveBeenCalled();
     expect(confirmPickup).not.toHaveBeenCalled();
     expect(createReceptionRequest).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer early-arrival (v2.1 #121)", () => {
+  // The Diego ↔ Melanie scenario from the issue body. Diego posted a
+  // Flow 2 request; Melanie tapped [Ich kann helfen] and is now the
+  // matched volunteer. The bot has a `matched` RR with
+  // requester=Diego (resident "100"), volunteer=Melanie (resident
+  // "300"). Melanie DMs "Hab das Paket schon" / "got it - thanks!".
+  function melanieVolunteer(language: string | undefined = "de"): Resident {
+    return {
+      id: "300",
+      name: "Melanie Torena",
+      street: "Methfesselstraße",
+      houseNumber: "44",
+      platformId: "300",
+      platform: "telegram",
+      language,
+      availabilityPatterns: [],
+      registeredAt: Date.now(),
+      source: "explicit",
+      confirmed: true,
+    };
+  }
+
+  function matchedRequestRequesterDiegoVolunteerMelanie(
+    overrides: Partial<ReceptionRequest> = {},
+  ): ReceptionRequest {
+    return {
+      id: "req_mpmac3o7_sb0isv",
+      streetId: "Methfesselstraße",
+      requesterResidentId: "100", // Diego (the requester)
+      requesterName: "Diego de Miguel",
+      requesterHouseNumber: "69",
+      carrier: "DHL",
+      expectedAt: null,
+      volunteerResidentId: "300", // Melanie (the volunteer / caller)
+      volunteerAvailability: null,
+      status: "matched",
+      createdAt: Date.now() - 60_000,
+      respondedAt: Date.now() - 30_000,
+      ...overrides,
+    };
+  }
+
+  function registerPackageResultForDiegoFromMelanie(
+    overrides?: Partial<RegisterPackageResult>,
+  ): RegisterPackageResult {
+    return {
+      package: {
+        id: "pkg_new",
+        streetId: "Methfesselstraße",
+        recipientResidentId: "100",
+        recipientName: "Diego de Miguel",
+        recipientHouseNumber: "69",
+        holderResidentId: "300",
+        carrier: "DHL",
+        status: "held",
+        receivedAt: Date.now(),
+        pickedUpAt: null,
+        reminded: false,
+        receptionRequestId: "req_mpmac3o7_sb0isv",
+      } satisfies Package,
+      holder: {
+        id: "300",
+        platformId: "300",
+        name: "Melanie Torena",
+        houseNumber: "44",
+        floor: null,
+        buzzerName: null,
+        language: "de",
+      },
+      recipientResolution: {
+        kind: "resident",
+        resident: {
+          id: "100",
+          name: "Diego de Miguel",
+          houseNumber: "69",
+          language: "de",
+          floor: null,
+          buzzerName: null,
+        },
+      },
+      receptionRequestFulfilled: {
+        requestId: "req_mpmac3o7_sb0isv",
+        requesterResidentId: "100",
+        previousStatus: "matched",
+      },
+      ...overrides,
+    };
+  }
+
+  it("happy path (DE): 1 matched RR as volunteer → registers Package + DMs recipient with [Abgeholt] + DMs volunteer ack, no agent, no group", async () => {
+    const volunteer = melanieVolunteer("de");
+    const {
+      deps,
+      sendToAsh,
+      sendDirectMessage,
+      registerPackage,
+      listMatchedReceptionRequestsForVolunteer,
+    } = buildDeps({
+      classification: {
+        kind: "flow2-volunteer-early-arrival",
+        absenceSignal: false,
+        carrier: "DHL",
+        confidence: "high",
+        reason: "early-arrival + possession",
+      },
+      registeredResident: volunteer,
+      matchedReceptionRequestsForVolunteer: [
+        matchedRequestRequesterDiegoVolunteerMelanie(),
+      ],
+      registerPackageResult: registerPackageResultForDiegoFromMelanie(),
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 300,
+          text: "Hab das Paket schon",
+          fromUserId: 300,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(listMatchedReceptionRequestsForVolunteer).toHaveBeenCalledTimes(1);
+    expect(listMatchedReceptionRequestsForVolunteer).toHaveBeenCalledWith(
+      volunteer,
+    );
+    expect(registerPackage).toHaveBeenCalledTimes(1);
+    expect(registerPackage).toHaveBeenCalledWith(volunteer, {
+      recipientName: "Diego de Miguel",
+      recipientHouseNumber: "69",
+      carrier: "DHL",
+    });
+    expect(sendToAsh).not.toHaveBeenCalled();
+
+    // Two DMs: recipient (Diego, chatId=100) with [Abgeholt] keyboard,
+    // and volunteer (Melanie, chatId=300) with the German ack.
+    expect(sendDirectMessage).toHaveBeenCalledTimes(2);
+
+    // Recipient DM: text + keyboard.
+    const recipientCall = sendDirectMessage.mock.calls[0]!;
+    expect(recipientCall[0]).toBe(100);
+    expect(recipientCall[1]).toBe(
+      "Melanie Torena hat das Paket abgeholt – du kannst es jetzt abholen.",
+    );
+    // 4th arg is the keyboard.
+    expect(recipientCall[3]).toEqual({
+      inline_keyboard: [
+        [
+          {
+            text: "Abgeholt",
+            callback_data: "confirm_pickup:pkg_new",
+          },
+        ],
+      ],
+    });
+
+    // Volunteer ack DM (German default).
+    const volunteerCall = sendDirectMessage.mock.calls[1]!;
+    expect(volunteerCall[0]).toBe(300);
+    expect(volunteerCall[1]).toBe(
+      "Alles klar — Diego de Miguel wurde benachrichtigt.",
+    );
+  });
+
+  it("English volunteer: 1 matched RR → English recipient + volunteer DMs (recipient language follows recipientResolution.resident.language)", async () => {
+    const volunteer = melanieVolunteer("en");
+    const { deps, sendDirectMessage } = buildDeps({
+      classification: {
+        kind: "flow2-volunteer-early-arrival",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "possession",
+      },
+      registeredResident: volunteer,
+      matchedReceptionRequestsForVolunteer: [
+        matchedRequestRequesterDiegoVolunteerMelanie(),
+      ],
+      registerPackageResult: registerPackageResultForDiegoFromMelanie({
+        recipientResolution: {
+          kind: "resident",
+          resident: {
+            id: "100",
+            name: "Diego de Miguel",
+            houseNumber: "69",
+            language: "en",
+            floor: null,
+            buzzerName: null,
+          },
+        },
+      }),
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 300,
+          text: "got it - thanks!",
+          fromUserId: 300,
+          languageCode: "en",
+        }),
+      ),
+      deps,
+    );
+
+    // Recipient DM in English (their stored language).
+    expect(sendDirectMessage.mock.calls[0]![1]).toBe(
+      "Melanie Torena has picked up the package — you can now pick it up.",
+    );
+    // Volunteer ack DM in English (their stored language).
+    expect(sendDirectMessage.mock.calls[1]![1]).toBe(
+      "Got it — Diego de Miguel has been notified.",
+    );
+  });
+
+  it("0 matched RRs as volunteer → fallthrough to agent (no register, no DMs)", async () => {
+    const volunteer = melanieVolunteer("de");
+    const {
+      deps,
+      sendToAsh,
+      sendDirectMessage,
+      registerPackage,
+      listMatchedReceptionRequestsForVolunteer,
+    } = buildDeps({
+      classification: {
+        kind: "flow2-volunteer-early-arrival",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "possession",
+      },
+      registeredResident: volunteer,
+      matchedReceptionRequestsForVolunteer: [],
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 300,
+          text: "Hab das Paket schon",
+          fromUserId: 300,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(listMatchedReceptionRequestsForVolunteer).toHaveBeenCalledTimes(1);
+    expect(registerPackage).not.toHaveBeenCalled();
+    expect(sendDirectMessage).not.toHaveBeenCalled();
+    // Fell through to the agent with the raw text.
+    expect(sendToAsh).toHaveBeenCalledTimes(1);
+  });
+
+  it("2+ matched RRs as volunteer → fallthrough to agent (no register, no DMs)", async () => {
+    const volunteer = melanieVolunteer("de");
+    const {
+      deps,
+      sendToAsh,
+      sendDirectMessage,
+      registerPackage,
+    } = buildDeps({
+      classification: {
+        kind: "flow2-volunteer-early-arrival",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "possession",
+      },
+      registeredResident: volunteer,
+      matchedReceptionRequestsForVolunteer: [
+        matchedRequestRequesterDiegoVolunteerMelanie({ id: "req_A" }),
+        matchedRequestRequesterDiegoVolunteerMelanie({
+          id: "req_B",
+          requesterResidentId: "999",
+          requesterName: "Other Neighbour",
+          requesterHouseNumber: "22",
+        }),
+      ],
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 300,
+          text: "Hab das Paket schon",
+          fromUserId: 300,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(registerPackage).not.toHaveBeenCalled();
+    expect(sendDirectMessage).not.toHaveBeenCalled();
+    expect(sendToAsh).toHaveBeenCalledTimes(1);
+  });
+
+  it("unregistered caller → fallthrough to agent (no list, no register)", async () => {
+    const {
+      deps,
+      sendToAsh,
+      sendDirectMessage,
+      registerPackage,
+      listMatchedReceptionRequestsForVolunteer,
+    } = buildDeps({
+      classification: {
+        kind: "flow2-volunteer-early-arrival",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "possession",
+      },
+      registeredResident: null,
+      matchedReceptionRequestsForVolunteer: [
+        matchedRequestRequesterDiegoVolunteerMelanie(),
+      ],
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 300,
+          text: "Hab das Paket schon",
+          fromUserId: 300,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(listMatchedReceptionRequestsForVolunteer).not.toHaveBeenCalled();
+    expect(registerPackage).not.toHaveBeenCalled();
+    expect(sendDirectMessage).not.toHaveBeenCalled();
+    expect(sendToAsh).toHaveBeenCalledTimes(1);
+  });
+
+  it("medium-confidence flow2-volunteer-early-arrival → fallthrough to agent (high-conf gate)", async () => {
+    const volunteer = melanieVolunteer("de");
+    const {
+      deps,
+      sendToAsh,
+      sendDirectMessage,
+      registerPackage,
+      listMatchedReceptionRequestsForVolunteer,
+    } = buildDeps({
+      classification: {
+        kind: "flow2-volunteer-early-arrival",
+        absenceSignal: false,
+        confidence: "medium",
+        reason: "fuzzy possession",
+      },
+      registeredResident: volunteer,
+      matchedReceptionRequestsForVolunteer: [
+        matchedRequestRequesterDiegoVolunteerMelanie(),
+      ],
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 300,
+          text: "es kam an",
+          fromUserId: 300,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    // Medium → no deterministic route fires; falls through to agent.
+    expect(listMatchedReceptionRequestsForVolunteer).not.toHaveBeenCalled();
+    expect(registerPackage).not.toHaveBeenCalled();
+    expect(sendDirectMessage).not.toHaveBeenCalled();
+    expect(sendToAsh).toHaveBeenCalledTimes(1);
+  });
+
+  it("listMatchedReceptionRequestsForVolunteer throws → fallthrough to agent (no register, no DM)", async () => {
+    const volunteer = melanieVolunteer("de");
+    const { deps, sendToAsh, sendDirectMessage, registerPackage } = buildDeps({
+      classification: {
+        kind: "flow2-volunteer-early-arrival",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "possession",
+      },
+      registeredResident: volunteer,
+      matchedReceptionRequestsForVolunteerError: new Error("redis hiccup"),
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 300,
+          text: "Hab das Paket schon",
+          fromUserId: 300,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(registerPackage).not.toHaveBeenCalled();
+    expect(sendDirectMessage).not.toHaveBeenCalled();
+    expect(sendToAsh).toHaveBeenCalledTimes(1);
+  });
+
+  it("registerPackage throws → sends retry DM to volunteer, NO agent invocation (handled)", async () => {
+    const volunteer = melanieVolunteer("de");
+    const {
+      deps,
+      sendToAsh,
+      sendDirectMessage,
+      registerPackage,
+    } = buildDeps({
+      classification: {
+        kind: "flow2-volunteer-early-arrival",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "possession",
+      },
+      registeredResident: volunteer,
+      matchedReceptionRequestsForVolunteer: [
+        matchedRequestRequesterDiegoVolunteerMelanie(),
+      ],
+      registerPackageError: new Error("redis hiccup on setPackage"),
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 300,
+          text: "Hab das Paket schon",
+          fromUserId: 300,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(registerPackage).toHaveBeenCalledTimes(1);
+    expect(sendToAsh).not.toHaveBeenCalled();
+    // Retry DM to the volunteer (chatId=300, German).
+    expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+    expect(sendDirectMessage.mock.calls[0]![0]).toBe(300);
+    expect(sendDirectMessage.mock.calls[0]![1]).toBe(
+      "Etwas ist schiefgelaufen. Bitte gleich nochmal versuchen.",
+    );
+  });
+
+  it("carrier from classifier when present takes precedence over the RR's carrier", async () => {
+    const volunteer = melanieVolunteer("de");
+    const { deps, registerPackage } = buildDeps({
+      classification: {
+        kind: "flow2-volunteer-early-arrival",
+        absenceSignal: false,
+        carrier: "Hermes",
+        confidence: "high",
+        reason: "possession + Hermes carrier",
+      },
+      registeredResident: volunteer,
+      matchedReceptionRequestsForVolunteer: [
+        matchedRequestRequesterDiegoVolunteerMelanie({ carrier: "DHL" }),
+      ],
+      registerPackageResult: registerPackageResultForDiegoFromMelanie(),
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 300,
+          text: "Hab das Hermes-Paket schon",
+          fromUserId: 300,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(registerPackage).toHaveBeenCalledWith(volunteer, {
+      recipientName: "Diego de Miguel",
+      recipientHouseNumber: "69",
+      carrier: "Hermes",
+    });
+  });
+
+  it("carrier falls back to RR.carrier when classifier carrier is omitted", async () => {
+    const volunteer = melanieVolunteer("de");
+    const { deps, registerPackage } = buildDeps({
+      classification: {
+        kind: "flow2-volunteer-early-arrival",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "possession",
+      },
+      registeredResident: volunteer,
+      matchedReceptionRequestsForVolunteer: [
+        matchedRequestRequesterDiegoVolunteerMelanie({ carrier: "DHL" }),
+      ],
+      registerPackageResult: registerPackageResultForDiegoFromMelanie(),
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 300,
+          text: "Hab das Paket schon",
+          fromUserId: 300,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(registerPackage).toHaveBeenCalledWith(volunteer, {
+      recipientName: "Diego de Miguel",
+      recipientHouseNumber: "69",
+      carrier: "DHL",
+    });
+  });
+
+  it("recipient DM throws → Package + ack DM still happen (best-effort recipient delivery)", async () => {
+    const volunteer = melanieVolunteer("de");
+    const sendDmMock = vi
+      .fn()
+      .mockImplementationOnce(() => Promise.reject(new Error("recipient blocked")))
+      .mockResolvedValue(undefined);
+    const { deps, registerPackage, sendToAsh } = buildDeps({
+      classification: {
+        kind: "flow2-volunteer-early-arrival",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "possession",
+      },
+      registeredResident: volunteer,
+      matchedReceptionRequestsForVolunteer: [
+        matchedRequestRequesterDiegoVolunteerMelanie(),
+      ],
+      registerPackageResult: registerPackageResultForDiegoFromMelanie(),
+    });
+    // Replace the deps' sendDirectMessage with our mock that rejects
+    // the first call (recipient) and resolves the second (volunteer ack).
+    (deps as unknown as { sendDirectMessage: typeof sendDmMock }).sendDirectMessage =
+      sendDmMock;
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 300,
+          text: "Hab das Paket schon",
+          fromUserId: 300,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    expect(registerPackage).toHaveBeenCalledTimes(1);
+    expect(sendToAsh).not.toHaveBeenCalled();
+    // Two attempts: recipient (rejected, swallowed) + volunteer ack.
+    expect(sendDmMock).toHaveBeenCalledTimes(2);
+    // Volunteer ack still sent.
+    expect(sendDmMock.mock.calls[1]![0]).toBe(300);
+    expect(sendDmMock.mock.calls[1]![1]).toBe(
+      "Alles klar — Diego de Miguel wurde benachrichtigt.",
+    );
+  });
+
+  it("kind 'flow2-volunteer-early-arrival' does NOT trigger the pickup-confirmation path or the flow2-reception path", async () => {
+    const volunteer = melanieVolunteer("de");
+    const {
+      deps,
+      confirmPickup,
+      createReceptionRequest,
+      listOpenPackagesForRecipient,
+    } = buildDeps({
+      classification: {
+        kind: "flow2-volunteer-early-arrival",
+        absenceSignal: false,
+        confidence: "high",
+        reason: "possession",
+      },
+      registeredResident: volunteer,
+      matchedReceptionRequestsForVolunteer: [
+        matchedRequestRequesterDiegoVolunteerMelanie(),
+      ],
+      registerPackageResult: registerPackageResultForDiegoFromMelanie(),
+    });
+
+    await processInboundTelegramUpdate(
+      makeRequest(
+        dmUpdate({
+          chatId: 300,
+          text: "Hab das Paket schon",
+          fromUserId: 300,
+          languageCode: "de",
+        }),
+      ),
+      deps,
+    );
+
+    // Regression pin: the dispatch keys on `kind`, so neither sibling
+    // route should fire.
+    expect(confirmPickup).not.toHaveBeenCalled();
+    expect(listOpenPackagesForRecipient).not.toHaveBeenCalled();
+    expect(createReceptionRequest).not.toHaveBeenCalled();
   });
 });
 

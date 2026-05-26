@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildHolderThanksDmText,
+  buildRecipientReadyToPickUpDmText,
+  buildVolunteerEarlyArrivalAckDmText,
   pickupAlreadyDoneToast,
   pickupNotRecipientToast,
   pickupRetryToast,
@@ -140,6 +142,124 @@ describe("pickup-dms (v2.1 #108)", () => {
       expect(pickupRetryToast(null)).toBe(
         "Etwas ist schiefgelaufen. Bitte erneut versuchen.",
       );
+    });
+  });
+
+  describe("buildRecipientReadyToPickUpDmText (v2.1 #121)", () => {
+    it("renders the German variant for the volunteer's stored language", () => {
+      const text = buildRecipientReadyToPickUpDmText({
+        volunteerName: "Melanie Torena",
+        language: "de",
+      });
+      expect(text).toBe(
+        "Melanie Torena hat das Paket abgeholt – du kannst es jetzt abholen.",
+      );
+    });
+
+    it("renders the English variant", () => {
+      const text = buildRecipientReadyToPickUpDmText({
+        volunteerName: "Melanie Torena",
+        language: "en",
+      });
+      expect(text).toBe(
+        "Melanie Torena has picked up the package — you can now pick it up.",
+      );
+    });
+
+    it("renders the Spanish variant", () => {
+      const text = buildRecipientReadyToPickUpDmText({
+        volunteerName: "Melanie Torena",
+        language: "es",
+      });
+      expect(text).toBe(
+        "Melanie Torena ha recogido el paquete — ya puedes recogerlo.",
+      );
+    });
+
+    it("renders the Turkish variant", () => {
+      const text = buildRecipientReadyToPickUpDmText({
+        volunteerName: "Melanie Torena",
+        language: "tr",
+      });
+      expect(text).toBe(
+        "Melanie Torena paketi aldı — şimdi alabilirsin.",
+      );
+    });
+
+    it("falls back to German for unknown/null language", () => {
+      expect(
+        buildRecipientReadyToPickUpDmText({
+          volunteerName: "Melanie Torena",
+          language: null,
+        }),
+      ).toBe(
+        "Melanie Torena hat das Paket abgeholt – du kannst es jetzt abholen.",
+      );
+      expect(
+        buildRecipientReadyToPickUpDmText({
+          volunteerName: "Melanie Torena",
+          language: "ja",
+        }),
+      ).toBe(
+        "Melanie Torena hat das Paket abgeholt – du kannst es jetzt abholen.",
+      );
+    });
+  });
+
+  describe("buildVolunteerEarlyArrivalAckDmText (v2.1 #121)", () => {
+    it("renders the German variant", () => {
+      const text = buildVolunteerEarlyArrivalAckDmText({
+        requesterName: "Diego de Miguel",
+        language: "de",
+      });
+      expect(text).toBe(
+        "Alles klar — Diego de Miguel wurde benachrichtigt.",
+      );
+    });
+
+    it("renders the English variant", () => {
+      const text = buildVolunteerEarlyArrivalAckDmText({
+        requesterName: "Diego de Miguel",
+        language: "en",
+      });
+      expect(text).toBe(
+        "Got it — Diego de Miguel has been notified.",
+      );
+    });
+
+    it("renders the Spanish variant", () => {
+      const text = buildVolunteerEarlyArrivalAckDmText({
+        requesterName: "Diego de Miguel",
+        language: "es",
+      });
+      expect(text).toBe(
+        "Listo — Diego de Miguel ha sido notificado.",
+      );
+    });
+
+    it("renders the Turkish variant", () => {
+      const text = buildVolunteerEarlyArrivalAckDmText({
+        requesterName: "Diego de Miguel",
+        language: "tr",
+      });
+      expect(text).toBe(
+        "Tamam — Diego de Miguel'e bildirildi.",
+      );
+    });
+
+    it("falls back to German for unknown/null language", () => {
+      expect(
+        buildVolunteerEarlyArrivalAckDmText({
+          requesterName: "Diego de Miguel",
+          language: null,
+        }),
+      ).toBe("Alles klar — Diego de Miguel wurde benachrichtigt.");
+      expect(
+        buildVolunteerEarlyArrivalAckDmText({
+          requesterName: "Diego de Miguel",
+          language: undefined,
+        }),
+      ).toBe("Alles klar — Diego de Miguel wurde benachrichtigt.");
     });
   });
 });
