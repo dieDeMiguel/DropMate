@@ -121,8 +121,14 @@ seed_one_trace() {
   emit flow2        accept.start   "${kind}" "${trace_id}"
   emit flow2        accept.end     "${kind}" "${trace_id}"
   emit agent        start          "${kind}" "${trace_id}"
-  emit redis        write          "${kind}" "${trace_id}"
-  emit schedule     fire           "${kind}" "${trace_id}"
+  # Phases use the `<verb>.start` / `<verb>.end` shape so the diagram
+  # engine (public/diagram.js) matches them on its `.start` / `.end`
+  # branches — a bare `write` / `fire` phase silently falls through
+  # all branches and the box never lights up.
+  emit redis        write.start    "${kind}" "${trace_id}"
+  emit redis        write.end      "${kind}" "${trace_id}"
+  emit schedule     fire.start     "${kind}" "${trace_id}"
+  emit schedule     fire.end       "${kind}" "${trace_id}"
   emit dm           start          "${kind}" "${trace_id}"
   emit dm           end            "${kind}" "${trace_id}"
 }
