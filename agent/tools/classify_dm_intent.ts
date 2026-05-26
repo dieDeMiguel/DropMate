@@ -103,31 +103,50 @@ const modelOutputSchema = z.object({
   kind: z
     .enum([
       "flow2-reception",
+      "flow2-volunteer-early-arrival",
       "pickup-confirmation",
       "registration",
       "other",
     ])
     .describe(
       "Discriminated intent of the inbound DM. Set EXACTLY one:\n" +
-        "  - 'flow2-reception'      — pre-announce ('I won't be home'); the\n" +
-        "                              channel writes a ReceptionRequest +\n" +
-        "                              posts the neutral group card. Both\n" +
-        "                              absenceSignal AND a supporting field\n" +
-        "                              (carrier/window) should be present at\n" +
-        "                              high confidence.\n" +
-        "  - 'pickup-confirmation'  — the writer is confirming they already\n" +
-        "                              picked up a held package ('Hab\n" +
-        "                              abgeholt', 'Picked up', 'Recibido',\n" +
-        "                              'Teslim aldım'). The channel resolves\n" +
-        "                              which package via the writer's own\n" +
-        "                              held-packages list. Set when the\n" +
-        "                              writer is unambiguously closing\n" +
-        "                              their own pickup. Conservative bias.\n" +
-        "  - 'registration'         — `/register <name>, <street> <number>`\n" +
-        "                              shape or the free-text equivalent.\n" +
-        "  - 'other'                — everything else (chit-chat, Flow 0\n" +
-        "                              without absence, Flow 3 search, Flow\n" +
-        "                              1 group-label, unknown).",
+        "  - 'flow2-reception'              — pre-announce ('I won't be\n" +
+        "                                      home'); the channel writes a\n" +
+        "                                      ReceptionRequest + posts the\n" +
+        "                                      neutral group card. Both\n" +
+        "                                      absenceSignal AND a supporting\n" +
+        "                                      field (carrier/window) should\n" +
+        "                                      be present at high confidence.\n" +
+        "  - 'flow2-volunteer-early-arrival'— the writer is a volunteer who\n" +
+        "                                      tapped [Ich kann helfen] on a\n" +
+        "                                      Flow 2 group card and is now\n" +
+        "                                      DMing the bot that the package\n" +
+        "                                      already arrived AND they have\n" +
+        "                                      it ('Hab das Paket schon',\n" +
+        "                                      'got it - thanks!', 'ya lo\n" +
+        "                                      tengo', 'paketi aldım'). The\n" +
+        "                                      channel writes a Package +\n" +
+        "                                      flips the ReceptionRequest to\n" +
+        "                                      'fulfilled' + DMs the\n" +
+        "                                      recipient. Carrier hint is\n" +
+        "                                      welcome but not required.\n" +
+        "  - 'pickup-confirmation'          — the writer is confirming they\n" +
+        "                                      already picked up a held\n" +
+        "                                      package ('Hab abgeholt',\n" +
+        "                                      'Picked up', 'Recibido',\n" +
+        "                                      'Teslim aldım'). The channel\n" +
+        "                                      resolves which package via\n" +
+        "                                      the writer's own held-packages\n" +
+        "                                      list. Set when the writer is\n" +
+        "                                      unambiguously closing their\n" +
+        "                                      own pickup. Conservative bias.\n" +
+        "  - 'registration'                 — `/register <name>, <street>\n" +
+        "                                      <number>` shape or the\n" +
+        "                                      free-text equivalent.\n" +
+        "  - 'other'                        — everything else (chit-chat,\n" +
+        "                                      Flow 0 without absence, Flow 3\n" +
+        "                                      search, Flow 1 group-label,\n" +
+        "                                      unknown).",
     ),
   absenceSignal: z
     .boolean()
@@ -182,6 +201,12 @@ const modelOutputSchema = z.object({
       "Routing confidence. Per-kind rules:\n" +
         "  - kind 'flow2-reception': `high` ONLY when absenceSignal &&\n" +
         "    (carrier OR window present). Anything else medium or low.\n" +
+        "  - kind 'flow2-volunteer-early-arrival': `high` ONLY when the\n" +
+        "    writer is unambiguously announcing they have a neighbour's\n" +
+        "    package in their possession ('Hab das Paket schon', 'got it\n" +
+        "    - thanks!', 'ya lo tengo', 'paketi aldım'). Fuzzier wording\n" +
+        "    ('it arrived', 'es kam an' without possession) is medium\n" +
+        "    or low.\n" +
         "  - kind 'pickup-confirmation': `high` ONLY when the writer is\n" +
         "    unambiguously announcing they took possession ('Hab\n" +
         "    abgeholt', 'Picked up', 'Recibido', 'Teslim aldım'). A\n" +
@@ -206,6 +231,7 @@ const modelOutputSchema = z.object({
  */
 export type DmIntentKind =
   | "flow2-reception"
+  | "flow2-volunteer-early-arrival"
   | "pickup-confirmation"
   | "registration"
   | "other";
@@ -234,16 +260,22 @@ export const classifierSystemPrompt = [
   "neighbor-coordination bot. A registered resident sends the bot a",
   "free-text DM. Assign EXACTLY ONE `kind` value:",
   "",
-  "  - 'flow2-reception'     — pre-announce 'I won't be home', the writer",
-  "                             wants help receiving a package.",
-  "  - 'pickup-confirmation' — the writer is confirming they already",
-  "                             collected a held package addressed to",
-  "                             them.",
-  "  - 'registration'        — `/register …` or the free-text registration",
-  "                             shape.",
-  "  - 'other'               — chit-chat, Flow 0 pre-announce WITHOUT",
-  "                             absence, Flow 3 search, Flow 1 group label,",
-  "                             status request, unknown.",
+  "  - 'flow2-reception'              — pre-announce 'I won't be home',",
+  "                                      the writer wants help receiving",
+  "                                      a package.",
+  "  - 'flow2-volunteer-early-arrival'— the writer is a Flow 2 volunteer",
+  "                                      reporting that a neighbour's",
+  "                                      package arrived early and they",
+  "                                      already have it in their hands.",
+  "  - 'pickup-confirmation'          — the writer is confirming they",
+  "                                      already collected a held package",
+  "                                      addressed to them.",
+  "  - 'registration'                 — `/register …` or the free-text",
+  "                                      registration shape.",
+  "  - 'other'                        — chit-chat, Flow 0 pre-announce",
+  "                                      WITHOUT absence, Flow 3 search,",
+  "                                      Flow 1 group label, status",
+  "                                      request, unknown.",
   "",
   "===== kind: 'flow2-reception' =====",
   "",
@@ -288,6 +320,53 @@ export const classifierSystemPrompt = [
   "  - 'Danke' / 'Thanks' alone — too generic → 'other'",
   "  - 'Ich nehme das Paket an' — accepting a Flow 2 ask, not pickup →",
   "    'other'",
+  "  - 'Hab das Paket schon' / 'got it - thanks!' / 'ya lo tengo' /",
+  "    'paketi aldım' — writer is the HOLDER reporting early arrival",
+  "    on a Flow 2 volunteer match → 'flow2-volunteer-early-arrival'",
+  "    (see below)",
+  "",
+  "===== kind: 'flow2-volunteer-early-arrival' =====",
+  "",
+  "The writer previously tapped [Ich kann helfen] on a Flow 2 group card",
+  "and is now DMing the bot to report that the requester's package has",
+  "arrived early AND that they (the volunteer) physically have it. This",
+  "is the holder-side counterpart to 'pickup-confirmation' — both close a",
+  "loop on a held/expected package, but here the writer is the volunteer",
+  "(future holder) reporting receipt, not the recipient reporting pickup.",
+  "",
+  "Canonical phrasings:",
+  "  DE: 'Hab das Paket schon', 'Hab es schon', 'Habe das Paket bekommen',",
+  "      'Paket ist da', 'Habe Diegos Paket', 'Paket von Diego ist",
+  "      angekommen', 'Hab Paket angenommen'",
+  "  EN: 'got it - thanks!', 'got the package', 'package arrived', 'I",
+  "      have the package', 'package from Diego arrived earlier, I have",
+  "      it already', 'got Diego's package'",
+  "  ES: 'ya lo tengo', 'tengo el paquete', 'el paquete llegó', 'tengo",
+  "      el paquete de Diego'",
+  "  TR: 'paketi aldım', 'paket bende', 'paket geldi, bende', 'Diego'nun",
+  "      paketi bende'",
+  "",
+  "Confidence rules:",
+  "  - `high`   — unambiguous possession ('I have it', 'es bei mir',",
+  "               'bende', 'lo tengo') OR explicit early-arrival report",
+  "               with possession language.",
+  "  - `medium` — early-arrival language without clear possession ('it",
+  "               arrived', 'es kam an' on its own).",
+  "  - `low`    — uncertain.",
+  "",
+  "NOT 'flow2-volunteer-early-arrival':",
+  "  - 'Hab abgeholt' / 'Picked up' / 'Recibido' / 'Teslim aldım' alone —",
+  "    the writer is the RECIPIENT closing their pickup, not the volunteer",
+  "    reporting an early arrival → 'pickup-confirmation'",
+  "  - 'Ich kann helfen' / 'I can help' — Flow 2 group-card accept, not a",
+  "    DM about arrival → 'other'",
+  "  - 'Habe ein Paket für Müller angenommen' alone (no early-arrival",
+  "    context) — Flow 1 group label registration → 'other'",
+  "  - 'Wann kommt mein Paket?' — Flow 3 status question → 'other'",
+  "",
+  "Carrier hint: optional. If the writer mentions a carrier ('Hab das",
+  "DHL-Paket schon'), include it as `carrier`; otherwise omit. Do NOT",
+  "require a carrier for high confidence on this kind.",
   "",
   "Absence-signal phrases to recognise (across languages):",
   "  DE: 'nicht zu Hause', 'nicht da', 'im Büro', 'unterwegs',",
@@ -359,19 +438,23 @@ export const classifierSystemPrompt = [
   "===== Confidence =====",
   "",
   "  high   — kind: 'flow2-reception' AND absenceSignal AND (carrier OR",
-  "           window present), OR kind: 'pickup-confirmation' AND",
-  "           unambiguous closing language, OR kind: 'registration' with",
-  "           the `/register` prefix.",
+  "           window present), OR kind: 'flow2-volunteer-early-arrival'",
+  "           AND unambiguous possession language, OR kind:",
+  "           'pickup-confirmation' AND unambiguous closing language, OR",
+  "           kind: 'registration' with the `/register` prefix.",
   "  medium — kind: 'flow2-reception' AND absenceSignal but no",
-  "           supporting field, OR kind: 'pickup-confirmation' with",
-  "           fuzzy closing language.",
+  "           supporting field, OR kind:",
+  "           'flow2-volunteer-early-arrival' with fuzzy possession",
+  "           language ('it arrived' alone), OR kind:",
+  "           'pickup-confirmation' with fuzzy closing language.",
   "  low    — kind: 'other' (always), or kind uncertain.",
   "",
   "Bias toward LOWER confidence when uncertain. A false-positive Flow 2",
   "posts to the group (privacy leak per PRD §9); a false-positive pickup",
-  "closes the wrong package (canonical state corruption). False negatives",
-  "are cheap — the writer just re-asks via /receive or taps the group",
-  "[Abgeholt] button.",
+  "closes the wrong package (canonical state corruption); a",
+  "false-positive 'flow2-volunteer-early-arrival' writes a Package the",
+  "volunteer doesn't actually have (canonical-state corruption). False",
+  "negatives are cheap — the writer can re-DM with clearer wording.",
 ].join("\n");
 
 interface ClassifierArgs {
@@ -506,8 +589,9 @@ function parseHhmm(hhmm: string): [number, number] {
 export default defineTool({
   description:
     "Classify a free-text DM by intent kind ('flow2-reception', " +
-    "'pickup-confirmation', 'registration', 'other'), extracting " +
-    "Flow-2 supporting fields (carrier / date / window) when present. " +
+    "'flow2-volunteer-early-arrival', 'pickup-confirmation', " +
+    "'registration', 'other'), extracting Flow-2 supporting fields " +
+    "(carrier / date / window) when present. " +
     "Tries Gemini 2.5 Flash first, falls back to Claude Sonnet 4.6 if " +
     "the primary errors. Returns `{ kind, absenceSignal, carrier?, " +
     "expectedDate?, expectedWindowStartAt?, expectedWindowEndAt?, " +

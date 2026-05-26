@@ -263,6 +263,7 @@ export function telegramChannel(config: TelegramChannelConfig) {
               ) => Promise<{
                 kind:
                   | "flow2-reception"
+                  | "flow2-volunteer-early-arrival"
                   | "pickup-confirmation"
                   | "registration"
                   | "other";
@@ -340,6 +341,21 @@ export function telegramChannel(config: TelegramChannelConfig) {
                     req.requesterResidentId === caller.id,
                 )
                 .sort((a, b) => b.createdAt - a.createdAt);
+            },
+            listMatchedReceptionRequestsForVolunteer: async (caller) => {
+              // v2.1 #121 (Flow 2 → Flow 1 volunteer DM-text early-
+              // arrival): same spike-scale shape as the requester
+              // sibling above — scope to the caller's street + filter
+              // to `matched` RRs where the caller is the *volunteer*.
+              // Only fires on the high-conf
+              // `flow2-volunteer-early-arrival` classifier verdict, so
+              // the full street scan is fine.
+              const all = await listReceptionRequestsForStreet(caller.street);
+              return all.filter(
+                (req) =>
+                  req.status === "matched" &&
+                  req.volunteerResidentId === caller.id,
+              );
             },
             getResidentByPlatformId: async (platformId) =>
               getResident(platformId),

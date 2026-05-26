@@ -159,6 +159,8 @@ import type { InlineKeyboardMarkup, TelegramMessageEntity } from "./send.js";
 import { verifyTelegramSecretHeader } from "./verify.js";
 import {
   buildHolderThanksDmText,
+  buildRecipientReadyToPickUpDmText,
+  buildVolunteerEarlyArrivalAckDmText,
   pickupAlreadyDoneToast,
   pickupNotRecipientToast,
   pickupRetryToast,
@@ -517,6 +519,37 @@ export interface ProcessUpdateDeps {
     caller: Resident,
   ) => Promise<readonly ReceptionRequest[]>;
   /**
+   * v2.1 #121 (Flow 2 → Flow 1 volunteer DM-text early-arrival): list
+   * `matched` ReceptionRequests on the caller's street where the caller
+   * is the *volunteer* (they tapped `[Ich kann helfen]` on a Flow 2
+   * card and the package has now arrived early). Used exclusively by
+   * the `flow2-volunteer-early-arrival` DM-text route to resolve
+   * "which Flow 2 ask is this volunteer reporting on?" before writing
+   * the Package + flipping the request to `fulfilled`.
+   *
+   * Branching on `[].length`:
+   *
+   *   - 0 → fall through to the agent. The caller might be a walk-up
+   *     holder of an unrelated package; the agent can route to Flow 1
+   *     photo onboarding or `register_package`.
+   *   - 1 → continue: register the Package, flip the RR, DM both sides.
+   *   - 2+ → fall through to the agent. Disambiguation needs a
+   *     clarifying question and is not in scope for this slice.
+   *
+   * Implemented in the factory via `listReceptionRequestsForStreet` +
+   * an in-memory filter on `volunteerResidentId === caller.id` +
+   * `status === "matched"`. Returns matched-status RRs in arbitrary
+   * order — disambiguation only fires on the 2+-match branch which
+   * falls through anyway, so ordering doesn't matter on the 1-match
+   * happy path.
+   *
+   * Throws bubble up; the caller catches them and falls through to the
+   * agent rather than misregistering a Package.
+   */
+  readonly listMatchedReceptionRequestsForVolunteer: (
+    caller: Resident,
+  ) => Promise<readonly ReceptionRequest[]>;
+  /**
    * v2.1 #122: resolve a Resident by their stored platform id (the
    * `Resident.id` / `Resident.platformId` string, NOT the numeric
    * Telegram user id consumed by `getRegisteredResident`). Used by
@@ -734,6 +767,7 @@ export type Flow2RouteResult =
  */
 export type DmIntentKind =
   | "flow2-reception"
+  | "flow2-volunteer-early-arrival"
   | "pickup-confirmation"
   | "registration"
   | "other";
@@ -1637,11 +1671,11 @@ function parseIsoToUnixMs(iso: string | undefined): number | undefined {
 }
 
 /**
- * v2.1 Slice 1 (#86) + #100 + #110: on every DM text inbound from a
- * known sender, call `classifyDmIntent` to decide which Flow path the
+ * v2.1 Slice 1 (#86) + #100 + #110 + #121: on every DM text inbound from
+ * a known sender, call `classifyDmIntent` to decide which Flow path the
  * inbound belongs to. v2.1 #110 widened the routing from a boolean
- * `isFlow2` to a discriminated `kind`, adding a pickup-confirmation
- * branch ("Hab abgeholt" / "Picked up" / "Recibido" / "Teslim aldım"):
+ * `isFlow2` to a discriminated `kind`. v2.1 #121 adds the Flow 2 →
+ * Flow 1 bridge for volunteer early-arrival reports:
  *
  *   - `kind: "flow2-reception"` + high-confidence + registered caller
  *     → call `createReceptionRequest` + send localised ack DM. No
@@ -1650,6 +1684,12 @@ function parseIsoToUnixMs(iso: string | undefined): number | undefined {
  *     caller → resolve the caller's open packages, call `confirmPickup`
  *     deterministically when there's exactly one. No agent
  *     involvement on any pickup-confirmation branch (#110).
+ *   - `kind: "flow2-volunteer-early-arrival"` + high-confidence +
+ *     registered caller → resolve the caller's matched RRs as
+ *     *volunteer*, call `registerPackage` deterministically when
+ *     there's exactly one (lib flips the RR to `fulfilled`), DM the
+ *     recipient with `[Abgeholt]` + DM the volunteer the short ack.
+ *     No agent involvement on the happy path (#121).
  *   - Anything else → fall through to the agent with the raw text.
  *
  * Every step is tolerant of failure: a classifier outage, an
@@ -1700,6 +1740,21 @@ async function routeDmTextThroughClassifier(
     classification.confidence === "high"
   ) {
     return routeDmTextPickupConfirmation(inbound, deps);
+  }
+
+  // v2.1 #121: the Flow 2 → Flow 1 bridge — a volunteer DMs "Hab das
+  // Paket schon" reporting the requester's package arrived early. The
+  // channel writes the Package + flips the RR to fulfilled + DMs both
+  // sides; sendToAsh is NEVER called on the happy path.
+  if (
+    classification.kind === "flow2-volunteer-early-arrival" &&
+    classification.confidence === "high"
+  ) {
+    return routeDmTextFlow2VolunteerEarlyArrival(
+      inbound,
+      deps,
+      classification.carrier,
+    );
   }
 
   if (
@@ -2004,6 +2059,224 @@ async function routeDmTextPickupConfirmation(
         { platformId: result.holder.platformId },
       );
     }
+  }
+
+  return { kind: "handled" };
+}
+
+/**
+ * v2.1 #121 (Flow 2 → Flow 1 bridge): route a DM-text early-arrival
+ * report from a Flow 2 volunteer. The classifier has already returned
+ * `kind === "flow2-volunteer-early-arrival"` + high confidence; here
+ * we resolve the matched ReceptionRequest, write the Package, flip
+ * the request to `fulfilled`, and DM both sides.
+ *
+ * Branches:
+ *
+ *   - Unregistered caller            → fallthrough (agent asks them to
+ *                                       /register).
+ *   - 0 matched RRs as volunteer     → fallthrough. Caller may be a
+ *                                       walk-up holder of an unrelated
+ *                                       package; the agent can route to
+ *                                       Flow 1 photo onboarding or
+ *                                       `register_package`.
+ *   - 2+ matched RRs as volunteer    → fallthrough. Disambiguation needs
+ *                                       a clarifying question; out of
+ *                                       scope for this slice.
+ *   - Exactly 1 matched RR           → call `registerPackage` with
+ *                                       recipient = requester. The lib
+ *                                       finds the same RR via
+ *                                       `findOpenReceptionRequestForRecipient`
+ *                                       and flips it to `fulfilled`
+ *                                       (status linkage atomic with
+ *                                       Package write). DM the recipient
+ *                                       with the `[Abgeholt]` keyboard;
+ *                                       DM the volunteer the short
+ *                                       confirmation. No group ack
+ *                                       (same suppression as #116).
+ *
+ *   - `registerPackage` throws       → log + send generic retry DM to
+ *                                       volunteer; leave RR in `matched`
+ *                                       so the volunteer can re-DM.
+ *   - Recipient DM throws            → log; Package + RR already written
+ *                                       so the user can recover (the
+ *                                       `[Abgeholt]` button is also
+ *                                       reachable via the recipient's
+ *                                       next DM-text pickup confirmation).
+ *   - Volunteer DM throws            → log; the loop is already closed
+ *                                       canonically.
+ *
+ * `sendToAsh` is NEVER called on any branch where the route returns
+ * `{ kind: "handled" }`.
+ */
+async function routeDmTextFlow2VolunteerEarlyArrival(
+  inbound: TelegramInboundMessage,
+  deps: ProcessUpdateDeps,
+  classifierCarrier: PackageCarrier | undefined,
+): Promise<Flow2RouteResult> {
+  if (inbound.fromUserId === null) {
+    return { kind: "fallthrough", toAgent: inbound.text };
+  }
+
+  const caller = await deps
+    .getRegisteredResident(inbound.fromUserId)
+    .catch(() => null);
+  if (!caller) {
+    // Unregistered → fallthrough so the agent can ask them to /register.
+    return { kind: "fallthrough", toAgent: inbound.text };
+  }
+
+  const language = caller.language ?? inbound.fromLanguageCode ?? "de";
+
+  let matchedAsVolunteer: readonly ReceptionRequest[];
+  try {
+    matchedAsVolunteer =
+      await deps.listMatchedReceptionRequestsForVolunteer(caller);
+  } catch (err) {
+    console.error(
+      "[flow2-volunteer-early-arrival] listMatchedReceptionRequestsForVolunteer failed for userId",
+      inbound.fromUserId,
+      "error:",
+      err instanceof Error
+        ? { name: err.name, message: err.message, stack: err.stack }
+        : err,
+    );
+    // Lookup outage → hand to the agent. Same conservative bias as the
+    // classifier-outage path: missing the route is cheaper than
+    // misrouting (writing a Package the volunteer doesn't actually have
+    // would corrupt canonical state).
+    return { kind: "fallthrough", toAgent: inbound.text };
+  }
+
+  if (matchedAsVolunteer.length === 0) {
+    return { kind: "fallthrough", toAgent: inbound.text };
+  }
+  if (matchedAsVolunteer.length > 1) {
+    // Disambiguation not in scope for this slice — fall through to the
+    // agent which can ask which Flow 2 ask the volunteer is reporting
+    // on.
+    return { kind: "fallthrough", toAgent: inbound.text };
+  }
+
+  const req = matchedAsVolunteer[0]!;
+
+  // The lib-level `registerPackage` finds the open/matched RR for the
+  // same recipient name + house number and flips it to `fulfilled`
+  // atomically with the Package write — no separate RR transition call
+  // needed here. Same code path Flow 1 photo registrations use when
+  // they link a `ReceptionRequest` (#116). The caller (volunteer) is
+  // the holder.
+  const carrier =
+    classifierCarrier && classifierCarrier !== "unknown"
+      ? classifierCarrier
+      : req.carrier && req.carrier !== "unknown"
+        ? req.carrier
+        : "unknown";
+
+  emitTrace("flow1", "register.start", {
+    source: "flow2-volunteer-early-arrival",
+    requestId: req.id,
+  });
+  let registered: RegisterPackageResult;
+  try {
+    registered = await deps.registerPackage(caller, {
+      recipientName: req.requesterName,
+      recipientHouseNumber: req.requesterHouseNumber,
+      carrier,
+    });
+    emitTrace("flow1", "register.end", {
+      source: "flow2-volunteer-early-arrival",
+      requestId: req.id,
+      packageId: registered.package.id,
+    });
+  } catch (err) {
+    console.error(
+      "[flow2-volunteer-early-arrival] registerPackage failed for userId",
+      inbound.fromUserId,
+      "requestId",
+      req.id,
+      "error:",
+      err instanceof Error
+        ? { name: err.name, message: err.message, stack: err.stack }
+        : err,
+    );
+    emitTrace("flow1", "register.reject.redis-hiccup", {
+      source: "flow2-volunteer-early-arrival",
+      requestId: req.id,
+    });
+    await deps
+      .sendDirectMessage(inbound.chatId, buildDmTextPickupRetryText(language))
+      .catch(() => undefined);
+    return { kind: "handled" };
+  }
+
+  // Recipient DM: name the volunteer + attach the `[Abgeholt]` keyboard
+  // so the recipient can close the loop with a tap. The volunteer is
+  // the holder of the new Package, so `registered.holder` is the
+  // volunteer themselves.
+  const recipientResolution = registered.recipientResolution;
+  if (recipientResolution.kind === "resident") {
+    const recipientPlatformId = req.requesterResidentId;
+    const recipientChatId = Number(recipientPlatformId);
+    if (Number.isFinite(recipientChatId)) {
+      try {
+        emitTrace("dm", "start", { kind: "flow2-volunteer-early-arrival-recipient" });
+        await deps.sendDirectMessage(
+          recipientChatId,
+          buildRecipientReadyToPickUpDmText({
+            volunteerName: registered.holder.name,
+            language: recipientResolution.resident.language,
+          }),
+          undefined,
+          buildPickupKeyboard(registered.package.id),
+        );
+        emitTrace("dm", "end", { kind: "flow2-volunteer-early-arrival-recipient" });
+      } catch (err) {
+        console.error(
+          "[flow2-volunteer-early-arrival] recipient DM failed for platformId",
+          recipientPlatformId,
+          "error:",
+          err instanceof Error ? err.message : err,
+        );
+        emitTrace("dm", "error", { kind: "flow2-volunteer-early-arrival-recipient" });
+      }
+    } else {
+      console.error(
+        "[flow2-volunteer-early-arrival] requesterResidentId is not a finite number — skipping recipient DM",
+        { requesterResidentId: recipientPlatformId },
+      );
+    }
+  } else {
+    // The matched RR's requester resolved away from a Resident — should
+    // be impossible given the RR was created from a registered caller,
+    // but log so a future regression is visible.
+    console.error(
+      "[flow2-volunteer-early-arrival] recipient resolved to kind",
+      recipientResolution.kind,
+      "— skipping recipient DM",
+    );
+  }
+
+  // Volunteer confirmation DM. Best-effort; the canonical state is
+  // already correct so a failure here is logged-and-continue.
+  try {
+    emitTrace("dm", "start", { kind: "flow2-volunteer-early-arrival-ack" });
+    await deps.sendDirectMessage(
+      inbound.chatId,
+      buildVolunteerEarlyArrivalAckDmText({
+        requesterName: req.requesterName,
+        language,
+      }),
+    );
+    emitTrace("dm", "end", { kind: "flow2-volunteer-early-arrival-ack" });
+  } catch (err) {
+    console.error(
+      "[flow2-volunteer-early-arrival] volunteer ack DM failed for chatId",
+      inbound.chatId,
+      "error:",
+      err instanceof Error ? err.message : err,
+    );
+    emitTrace("dm", "error", { kind: "flow2-volunteer-early-arrival-ack" });
   }
 
   return { kind: "handled" };

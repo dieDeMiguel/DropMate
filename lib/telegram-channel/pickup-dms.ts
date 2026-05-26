@@ -144,3 +144,76 @@ export function pickupRetryToast(raw: string | null | undefined): string {
   const language = pickLanguage(raw);
   return PICKUP_RETRY_TOASTS[language];
 }
+
+/**
+ * v2.1 #121 (Flow 2 → Flow 1 volunteer DM-text early-arrival): when
+ * the volunteer DMs the bot that the requester's package has already
+ * arrived AND they have it, the channel writes the Package, flips the
+ * ReceptionRequest to "fulfilled", and DMs the requester this template
+ * — telling them they can come pick it up + naming the volunteer who
+ * received it. The DM is sent alongside the standard Flow 1
+ * `[Abgeholt]` inline keyboard (built by `buildPickupKeyboard`) so the
+ * requester can close the loop with a tap from their own thread.
+ *
+ *   en: Melanie Torena has picked up the package — you can now pick it up.
+ *   de: Melanie Torena hat das Paket abgeholt – du kannst es jetzt abholen.
+ *   es: Melanie Torena ha recogido el paquete — ya puedes recogerlo.
+ *   tr: Melanie Torena paketi aldı — şimdi alabilirsin.
+ *
+ * Localised de/en/es/tr, same set as the rest of the channel; falls
+ * back to German.
+ */
+const RECIPIENT_READY_TO_PICK_UP_TEMPLATES: Readonly<
+  Record<SupportedLanguage, (volunteerName: string) => string>
+> = {
+  de: (volunteerName) =>
+    `${volunteerName} hat das Paket abgeholt – du kannst es jetzt abholen.`,
+  en: (volunteerName) =>
+    `${volunteerName} has picked up the package — you can now pick it up.`,
+  es: (volunteerName) =>
+    `${volunteerName} ha recogido el paquete — ya puedes recogerlo.`,
+  tr: (volunteerName) =>
+    `${volunteerName} paketi aldı — şimdi alabilirsin.`,
+};
+
+export function buildRecipientReadyToPickUpDmText(args: {
+  readonly volunteerName: string;
+  readonly language: string | null | undefined;
+}): string {
+  const language = pickLanguage(args.language);
+  return RECIPIENT_READY_TO_PICK_UP_TEMPLATES[language](args.volunteerName);
+}
+
+/**
+ * v2.1 #121: short confirmation DM the channel sends to the volunteer
+ * after the early-arrival branch has registered the Package + flipped
+ * the ReceptionRequest. Names the requester so the volunteer knows the
+ * loop closed; no inline keyboard, no procedural follow-up.
+ *
+ *   en: Got it — Diego de Miguel has been notified.
+ *   de: Alles klar — Diego de Miguel wurde benachrichtigt.
+ *   es: Listo — Diego de Miguel ha sido notificado.
+ *   tr: Tamam — Diego de Miguel'e bildirildi.
+ *
+ * Localised de/en/es/tr; falls back to German.
+ */
+const VOLUNTEER_EARLY_ARRIVAL_ACK_TEMPLATES: Readonly<
+  Record<SupportedLanguage, (requesterName: string) => string>
+> = {
+  de: (requesterName) =>
+    `Alles klar — ${requesterName} wurde benachrichtigt.`,
+  en: (requesterName) =>
+    `Got it — ${requesterName} has been notified.`,
+  es: (requesterName) =>
+    `Listo — ${requesterName} ha sido notificado.`,
+  tr: (requesterName) =>
+    `Tamam — ${requesterName}'e bildirildi.`,
+};
+
+export function buildVolunteerEarlyArrivalAckDmText(args: {
+  readonly requesterName: string;
+  readonly language: string | null | undefined;
+}): string {
+  const language = pickLanguage(args.language);
+  return VOLUNTEER_EARLY_ARRIVAL_ACK_TEMPLATES[language](args.requesterName);
+}
