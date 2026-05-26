@@ -88,6 +88,8 @@ interface BuiltDeps {
   resolveRecipient: ReturnType<typeof vi.fn>;
   confirmPickup: ReturnType<typeof vi.fn>;
   listOpenPackagesForRecipient: ReturnType<typeof vi.fn>;
+  listMatchedReceptionRequestsForRequester: ReturnType<typeof vi.fn>;
+  getResidentByPlatformId: ReturnType<typeof vi.fn>;
   editGroupCard: ReturnType<typeof vi.fn>;
   sendDirectMessage: ReturnType<typeof vi.fn>;
   registerResident: ReturnType<typeof vi.fn>;
@@ -123,6 +125,10 @@ function buildDeps(overrides: {
   confirmPickupError?: Error;
   openPackagesForRecipient?: readonly Package[];
   openPackagesForRecipientError?: Error;
+  matchedReceptionRequestsForRequester?: readonly ReceptionRequest[];
+  matchedReceptionRequestsForRequesterError?: Error;
+  residentByPlatformId?: Resident | null;
+  residentByPlatformIdError?: Error;
 } = {}): BuiltDeps {
   const session = overrides.session ?? makeSession("sess_new");
   const sendToAsh = vi.fn().mockResolvedValue(session);
@@ -318,6 +324,30 @@ function buildDeps(overrides: {
     : vi
         .fn()
         .mockResolvedValue(overrides.openPackagesForRecipient ?? []);
+  // v2.1 #122: default to "no matched RR as requester" so the existing
+  // 0-package branch keeps sending the pre-#122 generic DM. Tests
+  // exercising the new branch override this explicitly.
+  const listMatchedReceptionRequestsForRequester =
+    overrides.matchedReceptionRequestsForRequesterError
+      ? vi
+          .fn()
+          .mockRejectedValue(
+            overrides.matchedReceptionRequestsForRequesterError,
+          )
+      : vi
+          .fn()
+          .mockResolvedValue(
+            overrides.matchedReceptionRequestsForRequester ?? [],
+          );
+  const getResidentByPlatformId = overrides.residentByPlatformIdError
+    ? vi.fn().mockRejectedValue(overrides.residentByPlatformIdError)
+    : vi
+        .fn()
+        .mockResolvedValue(
+          "residentByPlatformId" in overrides
+            ? overrides.residentByPlatformId
+            : null,
+        );
   const getRegisteredResident = vi
     .fn()
     .mockResolvedValue(
@@ -425,6 +455,8 @@ function buildDeps(overrides: {
     resolveRecipient,
     confirmPickup,
     listOpenPackagesForRecipient,
+    listMatchedReceptionRequestsForRequester,
+    getResidentByPlatformId,
     editGroupCard,
     sendDirectMessage,
     registerResident,
@@ -451,6 +483,8 @@ function buildDeps(overrides: {
       resolveRecipient,
       confirmPickup,
       listOpenPackagesForRecipient,
+      listMatchedReceptionRequestsForRequester,
+      getResidentByPlatformId,
       editGroupCard,
       sendDirectMessage,
       registerResident,
@@ -3854,6 +3888,390 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
     expect(sendDirectMessage.mock.calls[0]![1]).toBe(
       "Du hast aktuell kein offenes Paket bei mir.",
     );
+  });
+
+  // v2.1 #122: defensive copy for the 0-match branch when the caller
+  // has a matched RR as requester but no held Package yet.
+  describe("v2.1 #122: 0 open packages + matched RR as requester → waiting-on-volunteer DM", () => {
+    function matchedRequestForDiego(
+      overrides: Partial<ReceptionRequest> = {},
+    ): ReceptionRequest {
+      return {
+        id: "req_mpmac3o7_sb0isv",
+        streetId: "Methfesselstraße",
+        requesterResidentId: "200", // Diego (the caller in this scenario)
+        requesterName: "Diego de Miguel",
+        requesterHouseNumber: "88",
+        carrier: "DHL",
+        expectedAt: null,
+        volunteerResidentId: "300", // Melanie
+        volunteerAvailability: null,
+        status: "matched",
+        createdAt: Date.now() - 60_000,
+        respondedAt: Date.now() - 30_000,
+        ...overrides,
+      };
+    }
+
+    function melanieResident(): Resident {
+      return {
+        id: "300",
+        name: "Melanie Torena",
+        street: "Methfesselstraße",
+        houseNumber: "44",
+        platformId: "300",
+        platform: "telegram",
+        language: "de",
+        availabilityPatterns: [],
+        registeredAt: Date.now(),
+        source: "explicit",
+        confirmed: true,
+      };
+    }
+
+    it("German caller with matched RR → German waiting DM names the volunteer (no confirmPickup, no agent)", async () => {
+      const resident = recipientResident("de");
+      const {
+        deps,
+        sendToAsh,
+        sendDirectMessage,
+        confirmPickup,
+        listMatchedReceptionRequestsForRequester,
+        getResidentByPlatformId,
+      } = buildDeps({
+        classification: {
+          kind: "pickup-confirmation",
+          absenceSignal: false,
+          confidence: "high",
+          reason: "explicit pickup phrasing",
+        },
+        registeredResident: resident,
+        openPackagesForRecipient: [],
+        matchedReceptionRequestsForRequester: [matchedRequestForDiego()],
+        residentByPlatformId: melanieResident(),
+      });
+
+      await processInboundTelegramUpdate(
+        makeRequest(
+          dmUpdate({
+            chatId: 200,
+            text: "Hab abgeholt",
+            fromUserId: 200,
+            languageCode: "de",
+          }),
+        ),
+        deps,
+      );
+
+      expect(listMatchedReceptionRequestsForRequester).toHaveBeenCalledTimes(1);
+      expect(listMatchedReceptionRequestsForRequester).toHaveBeenCalledWith(
+        resident,
+      );
+      expect(getResidentByPlatformId).toHaveBeenCalledWith("300");
+      expect(confirmPickup).not.toHaveBeenCalled();
+      expect(sendToAsh).not.toHaveBeenCalled();
+      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+      expect(sendDirectMessage.mock.calls[0]![1]).toBe(
+        "Dein Paket ist noch nicht da – Melanie Torena nimmt es für dich an. Ich melde mich, sobald sie es übergibt.",
+      );
+    });
+
+    it("English caller with matched RR → English waiting DM names the volunteer", async () => {
+      const resident = recipientResident("en");
+      const { deps, sendDirectMessage } = buildDeps({
+        classification: {
+          kind: "pickup-confirmation",
+          absenceSignal: false,
+          confidence: "high",
+          reason: "explicit pickup phrasing",
+        },
+        registeredResident: resident,
+        openPackagesForRecipient: [],
+        matchedReceptionRequestsForRequester: [matchedRequestForDiego()],
+        residentByPlatformId: melanieResident(),
+      });
+
+      await processInboundTelegramUpdate(
+        makeRequest(
+          dmUpdate({
+            chatId: 200,
+            text: "I picked it up",
+            fromUserId: 200,
+            languageCode: "en",
+          }),
+        ),
+        deps,
+      );
+
+      expect(sendDirectMessage.mock.calls[0]![1]).toBe(
+        "Your package isn't here yet — Melanie Torena is collecting it for you. I'll DM you the moment they hand it over.",
+      );
+    });
+
+    it("multiple matched RRs → most-recent wins (the factory's ordering contract)", async () => {
+      const resident = recipientResident("de");
+      // listMatchedReceptionRequestsForRequester is contracted to return
+      // most-recent-first; assert the channel does NOT re-sort or pick
+      // by some other criterion (e.g. carrier preference).
+      const newest = matchedRequestForDiego({
+        id: "req_newest",
+        volunteerResidentId: "300", // Melanie
+        createdAt: Date.now() - 10_000,
+      });
+      const older = matchedRequestForDiego({
+        id: "req_older",
+        volunteerResidentId: "400", // someone else
+        createdAt: Date.now() - 100_000,
+      });
+      const { deps, sendDirectMessage, getResidentByPlatformId } = buildDeps({
+        classification: {
+          kind: "pickup-confirmation",
+          absenceSignal: false,
+          confidence: "high",
+          reason: "explicit pickup phrasing",
+        },
+        registeredResident: resident,
+        openPackagesForRecipient: [],
+        matchedReceptionRequestsForRequester: [newest, older],
+        residentByPlatformId: melanieResident(),
+      });
+
+      await processInboundTelegramUpdate(
+        makeRequest(
+          dmUpdate({
+            chatId: 200,
+            text: "Hab abgeholt",
+            fromUserId: 200,
+            languageCode: "de",
+          }),
+        ),
+        deps,
+      );
+
+      // Only the newest RR's volunteer should be resolved; the older
+      // RR (volunteer id "400") must not be looked up.
+      expect(getResidentByPlatformId).toHaveBeenCalledTimes(1);
+      expect(getResidentByPlatformId).toHaveBeenCalledWith("300");
+      expect(sendDirectMessage.mock.calls[0]![1]).toContain("Melanie Torena");
+    });
+
+    it("matched RR + getResidentByPlatformId returns null → falls back to volunteer-name-free phrasing", async () => {
+      const resident = recipientResident("en");
+      const { deps, sendDirectMessage } = buildDeps({
+        classification: {
+          kind: "pickup-confirmation",
+          absenceSignal: false,
+          confidence: "high",
+          reason: "explicit pickup phrasing",
+        },
+        registeredResident: resident,
+        openPackagesForRecipient: [],
+        matchedReceptionRequestsForRequester: [matchedRequestForDiego()],
+        residentByPlatformId: null,
+      });
+
+      await processInboundTelegramUpdate(
+        makeRequest(
+          dmUpdate({
+            chatId: 200,
+            text: "I picked it up",
+            fromUserId: 200,
+            languageCode: "en",
+          }),
+        ),
+        deps,
+      );
+
+      expect(sendDirectMessage.mock.calls[0]![1]).toBe(
+        "Your package isn't here yet — a neighbour is collecting it for you. I'll DM you the moment they hand it over.",
+      );
+    });
+
+    it("matched RR + getResidentByPlatformId throws → falls back to volunteer-name-free phrasing (no regression)", async () => {
+      const resident = recipientResident("de");
+      const { deps, sendDirectMessage, confirmPickup, sendToAsh } = buildDeps({
+        classification: {
+          kind: "pickup-confirmation",
+          absenceSignal: false,
+          confidence: "high",
+          reason: "explicit pickup phrasing",
+        },
+        registeredResident: resident,
+        openPackagesForRecipient: [],
+        matchedReceptionRequestsForRequester: [matchedRequestForDiego()],
+        residentByPlatformIdError: new Error("redis hiccup"),
+      });
+
+      await processInboundTelegramUpdate(
+        makeRequest(
+          dmUpdate({
+            chatId: 200,
+            text: "Hab abgeholt",
+            fromUserId: 200,
+            languageCode: "de",
+          }),
+        ),
+        deps,
+      );
+
+      expect(confirmPickup).not.toHaveBeenCalled();
+      expect(sendToAsh).not.toHaveBeenCalled();
+      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+      expect(sendDirectMessage.mock.calls[0]![1]).toBe(
+        "Dein Paket ist noch nicht da – ein:e Nachbar:in nimmt es für dich an. Ich melde mich, sobald es übergeben wird.",
+      );
+    });
+
+    it("matched RR with null volunteerResidentId → no getResident call, generic phrasing", async () => {
+      // Edge case: a matched RR shouldn't have a null volunteer in
+      // production (the `acceptReceptionRequest` flip always populates
+      // it), but a stale record from a partially-failed earlier write
+      // could. The channel must still produce a coherent DM.
+      const resident = recipientResident("de");
+      const { deps, sendDirectMessage, getResidentByPlatformId } = buildDeps({
+        classification: {
+          kind: "pickup-confirmation",
+          absenceSignal: false,
+          confidence: "high",
+          reason: "explicit pickup phrasing",
+        },
+        registeredResident: resident,
+        openPackagesForRecipient: [],
+        matchedReceptionRequestsForRequester: [
+          matchedRequestForDiego({ volunteerResidentId: null }),
+        ],
+      });
+
+      await processInboundTelegramUpdate(
+        makeRequest(
+          dmUpdate({
+            chatId: 200,
+            text: "Hab abgeholt",
+            fromUserId: 200,
+            languageCode: "de",
+          }),
+        ),
+        deps,
+      );
+
+      expect(getResidentByPlatformId).not.toHaveBeenCalled();
+      expect(sendDirectMessage.mock.calls[0]![1]).toBe(
+        "Dein Paket ist noch nicht da – ein:e Nachbar:in nimmt es für dich an. Ich melde mich, sobald es übergeben wird.",
+      );
+    });
+
+    it("listMatchedReceptionRequestsForRequester throws → falls back to pre-#122 'no open packages' DM (no regression)", async () => {
+      const resident = recipientResident("de");
+      const { deps, sendDirectMessage, sendToAsh, confirmPickup } = buildDeps({
+        classification: {
+          kind: "pickup-confirmation",
+          absenceSignal: false,
+          confidence: "high",
+          reason: "explicit pickup phrasing",
+        },
+        registeredResident: resident,
+        openPackagesForRecipient: [],
+        matchedReceptionRequestsForRequesterError: new Error("redis down"),
+      });
+
+      await processInboundTelegramUpdate(
+        makeRequest(
+          dmUpdate({
+            chatId: 200,
+            text: "Hab abgeholt",
+            fromUserId: 200,
+            languageCode: "de",
+          }),
+        ),
+        deps,
+      );
+
+      expect(confirmPickup).not.toHaveBeenCalled();
+      expect(sendToAsh).not.toHaveBeenCalled();
+      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+      expect(sendDirectMessage.mock.calls[0]![1]).toBe(
+        "Du hast aktuell kein offenes Paket bei mir.",
+      );
+    });
+
+    it("0 open packages AND 0 matched RRs → pre-#122 'no open packages' DM stays verbatim (no regression)", async () => {
+      const resident = recipientResident("de");
+      const {
+        deps,
+        sendDirectMessage,
+        listMatchedReceptionRequestsForRequester,
+        getResidentByPlatformId,
+      } = buildDeps({
+        classification: {
+          kind: "pickup-confirmation",
+          absenceSignal: false,
+          confidence: "high",
+          reason: "explicit pickup phrasing",
+        },
+        registeredResident: resident,
+        openPackagesForRecipient: [],
+        matchedReceptionRequestsForRequester: [],
+      });
+
+      await processInboundTelegramUpdate(
+        makeRequest(
+          dmUpdate({
+            chatId: 200,
+            text: "Hab abgeholt",
+            fromUserId: 200,
+            languageCode: "de",
+          }),
+        ),
+        deps,
+      );
+
+      // Sanity: the new lookup ran (we check before falling back).
+      expect(listMatchedReceptionRequestsForRequester).toHaveBeenCalledTimes(1);
+      // No volunteer lookup because there's no matched RR.
+      expect(getResidentByPlatformId).not.toHaveBeenCalled();
+      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+      expect(sendDirectMessage.mock.calls[0]![1]).toBe(
+        "Du hast aktuell kein offenes Paket bei mir.",
+      );
+    });
+
+    it("1 held Package present → existing 1-match confirmPickup path stays untouched (no new lookup)", async () => {
+      // Regression pin: when the caller HAS a held Package, the channel
+      // must not call listMatchedReceptionRequestsForRequester at all —
+      // the new lookup is exclusive to the 0-package branch.
+      const resident = recipientResident("de");
+      const {
+        deps,
+        confirmPickup,
+        listMatchedReceptionRequestsForRequester,
+        getResidentByPlatformId,
+      } = buildDeps({
+        classification: {
+          kind: "pickup-confirmation",
+          absenceSignal: false,
+          confidence: "high",
+          reason: "explicit pickup phrasing",
+        },
+        registeredResident: resident,
+        openPackagesForRecipient: [heldPackage("pkg_42")],
+      });
+
+      await processInboundTelegramUpdate(
+        makeRequest(
+          dmUpdate({
+            chatId: 200,
+            text: "Hab abgeholt",
+            fromUserId: 200,
+            languageCode: "de",
+          }),
+        ),
+        deps,
+      );
+
+      expect(confirmPickup).toHaveBeenCalledTimes(1);
+      expect(listMatchedReceptionRequestsForRequester).not.toHaveBeenCalled();
+      expect(getResidentByPlatformId).not.toHaveBeenCalled();
+    });
   });
 
   it("2+ open packages → sends disambiguation DM pointing at per-package DM above, does NOT call confirmPickup (v2.1 #115)", async () => {

@@ -49,6 +49,7 @@ import { registerResident } from "../registration.js";
 import {
   getResident,
   listHeldPackagesForStreet,
+  listReceptionRequestsForStreet,
   upsertKnownTelegramUser,
 } from "../redis.js";
 import { runWithTrace, type TraceKind } from "../trace.js";
@@ -325,6 +326,23 @@ export function telegramChannel(config: TelegramChannelConfig) {
               const held = await listHeldPackagesForStreet(caller.street);
               return held.filter((pkg) => pkg.recipientResidentId === caller.id);
             },
+            listMatchedReceptionRequestsForRequester: async (caller) => {
+              // v2.1 #122: scope to the caller's own street + filter to
+              // `matched` RRs where the caller is the requester. Same
+              // spike-scale tradeoff as the held-packages lookup — full
+              // street scan per query, fine while the street is small
+              // and this only fires on the 0-package pickup branch.
+              const all = await listReceptionRequestsForStreet(caller.street);
+              return all
+                .filter(
+                  (req) =>
+                    req.status === "matched" &&
+                    req.requesterResidentId === caller.id,
+                )
+                .sort((a, b) => b.createdAt - a.createdAt);
+            },
+            getResidentByPlatformId: async (platformId) =>
+              getResident(platformId),
             getRegisteredResident: async (userId) =>
               getResident(String(userId)),
             createReceptionRequest: (caller, input) =>
