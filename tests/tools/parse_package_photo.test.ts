@@ -1,16 +1,19 @@
 /**
- * `parse_tracking_page` — vision tool covering the fallback chain and
- * the output schema's optional-field handling. Sibling to
- * `parse_label.test.ts`; same conventions (mocked `generateObject`,
- * model-string regression guard) so a future contributor can pattern-
- * match across both tools without re-learning the test shape.
+ * `parse_package_photo` — unified vision tool. Covers the discriminated
+ * union output, the fallback chain, and URL-shape regression guards.
  *
- * URL vs bytes: the tool takes an `imageUrl` string and passes it to
- * `generateObject` as `{ type: 'file', data: imageUrl, mediaType: 'image' }`.
- * Inline bytes do NOT work via the Vercel AI Gateway — the Gateway
- * client converts them to a `data:` URI and the Gateway server rejects
- * with "Unsupported file URI type". Tests therefore assert URL-shape,
- * not byte-shape.
+ * Tests are intentionally model-agnostic: the AI Gateway's actual
+ * routing (gemini → claude sonnet 4.6) is exercised behind
+ * `generateObject`, which we mock. We assert on the call sequence
+ * (primary first, then fallback iff primary throws) and on the model
+ * strings the tool passes to `generateObject` so the fallback chain
+ * stays stable.
+ *
+ * v2.1 #128: this tool supersedes `parse_label` + `parse_tracking_page`
+ * with a single LLM call that returns one of three discriminated shapes
+ * (`shipping_label` | `tracking_page` | `unknown`). The channel layer
+ * branches on `kind` to pick Flow 1 (DM-photo register), Flow 2
+ * (tracking-page reception request), or the recovery DM.
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -22,12 +25,12 @@ vi.mock("ai", () => ({
 }));
 
 async function loadTool() {
-  const mod = await import("../../agent/tools/parse_tracking_page.js");
+  const mod = await import("../../agent/tools/parse_package_photo.js");
   return mod.default;
 }
 
 async function loadModelSlugs() {
-  const mod = await import("../../agent/tools/parse_tracking_page.js");
+  const mod = await import("../../agent/tools/parse_package_photo.js");
   return { primary: mod.PRIMARY_MODEL, fallback: mod.FALLBACK_MODEL };
 }
 
@@ -43,64 +46,92 @@ async function runExecute(input: Record<string, unknown>) {
 const sampleUrl =
   "https://api.telegram.org/file/bot111:AAA/photos/file_42.jpg";
 
-describe("parse_tracking_page", () => {
+describe("parse_package_photo", () => {
   beforeEach(() => {
     generateObjectMock.mockReset();
   });
 
-  it("returns the parsed tracking-page fields from the primary model on the happy path", async () => {
+  it("returns kind='shipping_label' with recipient + carrier fields on a clear label photo", async () => {
     generateObjectMock.mockResolvedValueOnce({
       object: {
+        kind: "shipping_label",
         carrier: "DHL",
+        recipientName: "Anna-Sophie Meyer",
+        recipientHouseNumber: "92",
         trackingNumber: "00340434161094021899",
-        expectedWindowStartAt: "2026-05-19T13:00:00Z",
-        expectedWindowEndAt: "2026-05-19T16:00:00Z",
-        absenceSignal: true,
         confidence: "high",
-        reason: "all fields legible; caption explicitly says 'bin nicht da'",
+        reason: "all fields legible on a clear DHL label",
       },
     });
 
     const result = (await runExecute({
       imageUrl: sampleUrl,
-      caption: "kann jemand annehmen? bin nicht da",
+      caption: "Paket für Anna-Sophie",
     })) as {
+      kind: string;
       carrier: string;
-      trackingNumber?: string;
-      expectedWindowStartAt?: string;
-      expectedWindowEndAt?: string;
-      absenceSignal?: boolean;
+      recipientName?: string;
       confidence: string;
     };
 
+    expect(result.kind).toBe("shipping_label");
     expect(result.carrier).toBe("DHL");
-    expect(result.trackingNumber).toBe("00340434161094021899");
-    expect(result.expectedWindowStartAt).toBe("2026-05-19T13:00:00Z");
-    expect(result.expectedWindowEndAt).toBe("2026-05-19T16:00:00Z");
-    expect(result.absenceSignal).toBe(true);
+    expect(result.recipientName).toBe("Anna-Sophie Meyer");
     expect(result.confidence).toBe("high");
 
     expect(generateObjectMock).toHaveBeenCalledTimes(1);
-    const call = generateObjectMock.mock.calls[0]![0];
+    const call = generateObjectMock.mock.calls[0][0];
     const { primary } = await loadModelSlugs();
     expect(call.model).toBe(primary);
   });
 
-  it("returns a low-confidence parse intact so the orchestrator can append the please-confirm suffix", async () => {
+  it("returns kind='tracking_page' with carrier + window endpoints on a clear tracking page screenshot", async () => {
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        carrier: "unknown",
-        confidence: "low",
-        reason: "carrier logo obscured by screenshot crop",
+        kind: "tracking_page",
+        carrier: "Hermes",
+        trackingNumber: "H42-998877",
+        expectedWindowStartAt: "2026-05-19T13:00:00Z",
+        expectedWindowEndAt: "2026-05-19T16:00:00Z",
+        confidence: "high",
+        reason: "Hermes tracking page with explicit 13-16 window",
       },
     });
 
     const result = (await runExecute({
       imageUrl: sampleUrl,
-    })) as { confidence: string; reason: string };
+      caption: "Bin morgen nicht zu Hause",
+    })) as {
+      kind: string;
+      carrier: string;
+      expectedWindowStartAt?: string;
+      expectedWindowEndAt?: string;
+      confidence: string;
+    };
 
+    expect(result.kind).toBe("tracking_page");
+    expect(result.carrier).toBe("Hermes");
+    expect(result.expectedWindowStartAt).toBe("2026-05-19T13:00:00Z");
+    expect(result.expectedWindowEndAt).toBe("2026-05-19T16:00:00Z");
+    expect(result.confidence).toBe("high");
+  });
+
+  it("returns kind='unknown' with confidence='low' on an unclassifiable photo", async () => {
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        kind: "unknown",
+        confidence: "low",
+        reason: "photo is a meme screenshot, no package context",
+      },
+    });
+
+    const result = (await runExecute({
+      imageUrl: sampleUrl,
+    })) as { kind: string; confidence: string; reason: string };
+
+    expect(result.kind).toBe("unknown");
     expect(result.confidence).toBe("low");
-    expect(result.reason).toMatch(/obscured/);
+    expect(result.reason).toMatch(/meme/);
   });
 
   it("falls back to the secondary model when the primary throws", async () => {
@@ -109,7 +140,10 @@ describe("parse_tracking_page", () => {
     );
     generateObjectMock.mockResolvedValueOnce({
       object: {
+        kind: "shipping_label",
         carrier: "Hermes",
+        recipientName: "Ritter",
+        recipientHouseNumber: "5",
         confidence: "medium",
         reason: "fallback succeeded",
       },
@@ -117,8 +151,9 @@ describe("parse_tracking_page", () => {
 
     const result = (await runExecute({
       imageUrl: sampleUrl,
-    })) as { carrier: string };
+    })) as { kind: string; carrier: string };
 
+    expect(result.kind).toBe("shipping_label");
     expect(result.carrier).toBe("Hermes");
 
     const { primary, fallback } = await loadModelSlugs();
@@ -138,12 +173,13 @@ describe("parse_tracking_page", () => {
   });
 
   it("passes the image URL through as a FilePart with mediaType='image' so the Gateway server fetches it", async () => {
-    // Regression guard for the v0.3 photo-path bug: passing inline bytes
-    // makes the Gateway client serialize to `data:image/jpeg;base64,...`
-    // and the Gateway server rejects with "Unsupported file URI type".
-    // The tool MUST pass the URL through verbatim as the `data` field.
+    // Regression guard: passing inline bytes makes the Gateway client
+    // serialize to `data:image/jpeg;base64,...` and the Gateway server
+    // rejects with "Unsupported file URI type". The tool MUST pass the
+    // URL through verbatim as the `data` field.
     generateObjectMock.mockResolvedValueOnce({
       object: {
+        kind: "shipping_label",
         carrier: "DHL",
         confidence: "high",
         reason: "ok",
@@ -152,7 +188,7 @@ describe("parse_tracking_page", () => {
 
     await runExecute({
       imageUrl: sampleUrl,
-      caption: "kann jemand annehmen?",
+      caption: "lab",
     });
 
     const call = generateObjectMock.mock.calls[0]![0];
@@ -168,15 +204,13 @@ describe("parse_tracking_page", () => {
 
     const textPart = userMessage.content[1];
     expect(textPart.type).toBe("text");
-    expect(textPart.text).toMatch(/caption.*annehmen/i);
+    expect(textPart.text).toMatch(/caption.*lab/i);
   });
 
   it("PRIMARY_MODEL and FALLBACK_MODEL name vision-capable slugs on the AI Gateway", async () => {
-    // Regression guard for the v0.3 launch bug (mirrors parse_label's
-    // canary): text-only Gemma variants are valid AI Gateway model IDs
-    // but throw at the provider boundary when handed a FilePart. If you
-    // need to add a new model, add it to the allowlist here AND check
-    // its modality column on https://ai-gateway.vercel.sh/v1/models.
+    // Regression guard for the v0.3 launch bug: text-only slugs (e.g.
+    // `google/gemma-4-31b-it`) throw at the provider boundary on a
+    // FilePart input. Both slugs must be on the vision-capable list.
     const { primary, fallback } = await loadModelSlugs();
 
     const visionCapablePrefixes = [
@@ -217,6 +251,7 @@ describe("parse_tracking_page", () => {
   it("uses a generic prompt when no caption is supplied", async () => {
     generateObjectMock.mockResolvedValueOnce({
       object: {
+        kind: "shipping_label",
         carrier: "DHL",
         confidence: "high",
         reason: "ok",
@@ -230,28 +265,29 @@ describe("parse_tracking_page", () => {
     const call = generateObjectMock.mock.calls[0]![0];
     const textPart = call.messages[0].content[1];
     expect(textPart.text).not.toMatch(/caption/i);
-    expect(textPart.text).toMatch(/read the tracking page/i);
+    expect(textPart.text).toMatch(/classify/i);
   });
 
-  it("preserves an optional absenceSignal=false when the model explicitly declared no absence", async () => {
-    // The schema admits absenceSignal as optional; a model that says
-    // "no, the caption was a search intent" should round-trip the
-    // explicit `false` so the orchestrator can route to a different
-    // flow rather than defaulting to Flow 2 v2.
+  it("system prompt names all three kinds AND distinguishes shipping_label vs tracking_page so the model can route correctly", async () => {
+    // Regression pin against silently dropping a kind from the
+    // classification rubric.
     generateObjectMock.mockResolvedValueOnce({
       object: {
-        carrier: "DHL",
-        absenceSignal: false,
-        confidence: "medium",
-        reason: "caption asks where the package IS, not requesting help",
+        kind: "unknown",
+        confidence: "low",
+        reason: "ok",
       },
     });
+    await runExecute({ imageUrl: sampleUrl });
 
-    const result = (await runExecute({
-      imageUrl: sampleUrl,
-      caption: "wo ist mein Paket? Sollte schon da sein",
-    })) as { absenceSignal?: boolean };
-
-    expect(result.absenceSignal).toBe(false);
+    const call = generateObjectMock.mock.calls[0]![0];
+    expect(call.system).toMatch(/shipping_label/);
+    expect(call.system).toMatch(/tracking_page/);
+    expect(call.system).toMatch(/unknown/);
+    // Disambiguation lives in the prompt: the model needs the cue that
+    // physical artifacts → shipping_label, digital screenshots →
+    // tracking_page.
+    expect(call.system).toMatch(/physical/i);
+    expect(call.system).toMatch(/screenshot/i);
   });
 });

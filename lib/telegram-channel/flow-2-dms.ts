@@ -65,24 +65,51 @@ export function buildFlow2AckDm(raw: string | null | undefined): string {
 }
 
 /**
- * Recovery prompt — the channel could not extract enough fields from a
- * DM photo (low confidence, vision-tool null/throw, unregistered photo
- * sender, getFileUrl throw, or createReceptionRequest hiccup). One
- * self-contained sentence per language pointing the user at `/receive`
- * (the explicit, classifier-bypassing Flow 2 entry from Slice 2 / #87).
- * Includes the `/register` hint inline so an unregistered user who sent
- * a photo gets the same recovery path without a second turn.
+ * v2.1 #128: 3-path recovery DM for an unclassifiable DM photo. Sent
+ * when the unified `parse_package_photo` returns `kind: "unknown"`,
+ * when the vision tool throws on both primary + fallback, or when
+ * `getFileUrl` fails. Replaces the pre-#128 single-path "retry via
+ * /receive" copy.
+ *
+ * Lists three concrete next steps the sender can take:
+ *   - retake a clearer LABEL photo (Flow 1 entry — the DM is now the
+ *     privacy-correct surface for shipping labels per #128)
+ *   - type the label details as text ("DHL for Anna Müller at #5") —
+ *     handled today by the agent fallthrough
+ *   - use `/receive` if expecting a package (Flow 2 entry)
+ *
+ * One self-contained DM per language. The `/register` hint is inlined
+ * so an unregistered user who sent a photo gets the full recovery path
+ * without a second turn. de/en/es/tr; falls back to German.
  */
-const FLOW_2_VLC_DMS: Readonly<Record<SupportedLanguage, string>> = {
-  de: "Ich konnte den Beleg nicht eindeutig lesen. Bitte versuche es nochmal mit /receive (z. B. /receive DHL morgen 14-16). Falls du dich noch nicht registriert hast, beginne mit /register.",
-  en: "I couldn't read the receipt confidently. Please retry with /receive (e.g. /receive DHL morgen 14-16). If you haven't registered yet, start with /register.",
-  es: "No pude leer el recibo con seguridad. Por favor intenta de nuevo con /receive (ej. /receive DHL morgen 14-16). Si aún no te has registrado, empieza con /register.",
-  tr: "Belgeyi net okuyamadım. Lütfen tekrar /receive ile dene (örn. /receive DHL morgen 14-16). Henüz kayıt olmadıysan, /register ile başla.",
+const VLC_3_PATH_DMS: Readonly<Record<SupportedLanguage, string>> = {
+  de:
+    "Ich konnte das Foto nicht eindeutig zuordnen. Drei Wege weiter:\n" +
+    "• Schicke mir das Etikett nochmal als deutlicheres Foto — ich registriere das Paket dann hier.\n" +
+    "• Oder tippe die Etikett-Details als Text (z. B. „DHL für Anna Müller, Nummer 5\").\n" +
+    "• Oder erwartest du selbst ein Paket? Dann nutze /receive (z. B. /receive DHL morgen 14-16).\n" +
+    "Falls du dich noch nicht registriert hast, beginne mit /register.",
+  en:
+    "I couldn't classify that photo confidently. Three options:\n" +
+    "• Resend a clearer photo of the label — I'll register the package here.\n" +
+    "• Or type the label details as text (e.g. \"DHL for Anna Müller at #5\").\n" +
+    "• Or are you expecting a package yourself? Use /receive (e.g. /receive DHL morgen 14-16).\n" +
+    "If you haven't registered yet, start with /register.",
+  es:
+    "No pude clasificar la foto con seguridad. Tres opciones:\n" +
+    "• Vuelve a enviarme una foto más clara de la etiqueta — registro el paquete aquí.\n" +
+    "• O escribe los datos como texto (p. ej. „DHL para Anna Müller, número 5\").\n" +
+    "• ¿O esperas un paquete tú mismo? Usa /receive (p. ej. /receive DHL morgen 14-16).\n" +
+    "Si aún no te has registrado, empieza con /register.",
+  tr:
+    "Fotoğrafı net sınıflandıramadım. Üç seçenek var:\n" +
+    "• Etiketin daha net bir fotoğrafını gönder — paketi burada kaydederim.\n" +
+    "• Ya da etiket bilgilerini yaz (örn. „Anna Müller için DHL, no. 5\").\n" +
+    "• Kendi paketini mi bekliyorsun? /receive ile dene (örn. /receive DHL morgen 14-16).\n" +
+    "Henüz kayıt olmadıysan /register ile başla.",
 };
 
-export function buildFlow2VisionLowConfidenceDm(
-  raw: string | null | undefined,
-): string {
+export function buildVlc3PathDm(raw: string | null | undefined): string {
   const language = pickLanguage(raw);
-  return FLOW_2_VLC_DMS[language];
+  return VLC_3_PATH_DMS[language];
 }

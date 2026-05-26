@@ -35,7 +35,7 @@
  *     Unix ms via the same DST-safe Berlin helpers
  *     (`lib/berlin-time.ts`) the `/receive` parser uses.
  *
- * Same fallback chain as `parse_tracking_page`:
+ * Same fallback chain as `parse_package_photo`:
  *
  *   primary:  google/gemini-2.5-flash — cheap, multilingual NLU
  *   fallback: anthropic/claude-sonnet-4.6 — stronger reasoning, fewer

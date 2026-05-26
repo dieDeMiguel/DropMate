@@ -37,8 +37,7 @@ import { defineChannel, GET, POST } from "experimental-ash/channels";
 
 import classifyDmIntentTool from "../../agent/tools/classify_dm_intent.js";
 import classifyGroupMessageTool from "../../agent/tools/classify_group_message.js";
-import parseLabelTool from "../../agent/tools/parse_label.js";
-import parseTrackingPageTool from "../../agent/tools/parse_tracking_page.js";
+import parsePackagePhotoTool from "../../agent/tools/parse_package_photo.js";
 import {
   acceptReceptionRequest,
   createReceptionRequest,
@@ -184,60 +183,46 @@ export function telegramChannel(config: TelegramChannelConfig) {
               drainSessionToTelegram(session, chatId, { token }),
             getFileUrl: async (fileId) =>
               buildFileProxyUrl(origin, fileId, webhookSecret),
-            parseTrackingPage: async (input) => {
-              // No silent catch: errors propagate to process-update.ts's
-              // catch which logs with stack + chatId, and the channel
-              // sends the deterministic recovery prompt DM (per #100 —
-              // no agent involvement on the DM photo path).
-              const execute = parseTrackingPageTool.execute as (
+            parsePackagePhoto: async (input) => {
+              // v2.1 #128: unified vision call replacing the pre-#128
+              // parseLabel + parseTrackingPage split. Errors propagate
+              // to process-update.ts's catch which logs with stack +
+              // chatId; the DM-photo path sends the 3-path recovery DM,
+              // the group-photo path stays silent.
+              type Carrier =
+                | "DHL"
+                | "Hermes"
+                | "DPD"
+                | "GLS"
+                | "UPS"
+                | "Amazon"
+                | "unknown";
+              const execute = parsePackagePhotoTool.execute as (
                 input: unknown,
                 options: unknown,
-              ) => Promise<{
-                carrier:
-                  | "DHL"
-                  | "Hermes"
-                  | "DPD"
-                  | "GLS"
-                  | "UPS"
-                  | "Amazon"
-                  | "unknown";
-                trackingNumber?: string;
-                expectedWindowStartAt?: string;
-                expectedWindowEndAt?: string;
-                absenceSignal?: boolean;
-                confidence: "high" | "medium" | "low";
-                reason: string;
-              }>;
+              ) => Promise<
+                | {
+                    kind: "shipping_label";
+                    carrier: Carrier;
+                    recipientName?: string;
+                    recipientHouseNumber?: string;
+                    trackingNumber?: string;
+                    confidence: "high" | "medium" | "low";
+                    reason: string;
+                  }
+                | {
+                    kind: "tracking_page";
+                    carrier: Carrier;
+                    trackingNumber?: string;
+                    expectedWindowStartAt?: string;
+                    expectedWindowEndAt?: string;
+                    confidence: "high" | "medium" | "low";
+                    reason: string;
+                  }
+                | { kind: "unknown"; confidence: "low"; reason: string }
+              >;
               return execute(input, {
-                toolCallId: `parse_tracking_page:${Date.now()}`,
-                messages: [],
-              });
-            },
-            parseLabel: async (input) => {
-              // v2.1 #107 (Slice 2 of #106): channel-side vision call
-              // for Flow 1 group photos. Same shape as parseTrackingPage
-              // — errors propagate to process-update.ts's catch which
-              // logs and stays silent (no group leak on vision outages).
-              const execute = parseLabelTool.execute as (
-                input: unknown,
-                options: unknown,
-              ) => Promise<{
-                carrier:
-                  | "DHL"
-                  | "Hermes"
-                  | "DPD"
-                  | "GLS"
-                  | "UPS"
-                  | "Amazon"
-                  | "unknown";
-                trackingNumber?: string;
-                recipientName?: string;
-                recipientHouseNumber?: string;
-                confidence: "high" | "medium" | "low";
-                reason: string;
-              }>;
-              return execute(input, {
-                toolCallId: `parse_label:${Date.now()}`,
+                toolCallId: `parse_package_photo:${Date.now()}`,
                 messages: [],
               });
             },
@@ -369,6 +354,17 @@ export function telegramChannel(config: TelegramChannelConfig) {
               editGroupCard(token, chatId, messageId, text),
             sendDirectMessage: async (chatId, text, entities, replyMarkup) => {
               await sendTelegramMessage(token, chatId, text, replyMarkup, entities);
+            },
+            streetGroupChatId: (_street) => {
+              // v2.1 #128: single-street MVP — `TELEGRAM_GROUP_CHAT_ID`
+              // names the only street's group chat. Returns null when
+              // the env var is missing or unparseable so the DM-photo
+              // Flow 1 path skips the group ack gracefully (the
+              // Package row + recipient DM still land).
+              const raw = process.env.TELEGRAM_GROUP_CHAT_ID;
+              if (!raw) return null;
+              const id = Number(raw);
+              return Number.isFinite(id) ? id : null;
             },
             registerResident: (input) => registerResident(input),
             setTriggerAttribute: setTelegramTriggerAttribute,

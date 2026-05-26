@@ -289,6 +289,49 @@ export function buildDmTextPickupWaitingOnVolunteerText(args: {
 }
 
 /**
+ * v2.1 #128: private DM nudge sent to a group member who posted a
+ * shipping-label photo to the street group. Package labels carry PII
+ * (recipient name + house number) and must not land in the group;
+ * after #128 the privacy-correct surface for registering Flow 1 from a
+ * photo is a 1:1 DM with the bot. This template tells the sender that
+ * directly and asks them to resend the photo to the bot in DM.
+ *
+ * The bot has no admin powers — we can't delete the original group
+ * post. The best we can do is nudge the sender privately so the same
+ * mistake doesn't repeat. If the user has never DM'd the bot before,
+ * Telegram will refuse the outbound message; the channel's outer
+ * try/catch logs that case and the group post stays untouched. Still
+ * worth the attempt: registered residents have a chat with the bot
+ * already, and the nudge lands.
+ *
+ * Localised de/en/es/tr; falls back to German.
+ */
+const GROUP_LABEL_PRIVACY_NUDGES: Readonly<Record<SupportedLanguage, string>> = {
+  de:
+    "Hi! Bitte schicke mir Paket-Etiketten direkt als DM — nicht in die Gruppe. " +
+    "Auf dem Etikett stehen Name und Hausnummer der empfangenden Person, das gehört nicht in den öffentlichen Chat. " +
+    "Schicke mir das Foto hier in der DM, und ich kümmere mich um die Gruppenmeldung.",
+  en:
+    "Hi! Please send package labels to me directly in DM — not to the group. " +
+    "The label shows the recipient's name and house number, which shouldn't land in public chat. " +
+    "Send the photo here in DM and I'll handle the group announcement on your behalf.",
+  es:
+    "¡Hola! Por favor envíame las etiquetas de paquete directamente por DM — no al grupo. " +
+    "La etiqueta muestra el nombre y número de casa del destinatario, eso no debería estar en el chat público. " +
+    "Envíame la foto aquí por DM y yo me encargo del aviso al grupo.",
+  tr:
+    "Selam! Lütfen paket etiketlerini bana doğrudan DM ile gönder — gruba değil. " +
+    "Etikette alıcının adı ve ev numarası var, bunlar açık sohbete uygun değil. " +
+    "Fotoğrafı bana DM olarak gönder; grup duyurusunu senin adına ben yaparım.",
+};
+
+export function buildGroupLabelPrivacyNudge(
+  raw: string | null | undefined,
+): string {
+  return GROUP_LABEL_PRIVACY_NUDGES[pickLanguage(raw)];
+}
+
+/**
  * v2.1 #109 (Slice 3 of #105): localised group question the channel
  * posts when a Flow 1 inbound's recipient name doesn't resolve to any
  * known street identity (`recipientResolution.kind === "unknown"`). The
