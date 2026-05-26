@@ -1832,12 +1832,20 @@ describe("processInboundTelegramUpdate — callback_query", () => {
       // bot, so the group never learns the package was closed.
       expect(editGroupCard).not.toHaveBeenCalled();
 
-      // Holder thanks DM lands.
-      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
-      const [holderChatId, dmText] = sendDirectMessage.mock.calls[0]!;
+      // Two DMs land: recipient confirmation (first), holder thanks (second).
+      // The recipient confirmation closes the DM thread visually so the
+      // tap produces something the recipient can read in the chat — the
+      // empty `answerCallback` toast is too transient on its own.
+      expect(sendDirectMessage).toHaveBeenCalledTimes(2);
+
+      const [recipientChatId, recipientText] = sendDirectMessage.mock.calls[0]!;
+      expect(recipientChatId).toBe(200); // cb.chatId = recipient's DM
+      expect(recipientText).toBe("Hab notiert — danke!");
+
+      const [holderChatId, holderText] = sendDirectMessage.mock.calls[1]!;
       expect(holderChatId).toBe(100); // holder.platformId from default mock
-      expect(dmText).toContain("Marlene Hartmann");
-      expect(dmText).toContain("danke");
+      expect(holderText).toContain("Marlene Hartmann");
+      expect(holderText).toContain("danke");
 
       // Agent is NEVER invoked on this path.
       expect(sendToAsh).not.toHaveBeenCalled();
@@ -2101,7 +2109,12 @@ describe("processInboundTelegramUpdate — callback_query", () => {
           confirmed: true,
         } satisfies Resident,
       });
-      sendDirectMessage.mockRejectedValueOnce(new Error("dm failed"));
+      // First call = recipient confirmation (succeeds). Second call =
+      // holder thanks (fails). Asserts the failure is swallowed and
+      // doesn't escalate the response status.
+      sendDirectMessage
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error("dm failed"));
 
       const res = await processInboundTelegramUpdate(
         makeRequest(
@@ -2122,7 +2135,8 @@ describe("processInboundTelegramUpdate — callback_query", () => {
       expect(res.status).toBe(204);
       // v2.1 #114: editGroupCard is never called on pickup.
       expect(editGroupCard).not.toHaveBeenCalled();
-      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+      // Both DMs attempted: recipient confirm (ok) + holder thanks (failed).
+      expect(sendDirectMessage).toHaveBeenCalledTimes(2);
       expect(sendToAsh).not.toHaveBeenCalled();
     });
 

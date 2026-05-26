@@ -3212,6 +3212,35 @@ async function handleConfirmPickup(
   await deps.answerCallback(cb.callbackId).catch(() => undefined);
   await deps.stripKeyboard(cb.chatId, cb.messageId).catch(() => undefined);
 
+  // Send the recipient a written confirmation so the DM thread closes
+  // the loop visually. `stripKeyboard` removes the button, but without
+  // a follow-up message the thread reads identically to before the tap
+  // and the only feedback is Telegram's transient `answerCallback`
+  // toast (which we send empty, and which disappears in ~2s). Reuses
+  // the same localised "Hab notiert — danke!" copy as the DM-text
+  // pickup path (`buildDmTextPickupConfirmedText`) — symmetric UX
+  // regardless of whether the recipient tapped the button or typed
+  // "abgeholt".
+  const recipientLanguage = caller.language ?? cb.fromLanguageCode;
+  try {
+    emitTrace("dm", "start", { kind: "flow1-pickup-confirm" });
+    await deps.sendDirectMessage(
+      cb.chatId,
+      buildDmTextPickupConfirmedText(recipientLanguage),
+    );
+    emitTrace("dm", "end", { kind: "flow1-pickup-confirm" });
+  } catch (err) {
+    console.error(
+      "[confirm_pickup] recipient confirmation DM failed for chatId",
+      cb.chatId,
+      "packageId",
+      packageId,
+      "error:",
+      err instanceof Error ? err.message : err,
+    );
+    emitTrace("dm", "error", { kind: "flow1-pickup-confirm" });
+  }
+
   // DM the holder thanks (when we can resolve a chat id for them).
   // The holder's `platformId` equals their Telegram user id, which
   // is also the 1:1 chat id for DMs. Skipped when the holder record
