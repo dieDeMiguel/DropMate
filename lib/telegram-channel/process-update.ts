@@ -75,13 +75,11 @@
 
 import type { Session } from "experimental-ash/channels";
 
-import {
-  ACCEPT_DIFFERENT_STREET_ERROR_CODE,
-  ACCEPT_SELF_NOT_ALLOWED_ERROR_CODE,
-  type AcceptReceptionRequestInput,
-  type AcceptReceptionRequestResult,
-  type CreateReceptionRequestInput,
-  type CreateReceptionRequestResult,
+import type {
+  AcceptReceptionRequestInput,
+  AcceptReceptionRequestResult,
+  CreateReceptionRequestInput,
+  CreateReceptionRequestResult,
 } from "../reception-request.js";
 import { normaliseLanguageCode } from "../language.js";
 import {
@@ -92,7 +90,6 @@ import {
 } from "../package.js";
 import {
   PICKUP_ALREADY_DONE_ERROR_CODE,
-  PICKUP_NOT_RECIPIENT_ERROR_CODE,
   type ConfirmPickupResult,
 } from "../pickup.js";
 import type {
@@ -146,16 +143,10 @@ import {
   buildHolderThanksDmText,
   buildRecipientReadyToPickUpDmText,
   buildVolunteerEarlyArrivalAckDmText,
-  pickupAlreadyDoneToast,
-  pickupNotRecipientToast,
-  pickupRetryToast,
 } from "./pickup-dms.js";
-import {
-  buildRequesterAcceptDm,
-  buildVolunteerAcceptDmText,
-  crossStreetToastForLanguage,
-  selfAcceptToastForLanguage,
-} from "./volunteer-accept-dms.js";
+import { buildState } from "./orchestrator/build-state.js";
+import { match } from "./orchestrator/match.js";
+import { runActions } from "./orchestrator/run-actions.js";
 
 /**
  * Subset of an Ash `SessionAuthContext` we hand `send(...)`. Kept
@@ -812,69 +803,6 @@ export type Flow1RouteResult =
   | { readonly kind: "fallthrough"; readonly toAgent: string };
 
 /**
- * Parsed `callback_data` shape. The convention is `"<action>:<id>"`;
- * unknown actions are still admitted (the agent will see the raw
- * text and decide whether to do anything).
- */
-interface ParsedCallbackData {
-  readonly action: string;
-  readonly id: string | null;
-}
-
-function parseCallbackData(data: string): ParsedCallbackData {
-  const idx = data.indexOf(":");
-  if (idx < 0) return { action: data, id: null };
-  return {
-    action: data.slice(0, idx),
-    id: data.slice(idx + 1) || null,
-  };
-}
-
-/**
- * Human-readable synthetic message the orchestrator hands to the
- * agent in place of the user's tap. The agent reads this as the
- * user's "I want to do X" intent and runs the matching tool.
- *
- * Kept in English regardless of the user's language: the agent's
- * system prompt + the user's stored `Resident.language` will drive
- * the *reply* localisation. The synthetic message is internal
- * scaffolding the user never sees.
- */
-function synthesizeCallbackMessage(parsed: ParsedCallbackData): string {
-  switch (parsed.action) {
-    case "accept_reception_request":
-      // Legacy DM-3 button callback. The agent tool that used to back
-      // this branch was hard-deleted by v2.1 Slice 5 (#90); the channel
-      // never wires this callback anymore. Apologise briefly in the
-      // tapper's language if it ever arrives via a stale message.
-      return "[button-tap] An old 'I can help' button was tapped, but the channel-side flow has changed. Apologise briefly in the tapper's language and ask them to wait for the next group card.";
-    case "accept_reception_group":
-      // Reached only when `handleAcceptReceptionGroup`'s precondition
-      // fails (parsed.id missing or cb.fromUserId null). v2.1 Bug 3
-      // (#95) removed the in-handler fallback to this synthetic — the
-      // deterministic accept path now fails loud via toast + no agent
-      // invocation, so this case is the malformed-callback safety net
-      // only. The backing tool was hard-deleted by Slice 5 (#90), so
-      // the agent cannot recover by re-running the procedure.
-      return parsed.id
-        ? `[button-tap] A volunteer tap on group-card reception request ${parsed.id} arrived without an identifiable tapper. Apologise briefly in the tapper's language and ask them to try again. Do NOT call any tools.`
-        : "[button-tap] I tapped accept-reception-group but no request id was attached — ignore.";
-    case "decline_reception_request":
-      return parsed.id
-        ? `[button-tap] I'm declining the reception request ${parsed.id}. Acknowledge briefly in my language and don't ask follow-up questions.`
-        : "[button-tap] I'm declining a reception request but no id was attached — ignore.";
-    case "remind_later":
-      return parsed.id
-        ? `[button-tap] I'd like to be reminded about package ${parsed.id} later. Acknowledge briefly — no state change needed; the scheduled reminder will catch this anyway.`
-        : "[button-tap] Remind-later tapped but no package id was attached — ignore.";
-    default:
-      return parsed.id
-        ? `[button-tap] action=${parsed.action} id=${parsed.id}. Use your best judgement.`
-        : `[button-tap] action=${parsed.action}. Use your best judgement.`;
-  }
-}
-
-/**
  * Best-effort passive recording of an inbound Telegram identity.
  * Swallows errors — we never want a Redis hiccup to crash a turn that
  * would otherwise have proceeded — but logs them so silent data loss
@@ -909,12 +837,22 @@ async function recordInboundObservation(
   }
 }
 
-async function handleCallbackQuery(
+/**
+ * v2.1 #135 (Slice 4 of the state-machine refactor umbrella):
+ * channel-deterministic callback dispatch lives entirely in the
+ * orchestrator engine now. `buildState` pre-calls the lib side
+ * effect (`confirmPickup` / `acceptReceptionRequest`) and encodes the
+ * outcome as a State variant; `match` returns the action list (ack +
+ * keyboard strip + DMs / toasts); `runActions` executes it with the
+ * legacy tolerance contract (DM/card/ack/strip swallow errors and
+ * keep going). Callback actions that still need the agent
+ * (`accept_reception_request` stale, `decline_reception_request`,
+ * `remind_later`, unknown) flow through the `callback-agent` variant.
+ */
+async function dispatchCallback(
   cb: TelegramInboundCallback,
   deps: ProcessUpdateDeps,
 ): Promise<Response> {
-  const parsed = parseCallbackData(cb.data);
-
   // Passive directory update — fire before any short-circuit so even
   // taps from non-recipients still teach the bot who's in the group.
   await recordInboundObservation(deps, {
@@ -926,110 +864,9 @@ async function handleCallbackQuery(
     chatId: cb.chatId,
   });
 
-  // v2.1 #108 (Slice 4 of #105): channel-deterministic pickup tap.
-  // The `[Abgeholt]` callback is handled here end-to-end (status flip
-  // via `confirmPickup`, DM the holder, strip the recipient DM
-  // keyboard) and `sendToAsh` is NEVER called on this path. Mirrors
-  // the volunteer-accept callback architecture (#96) one-for-one.
-  // v2.1 #114 (Slice 1 of #113) dropped the group-ack edit step —
-  // the group ack is announce-only and the only tap surface left is
-  // the recipient's 1:1 DM.
-  //
-  // The pre-#108 path was: gate-on-recipient-scope + ack + strip +
-  // hand the agent a `[button-tap] confirm_pickup` synthetic. The
-  // model then ran the deleted `confirm_pickup` tool. Pulling the
-  // decision OUT of the model closes the same v1-style text-leak
-  // surface #100 closed for Flow 2 acks.
-  if (parsed.action === "confirm_pickup" && parsed.id) {
-    return handleConfirmPickup(cb, parsed.id, deps);
-  }
-
-  // Flow 2 v2 (#68) group-card accept: only registered residents can
-  // claim. Unregistered tappers get a German toast and the button
-  // stays live so they can `/register` and retry. Defensively treats a
-  // thrown lookup as "unregistered" — a Redis hiccup must not admit a
-  // tapper who'd otherwise be rejected.
-  //
-  // v2.1 Bug 3 (#95): if the gate admits, the entire accept flow runs
-  // through `handleAcceptReceptionGroup` which OWNS its own ack +
-  // keyboard-strip lifecycle. The handler fails LOUD on any
-  // deterministic-path error (toast in volunteer's language, leave
-  // keyboard intact for re-tap, do NOT invoke the agent). Falling back
-  // to the agent's legacy procedure reproduces the v2 regression at
-  // #85 — Slice 5 (#90) hard-deleted the tools, but even an apology
-  // synthetic burns an Ash turn we don't need.
-  if (
-    parsed.action === "accept_reception_group" &&
-    parsed.id &&
-    cb.fromUserId !== null
-  ) {
-    const registered = await deps
-      .isRegisteredResident(cb.fromUserId)
-      .catch(() => false);
-    if (!registered) {
-      await deps
-        .answerCallback(
-          cb.callbackId,
-          "Bitte zuerst /register, um Paketen zu helfen.",
-        )
-        .catch(() => undefined);
-      // Keyboard intact — the user can re-tap after /register.
-      return new Response(null, { status: 204 });
-    }
-    return handleAcceptReceptionGroup(cb, parsed.id, deps);
-  }
-
-  // Default callback path (confirm_pickup, decline_reception_request,
-  // remind_later, and any unknown action). Ack + strip the keyboard
-  // eagerly so the user sees the action register, then hand the agent
-  // a synthetic. If either pre-step fails, we still try to drive the
-  // agent — the worst case is a stale keyboard or lingering spinner.
-  await deps.answerCallback(cb.callbackId).catch(() => undefined);
-  await deps.stripKeyboard(cb.chatId, cb.messageId).catch(() => undefined);
-
-  const syntheticMessage = synthesizeCallbackMessage(parsed);
-
-  // Stable chat-keyed continuation token. The Ash session id returned
-  // from a previous turn is a per-run workflow id (e.g. `wrun_…`) that
-  // becomes invalid after the run completes; reusing it caused every
-  // follow-up turn to fail delivery ("deliver failed, starting new
-  // session") and silently restart a context-free session. `tg:<chatId>`
-  // is the stable key Ash actually keys session continuity on — see #65.
-  const continuationToken = `tg:${cb.chatId}`;
-
-  const auth: TelegramSessionAuth = {
-    principalId: String(cb.fromUserId),
-    principalType: "user",
-    authenticator: "telegram",
-    attributes: cb.fromLanguageCode
-      ? { languageCode: cb.fromLanguageCode }
-      : {},
-  };
-
-  // v2.1 #99: attribute the post-routing inbound shape onto the active
-  // OTel span so Agent Runs shows what fired this turn. After v2.1
-  // #108 (Slice 4 of #105) channel-handles `confirm_pickup` taps
-  // deterministically without invoking the agent, the only callbacks
-  // that still reach this synthetic path are the legacy ones
-  // (`accept_reception_request`, `decline_reception_request`,
-  // `remind_later`, unknown actions) — they all share the generic
-  // `telegram.callback` bucket so we can still distinguish them from
-  // text/photo/slash triggers in dashboard filters.
-  deps.setTriggerAttribute?.("telegram.callback");
-
-  const session = await deps.sendToAsh(syntheticMessage, {
-    auth,
-    continuationToken,
-    state: {
-      chatId: cb.chatId,
-      isGroup: cb.isGroup,
-      fromUserId: cb.fromUserId,
-      fromLanguageCode: cb.fromLanguageCode,
-    },
-  });
-
-  deps.waitUntil(deps.drainSession(session, cb.chatId));
-
+  const state = await buildState({ kind: "callback", callback: cb }, deps);
+  const { actions } = match(state);
+  await runActions(actions, deps);
   return new Response(null, { status: 204 });
 }
 
@@ -2786,535 +2623,6 @@ async function routeReceiveCommand(
   return sendFlow2AckDm(inbound, language, deps);
 }
 
-/**
- * v2.1 Slice 4 (#89) + Bug 3 (#95) + #96 Part A/B: channel-deterministic
- * volunteer-accept handler. Owns the FULL lifecycle of an
- * `accept_reception_group:<id>` tap from a registered resident — including
- * the two outbound DMs that confirm the handoff. The agent is NEVER
- * invoked from this path.
- *
- * Sequence:
- *
- *   1. Resolve the volunteer's full `Resident` record via
- *      `getRegisteredResident`. The earlier `isRegisteredResident`
- *      check guarantees this returns non-null on the happy path; a
- *      null return here means a race between the gate and this lookup
- *      OR a Redis hiccup. Fail loud: toast the volunteer + leave the
- *      keyboard intact for a re-tap.
- *   2. Call `acceptReceptionRequest(volunteer, { requestId })` via the
- *      lib. The lib flips status to `matched`, sets
- *      `volunteerResidentId`, and returns pre-resolved
- *      `requester`/`volunteer` summaries plus the original
- *      `groupCardChatId` + `groupCardMessageId`. `availability` is
- *      omitted — the tap alone is the "I can help" signal. On throw:
- *      branch on the error's `.code` (#96 Part B) — a
- *      `ACCEPT_DIFFERENT_STREET` code strips the keyboard and shows
- *      the dedicated cross-street toast (the constraint is permanent
- *      so retrying via the same button can never succeed); any other
- *      class shows the generic retry toast and leaves the keyboard
- *      live. Either way the agent is NOT invoked.
- *   3. Ack the callback silently (clears the spinner) + strip the
- *      inline keyboard so the `[Ich kann helfen]` button can't be
- *      tapped twice. These run AFTER step 2 succeeds — so on a
- *      recoverable failure the keyboard stays live and the user can
- *      re-tap once the underlying hiccup clears.
- *   4. Edit the group card to `✅ angenommen von <volunteer.name>`.
- *      A failure here is logged but does NOT block the DMs: the
- *      canonical state (status: matched) already landed in step 2,
- *      so the card is just a display artefact.
- *   5. Deterministically send TWO DMs (#96 Part A):
- *        - to the volunteer (private chat = `volunteer.platformId`)
- *          with the operational handoff in the volunteer's language;
- *        - to the requester (private chat = `requester.id`) with the
- *          named confirmation + a `text_mention` MessageEntity over
- *          the volunteer's name so the requester sees a tap-to-DM
- *          ping. Each DM is rendered from a localised template per
- *          `lib/telegram-channel/volunteer-accept-dms.ts`. Either DM
- *          throwing is logged but does NOT bail the other — one DM
- *          landing is still useful (the canonical state is correct
- *          regardless).
- *
- * Privacy invariant (PRD §9): the only public surface in this flow is
- * the in-place card edit. Both DMs in step 5 stay private. The agent
- * never runs here, so it cannot mis-route output to the group.
- *
- * **v2.1 #96 Part A — kill agent text-leak.** Before this change the
- * channel handed the agent a `[VOLUNTEER_ACCEPTED]` synthetic and let
- * the model compose the two DMs. The live trace (#96 thread) showed
- * the model free-form-emitting card-shaped text to the GROUP — even
- * after Slice 5 (#90) had removed the tools, the v2 procedural prompt
- * persisted in the model's text output ("Ich kann das Bild nicht
- * direkt lesen…", "Ich konnte noch keine registrierten Nachbarn
- * finden…", etc.). The privacy leak the v2 regression at #85 created
- * survived in textual form. Deterministic DMs structurally close it:
- * the model has no output channel on this path.
- *
- * **v2.1 #96 Part B — dedicated cross-street toast.** The legacy
- * behaviour rendered the generic retry toast on a street-mismatch
- * throw AND left the keyboard live. The volunteer would re-tap (the
- * toast said "try again" and the button was still there) but the
- * underlying constraint — different `Resident.street` from the
- * request's `streetId` — is permanent. The lib now throws an
- * `AcceptReceptionRequestError` with `code: ACCEPT_DIFFERENT_STREET`
- * so the handler can render the dedicated toast and strip the
- * keyboard — no more re-tap loops.
- */
-async function handleAcceptReceptionGroup(
-  cb: TelegramInboundCallback,
-  requestId: string,
-  deps: ProcessUpdateDeps,
-): Promise<Response> {
-  const volunteerUserId = cb.fromUserId!;
-
-  let volunteer: Resident | null;
-  try {
-    volunteer = await deps.getRegisteredResident(volunteerUserId);
-  } catch (err) {
-    console.error(
-      "[accept_reception_group] getRegisteredResident threw for userId",
-      volunteerUserId,
-      "after passing the isRegisteredResident gate — failing loud (no agent fallback)",
-      err instanceof Error
-        ? { name: err.name, message: err.message, stack: err.stack }
-        : err,
-    );
-    await deps
-      .answerCallback(
-        cb.callbackId,
-        retryToastForLanguage(cb.fromLanguageCode),
-      )
-      .catch(() => undefined);
-    return new Response(null, { status: 204 });
-  }
-  if (!volunteer) {
-    // Race between the `isRegisteredResident` gate and this lookup —
-    // fail loud per #95. Keyboard stays live so the volunteer can
-    // re-tap once the gate/lookup race clears.
-    console.error(
-      "[accept_reception_group] getRegisteredResident returned null for userId",
-      volunteerUserId,
-      "after passing the isRegisteredResident gate (race or Redis hiccup) — failing loud (no agent fallback)",
-    );
-    await deps
-      .answerCallback(
-        cb.callbackId,
-        retryToastForLanguage(cb.fromLanguageCode),
-      )
-      .catch(() => undefined);
-    return new Response(null, { status: 204 });
-  }
-
-  let accepted: AcceptReceptionRequestResult;
-  emitTrace("flow2", "accept.start");
-  try {
-    accepted = await deps.acceptReceptionRequest(volunteer, { requestId });
-    emitTrace("flow2", "accept.end");
-  } catch (err) {
-    console.error(
-      "[accept_reception_group] acceptReceptionRequest failed for userId",
-      volunteerUserId,
-      "requestId",
-      requestId,
-      "— failing loud (no agent fallback)",
-      err instanceof Error
-        ? { name: err.name, message: err.message, stack: err.stack }
-        : err,
-    );
-    const errorCode =
-      err && typeof err === "object" && "code" in err
-        ? (err as { code?: string }).code
-        : undefined;
-    const language = volunteer.language ?? cb.fromLanguageCode;
-    if (errorCode === ACCEPT_SELF_NOT_ALLOWED_ERROR_CODE) {
-      emitTrace("flow2", "reject.self");
-      // #101: rejection is permanent *for this tapper only* — the lib
-      // re-checks `requesterResidentId === caller.id` on every tap, so
-      // a re-tap by the requester just produces the same toast again.
-      // The button MUST stay live so other neighbours on the same street
-      // can still claim the card. (Contrast with the cross-street branch
-      // below, where the keyboard IS stripped because the constraint is
-      // street-wide — no resident on the volunteer's street will ever be
-      // able to claim that card.)
-      await deps
-        .answerCallback(
-          cb.callbackId,
-          selfAcceptToastForLanguage(language),
-        )
-        .catch(() => undefined);
-      return new Response(null, { status: 204 });
-    }
-    if (errorCode === ACCEPT_DIFFERENT_STREET_ERROR_CODE) {
-      emitTrace("flow2", "reject.cross-street");
-      // #96 Part B: permanent rejection. Strip the keyboard so the
-      // volunteer doesn't keep re-tapping (the toast already explains
-      // why the tap can't succeed) and toast in their language.
-      await deps
-        .answerCallback(
-          cb.callbackId,
-          crossStreetToastForLanguage(language),
-        )
-        .catch(() => undefined);
-      await deps
-        .stripKeyboard(cb.chatId, cb.messageId)
-        .catch(() => undefined);
-      return new Response(null, { status: 204 });
-    }
-    // Recoverable failure class: generic retry toast + keyboard stays
-    // live so the volunteer can re-tap once the underlying hiccup
-    // clears. Same #95 contract as before for every non-street class.
-    emitTrace("flow2", "reject.redis-hiccup", { stage: "accept" });
-    await deps
-      .answerCallback(cb.callbackId, retryToastForLanguage(language))
-      .catch(() => undefined);
-    return new Response(null, { status: 204 });
-  }
-
-  // Happy path: state flip succeeded. Now ack + strip + render the
-  // `✅ angenommen` card. Doing the ack/strip AFTER the lib call (vs
-  // before it in the v2 shape) is what makes the failure path above
-  // leave the keyboard intact for a re-tap on recoverable errors.
-  await deps.answerCallback(cb.callbackId).catch(() => undefined);
-  await deps.stripKeyboard(cb.chatId, cb.messageId).catch(() => undefined);
-
-  if (
-    accepted.groupCardChatId !== null &&
-    accepted.groupCardMessageId !== null
-  ) {
-    const cardText = `✅ angenommen von ${accepted.volunteer.name}`;
-    try {
-      await deps.editGroupCard(
-        accepted.groupCardChatId,
-        accepted.groupCardMessageId,
-        cardText,
-      );
-    } catch (err) {
-      // Edit failure is recoverable — state flip already landed, so we
-      // still send the two deterministic DMs; the stale card can be
-      // reconciled separately.
-      console.error(
-        "[accept_reception_group] editGroupCard failed for chatId",
-        accepted.groupCardChatId,
-        "messageId",
-        accepted.groupCardMessageId,
-        "error:",
-        err instanceof Error
-          ? { name: err.name, message: err.message, stack: err.stack }
-          : err,
-      );
-    }
-  }
-
-  // #96 Part A: emit BOTH DMs deterministically. No sendToAsh call —
-  // the agent does not run on this path. Either DM throwing is logged
-  // but the other still goes out.
-  const volunteerDmText = buildVolunteerAcceptDmText(accepted);
-  const volunteerChatId = Number(accepted.volunteer.platformId);
-  if (Number.isFinite(volunteerChatId)) {
-    try {
-      emitTrace("dm", "start", { kind: "volunteer-accept" });
-      await deps.sendDirectMessage(volunteerChatId, volunteerDmText);
-      emitTrace("dm", "end", { kind: "volunteer-accept" });
-    } catch (err) {
-      console.error(
-        "[accept_reception_group] volunteer DM failed for platformId",
-        accepted.volunteer.platformId,
-        "error:",
-        err instanceof Error
-          ? { name: err.name, message: err.message, stack: err.stack }
-          : err,
-      );
-    }
-  } else {
-    console.error(
-      "[accept_reception_group] volunteer.platformId is not a finite number — skipping volunteer DM",
-      { platformId: accepted.volunteer.platformId },
-    );
-  }
-
-  const requesterDm = buildRequesterAcceptDm(accepted);
-  const requesterChatId = Number(accepted.requester.id);
-  if (Number.isFinite(requesterChatId)) {
-    try {
-      emitTrace("dm", "start", { kind: "requester-accept" });
-      await deps.sendDirectMessage(
-        requesterChatId,
-        requesterDm.text,
-        requesterDm.entities,
-      );
-      emitTrace("dm", "end", { kind: "requester-accept" });
-    } catch (err) {
-      console.error(
-        "[accept_reception_group] requester DM failed for resident id",
-        accepted.requester.id,
-        "error:",
-        err instanceof Error
-          ? { name: err.name, message: err.message, stack: err.stack }
-          : err,
-      );
-    }
-  } else {
-    console.error(
-      "[accept_reception_group] requester.id is not a finite number — skipping requester DM",
-      { requesterId: accepted.requester.id },
-    );
-  }
-
-  return new Response(null, { status: 204 });
-}
-
-/**
- * v2.1 #108 (Slice 4 of #105) — channel-deterministic pickup tap.
- * Updated by v2.1 #114 (Slice 1 of #113) to drop the group-card
- * edit and to leave the keyboard intact on non-recipient
- * rejections, since the pickup keyboard now lives only on the
- * recipient's 1:1 DM (the group ack stays announce-only).
- *
- * Resolves the caller via `getRegisteredResident`, dispatches to
- * the lib-level `confirmPickup`, then on success ack + strip the
- * recipient's DM keyboard + DM the holder thanks. `sendToAsh` is
- * NEVER called on this path — the agent does not run on the
- * pickup-tap surface.
- *
- * Error class → toast / keyboard treatment:
- *
- *   - getRegisteredResident throws / returns null (race vs
- *     directory): generic retry toast, keyboard stays live.
- *   - caller resolves to null (unregistered tapper): not-recipient
- *     toast. Keyboard stays live (only path here is a stale
- *     pre-#114 group keyboard; touching it would punish every
- *     other resident's view of that historical message).
- *   - confirmPickup throws `PICKUP_NOT_RECIPIENT`: dedicated
- *     toast only. Same stale-group-keyboard reasoning as the
- *     unregistered branch — do not strip.
- *   - confirmPickup throws `PICKUP_ALREADY_DONE`: dedicated toast
- *     only; keyboard already stripped from the previous success
- *     on the recipient's DM.
- *   - other throw (Redis hiccup): generic retry toast, keyboard
- *     stays live.
- *
- * Ack + strip happen AFTER the lib call (vs before it) so the
- * failure path leaves the keyboard intact on recoverable errors.
- * Same #95 invariant the volunteer-accept handler relies on.
- *
- * sendDirectMessage failures after the lib call succeeded are
- * logged but never raised: the canonical state in Redis is
- * correct, and any DM retry can land separately without
- * re-flipping the package status.
- */
-async function handleConfirmPickup(
-  cb: TelegramInboundCallback,
-  packageId: string,
-  deps: ProcessUpdateDeps,
-): Promise<Response> {
-  if (cb.fromUserId === null) {
-    // Defensive: the callback parser populates fromUserId from
-    // `callback_query.from.id` which is required by the Bot API.
-    // If it's somehow null, the caller can't be scoped — keep the
-    // keyboard live and toast generic.
-    await deps
-      .answerCallback(cb.callbackId, pickupRetryToast(cb.fromLanguageCode))
-      .catch(() => undefined);
-    return new Response(null, { status: 204 });
-  }
-
-  let caller: Resident | null;
-  try {
-    caller = await deps.getRegisteredResident(cb.fromUserId);
-  } catch (err) {
-    console.error(
-      "[confirm_pickup] getRegisteredResident threw for userId",
-      cb.fromUserId,
-      "— failing loud (no agent fallback)",
-      err instanceof Error
-        ? { name: err.name, message: err.message, stack: err.stack }
-        : err,
-    );
-    await deps
-      .answerCallback(cb.callbackId, pickupRetryToast(cb.fromLanguageCode))
-      .catch(() => undefined);
-    return new Response(null, { status: 204 });
-  }
-  if (!caller) {
-    // Pickup taps from unregistered users get the not-recipient
-    // toast — an unregistered user is by definition not the
-    // recipient of any Package (recipientResidentId would never
-    // match). v2.1 #114: do NOT strip the keyboard. The only place
-    // the pickup keyboard can land in the new design is the
-    // recipient's own DM (a 1:1 chat), and a non-recipient tap
-    // arriving here can only come from a stale pre-#114 group
-    // keyboard; the recipient's DM keyboard stays for them.
-    await deps
-      .answerCallback(
-        cb.callbackId,
-        pickupNotRecipientToast(cb.fromLanguageCode),
-      )
-      .catch(() => undefined);
-    return new Response(null, { status: 204 });
-  }
-
-  let result: ConfirmPickupResult;
-  emitTrace("flow1", "pickup.start", { packageId });
-  try {
-    result = await deps.confirmPickup(caller, packageId);
-    emitTrace("flow1", "pickup.end", { packageId });
-  } catch (err) {
-    const errorCode =
-      err && typeof err === "object" && "code" in err
-        ? (err as { code?: string }).code
-        : undefined;
-    const language = caller.language ?? cb.fromLanguageCode;
-    if (errorCode === PICKUP_NOT_RECIPIENT_ERROR_CODE) {
-      emitTrace("flow1", "pickup.reject.not-recipient", { packageId });
-      await deps
-        .answerCallback(cb.callbackId, pickupNotRecipientToast(language))
-        .catch(() => undefined);
-      // v2.1 #114: do NOT strip the keyboard. With the keyboard
-      // living only on the recipient's DM (a 1:1 chat), a
-      // non-recipient tap that reaches here can only come from a
-      // stale pre-#114 group keyboard — stripping it would punish
-      // every other resident's view of that historical message.
-      // The recipient's DM keyboard stays untouched.
-      return new Response(null, { status: 204 });
-    }
-    if (errorCode === PICKUP_ALREADY_DONE_ERROR_CODE) {
-      emitTrace("flow1", "pickup.reject.already-done", { packageId });
-      await deps
-        .answerCallback(cb.callbackId, pickupAlreadyDoneToast(language))
-        .catch(() => undefined);
-      // Keyboard already stripped from the previous success — no
-      // further keyboard action needed.
-      return new Response(null, { status: 204 });
-    }
-    console.error(
-      "[confirm_pickup] confirmPickup failed for userId",
-      cb.fromUserId,
-      "packageId",
-      packageId,
-      err instanceof Error
-        ? { name: err.name, message: err.message, stack: err.stack }
-        : err,
-    );
-    emitTrace("flow1", "pickup.reject.redis-hiccup", { packageId });
-    await deps
-      .answerCallback(cb.callbackId, pickupRetryToast(language))
-      .catch(() => undefined);
-    return new Response(null, { status: 204 });
-  }
-
-  // Happy path: status flipped. Ack + strip the keyboard on the
-  // recipient's DM (where the tap originated — the only surface
-  // that carries the pickup keyboard in v2.1 #114), then DM the
-  // holder thanks. Doing the strip AFTER the lib call (vs before)
-  // is what makes the failure path above leave the keyboard intact
-  // on recoverable errors. The group ack message is left untouched
-  // — pickup is private business and the group narration stays at
-  // the original "📦 Paket von X an Y." announcement (v2.1 #114).
-  await deps.answerCallback(cb.callbackId).catch(() => undefined);
-  await deps.stripKeyboard(cb.chatId, cb.messageId).catch(() => undefined);
-
-  // Send the recipient a written confirmation so the DM thread closes
-  // the loop visually. `stripKeyboard` removes the button, but without
-  // a follow-up message the thread reads identically to before the tap
-  // and the only feedback is Telegram's transient `answerCallback`
-  // toast (which we send empty, and which disappears in ~2s). Reuses
-  // the same localised "Hab notiert — danke!" copy as the DM-text
-  // pickup path (`buildDmTextPickupConfirmedText`) — symmetric UX
-  // regardless of whether the recipient tapped the button or typed
-  // "abgeholt".
-  const recipientLanguage = caller.language ?? cb.fromLanguageCode;
-  try {
-    emitTrace("dm", "start", { kind: "flow1-pickup-confirm" });
-    await deps.sendDirectMessage(
-      cb.chatId,
-      buildDmTextPickupConfirmedText(recipientLanguage),
-    );
-    emitTrace("dm", "end", { kind: "flow1-pickup-confirm" });
-  } catch (err) {
-    console.error(
-      "[confirm_pickup] recipient confirmation DM failed for chatId",
-      cb.chatId,
-      "packageId",
-      packageId,
-      "error:",
-      err instanceof Error ? err.message : err,
-    );
-    emitTrace("dm", "error", { kind: "flow1-pickup-confirm" });
-  }
-
-  // DM the holder thanks (when we can resolve a chat id for them).
-  // The holder's `platformId` equals their Telegram user id, which
-  // is also the 1:1 chat id for DMs. Skipped when the holder record
-  // is unresolvable (de-registered between Slice 1's write and the
-  // recipient tapping) — better to omit the thanks than to spam
-  // someone else's chat.
-  if (result.holder) {
-    const holderChatId = Number(result.holder.platformId);
-    if (Number.isFinite(holderChatId)) {
-      try {
-        emitTrace("dm", "start", { kind: "pickup-holder-thanks" });
-        await deps.sendDirectMessage(
-          holderChatId,
-          buildHolderThanksDmText({
-            holder: result.holder,
-            recipient: result.recipient ?? {
-              id: result.package.recipientResidentId ?? "",
-              name: result.package.recipientName,
-              houseNumber: result.package.recipientHouseNumber,
-              language: null,
-            },
-          }),
-        );
-        emitTrace("dm", "end", { kind: "pickup-holder-thanks" });
-      } catch (err) {
-        console.error(
-          "[confirm_pickup] holder thanks DM failed for platformId",
-          result.holder.platformId,
-          "error:",
-          err instanceof Error ? err.message : err,
-        );
-        emitTrace("dm", "error", { kind: "pickup-holder-thanks" });
-      }
-    } else {
-      console.error(
-        "[confirm_pickup] holder.platformId is not a finite number — skipping thanks DM",
-        { platformId: result.holder.platformId },
-      );
-    }
-  }
-
-  return new Response(null, { status: 204 });
-}
-
-/**
- * v2.1 Bug 3 (#95): localized retry toasts for the volunteer-accept
- * failure path. The toast text is the only feedback the volunteer
- * sees when the channel-deterministic accept aborts — picking the
- * right language matters. Fallback chain: a normalised non-null
- * input → German → German.
- *
- * The four covered languages mirror `FLOW_2_ACK_DMS` in `flow-2-dms.ts`
- * and the toast/template tables in `volunteer-accept-dms.ts` — keeping
- * the sets in lockstep means a future fifth language only needs to be
- * added once per file.
- *
- * Telegram's callback `answerCallbackQuery` toast is capped at 200
- * bytes (with `show_alert=false` it's even shorter on-screen) so each
- * string here is a single short sentence.
- */
-const ACCEPT_RETRY_TOASTS: Readonly<Record<string, string>> = {
-  de: "Etwas ist schiefgelaufen. Bitte erneut versuchen.",
-  en: "Something went wrong. Please try again.",
-  es: "Algo salió mal. Por favor inténtalo de nuevo.",
-  tr: "Bir şeyler ters gitti. Lütfen tekrar deneyin.",
-};
-
-function retryToastForLanguage(raw: string | null | undefined): string {
-  const normalised = normaliseLanguageCode(raw);
-  if (normalised && ACCEPT_RETRY_TOASTS[normalised]) {
-    return ACCEPT_RETRY_TOASTS[normalised]!;
-  }
-  return ACCEPT_RETRY_TOASTS["de"]!;
-}
 
 /**
  * v2.1 #97: channel-deterministic registration handler. Same shape as
@@ -3528,7 +2836,7 @@ export async function processInboundTelegramUpdate(
   // the other, never both).
   const callback = extractInboundCallback(update);
   if (callback) {
-    return handleCallbackQuery(callback, deps);
+    return dispatchCallback(callback, deps);
   }
 
   const inbound = extractInboundMessage(update);

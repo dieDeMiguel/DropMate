@@ -14,6 +14,7 @@ import { emitTrace } from "../../trace.js";
 import type {
   TelegramChannelState,
   TelegramSessionAuth,
+  TelegramTriggerKind,
 } from "../process-update.js";
 import type { InlineKeyboardMarkup, TelegramMessageEntity } from "../send.js";
 import type { Action } from "./action.js";
@@ -66,12 +67,27 @@ export interface RunActionsDeps {
   ) => Promise<Session>;
   readonly drainSession: (session: Session, chatId: number) => Promise<void>;
   readonly waitUntil: (task: Promise<unknown>) => void;
+  readonly setTriggerAttribute?: (trigger: TelegramTriggerKind) => void;
 }
 
 /**
  * Execute a single action, emitting trace events per ADR D4.
  * Side-effect actions emit `<traceStage>.start` → `<traceStage>.end`
  * or `<traceStage>.error`. `emit-trace` and `log-error` fire directly.
+ *
+ * Tolerance contract (matches the legacy dispatcher semantics):
+ *
+ *   - **Communication side effects** (`send-direct-message`,
+ *     `edit-group-card`, `answer-callback`, `strip-keyboard`) catch
+ *     thrown errors, log them, emit the `.error` trace, and CONTINUE.
+ *     A failed DM never bails a multi-DM flow; a failed callback ack
+ *     never blocks the canonical state flip; etc. This mirrors the
+ *     legacy callback handlers exactly.
+ *   - **Canonical-state writes** (`register-package`, `register-resident`,
+ *     `create-reception-request`, `accept-reception-request`,
+ *     `confirm-pickup`) RETHROW on failure. Callers either pre-handle
+ *     the side effect in `buildState` (the v2.1 #135 callback path) or
+ *     wrap `runActions` in a try/catch where the error class matters.
  */
 async function executeOne(action: Action, deps: RunActionsDeps): Promise<void> {
   switch (action.kind) {
@@ -90,7 +106,10 @@ async function executeOne(action: Action, deps: RunActionsDeps): Promise<void> {
           ...action.traceExtras,
           error: String(err),
         });
-        throw err;
+        console.error(
+          "[orchestrator] send-direct-message failed",
+          { chatId: action.chatId, traceStage: action.traceStage, err: String(err) },
+        );
       }
       return;
     }
@@ -180,17 +199,43 @@ async function executeOne(action: Action, deps: RunActionsDeps): Promise<void> {
           ...action.traceExtras,
           error: String(err),
         });
-        throw err;
+        console.error(
+          "[orchestrator] edit-group-card failed",
+          { chatId: action.chatId, messageId: action.messageId, err: String(err) },
+        );
       }
       return;
     }
 
     case "answer-callback":
-      await deps.answerCallback(action.callbackId, action.text);
+      try {
+        // Forward only the args the dep actually got — the legacy
+        // call sites used the single-arg form for silent acks and the
+        // two-arg form for toasts. Forwarding `undefined` would
+        // surface as a second arg in test spies and break the
+        // existing `toHaveBeenCalledWith("cb_id")` assertions.
+        if (action.text !== undefined) {
+          await deps.answerCallback(action.callbackId, action.text);
+        } else {
+          await deps.answerCallback(action.callbackId);
+        }
+      } catch (err) {
+        console.error(
+          "[orchestrator] answer-callback failed",
+          { callbackId: action.callbackId, err: String(err) },
+        );
+      }
       return;
 
     case "strip-keyboard":
-      await deps.stripKeyboard(action.chatId, action.messageId);
+      try {
+        await deps.stripKeyboard(action.chatId, action.messageId);
+      } catch (err) {
+        console.error(
+          "[orchestrator] strip-keyboard failed",
+          { chatId: action.chatId, messageId: action.messageId, err: String(err) },
+        );
+      }
       return;
 
     case "send-to-ash": {
@@ -202,6 +247,10 @@ async function executeOne(action: Action, deps: RunActionsDeps): Promise<void> {
       deps.waitUntil(deps.drainSession(session, action.state.chatId));
       return;
     }
+
+    case "set-trigger-attribute":
+      deps.setTriggerAttribute?.(action.trigger);
+      return;
 
     case "emit-trace":
       emitTrace(action.stage, action.phase, action.extras);
@@ -231,8 +280,9 @@ async function executeOne(action: Action, deps: RunActionsDeps): Promise<void> {
  * opt-in via `Action.parallel([...])` wrappers — only the inner
  * actions of a `parallel` node run concurrently.
  *
- * Errors from individual actions propagate to the caller. The caller
- * (the webhook handler or a test) decides whether to swallow or rethrow.
+ * Errors from canonical-state writes propagate to the caller. Errors
+ * from communication side effects are logged and swallowed (see the
+ * tolerance contract above `executeOne`).
  */
 export async function runActions(
   actions: ReadonlyArray<Action>,

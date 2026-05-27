@@ -9,7 +9,11 @@ import type { RegisterResidentInput, RegisterResidentResult } from "../../regist
 import type { ConfirmPickupResult } from "../../pickup.js";
 import type { Resident } from "../../redis.js";
 import type { InlineKeyboardMarkup, TelegramMessageEntity } from "../send.js";
-import type { TelegramChannelState, TelegramSessionAuth } from "../process-update.js";
+import type {
+  TelegramChannelState,
+  TelegramSessionAuth,
+  TelegramTriggerKind,
+} from "../process-update.js";
 
 /**
  * Discriminated union of all effects the orchestrator can emit (ADR D4).
@@ -91,6 +95,10 @@ export type Action =
       readonly auth: TelegramSessionAuth | null;
       readonly continuationToken: string;
       readonly state: TelegramChannelState;
+    }
+  | {
+      readonly kind: "set-trigger-attribute";
+      readonly trigger: TelegramTriggerKind;
     }
   | {
       readonly kind: "emit-trace";
@@ -237,6 +245,10 @@ export namespace Action {
     state: TelegramChannelState,
   ): Action {
     return { kind: "send-to-ash", message, auth, continuationToken, state };
+  }
+
+  export function setTriggerAttribute(trigger: TelegramTriggerKind): Action {
+    return { kind: "set-trigger-attribute", trigger };
   }
 
   export function emitTrace(
