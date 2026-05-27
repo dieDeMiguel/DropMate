@@ -16,7 +16,7 @@ import type {
   TelegramChannelState,
   TelegramSessionAuth,
   TelegramTriggerKind,
-} from "../process-update.js";
+} from "../types.js";
 import type { InlineKeyboardMarkup, TelegramMessageEntity } from "../send.js";
 import type { Action } from "./action.js";
 
@@ -119,21 +119,6 @@ async function executeOne(action: Action, deps: RunActionsDeps): Promise<void> {
       emitTrace(action.traceStage, "start", action.traceExtras);
       try {
         await deps.registerPackage(action.holder, action.input);
-        emitTrace(action.traceStage, "end", action.traceExtras);
-      } catch (err) {
-        emitTrace(action.traceStage, "error", {
-          ...action.traceExtras,
-          error: String(err),
-        });
-        throw err;
-      }
-      return;
-    }
-
-    case "register-resident": {
-      emitTrace(action.traceStage, "start", action.traceExtras);
-      try {
-        await deps.registerResident(action.input);
         emitTrace(action.traceStage, "end", action.traceExtras);
       } catch (err) {
         emitTrace(action.traceStage, "error", {

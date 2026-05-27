@@ -410,25 +410,6 @@ describe("runActions", () => {
     });
   });
 
-  describe("register-resident", () => {
-    it("calls registerResident and emits trace", async () => {
-      const deps = makeDeps();
-      const events: string[] = [];
-      const unsub = subscribe((e) => events.push(`${e.stage}.${e.phase}`));
-
-      await runWithTrace({ traceId: "t1", kind: "text" }, () =>
-        runActions(
-          [Action.registerResident({ platformId: "11111", name: "A", houseNumber: "1", street: "x" }, { traceStage: "registration" })],
-          deps,
-        ),
-      );
-
-      unsub();
-      expect(deps.registerResident).toHaveBeenCalled();
-      expect(events).toEqual(["registration.start", "registration.end"]);
-    });
-  });
-
   describe("create-reception-request", () => {
     it("calls createReceptionRequest and emits trace", async () => {
       const deps = makeDeps();

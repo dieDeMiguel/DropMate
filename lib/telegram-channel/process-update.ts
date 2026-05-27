@@ -108,6 +108,7 @@ import { isReceiveCommand, parseReceiveCommand } from "../slash-command.js";
 import { buildState } from "./orchestrator/build-state.js";
 import { match } from "./orchestrator/match.js";
 import { runActions } from "./orchestrator/run-actions.js";
+import type { State } from "./orchestrator/state.js";
 import { buildFlow2AckDm, buildVlc3PathDm } from "./flow-2-dms.js";
 import {
   buildDmTextPickupAlreadyDoneText,
@@ -142,31 +143,8 @@ import {
   buildVolunteerEarlyArrivalAckDmText,
 } from "./pickup-dms.js";
 
-/**
- * Subset of an Ash `SessionAuthContext` we hand `send(...)`. Kept
- * loose (Record-typed) so this module doesn't pull in Ash's full
- * `SessionAuthContext` type — the spike's `defineChannel` call site
- * already enforces the contract at the route boundary.
- */
-export interface TelegramSessionAuth {
-  readonly principalId: string;
-  readonly principalType: "user";
-  readonly authenticator: "telegram";
-  readonly attributes: Record<string, string>;
-}
-
-/**
- * State passed through `send(...)` and surfaced to tools via the
- * channel's `context(state)` projection. Mirrors the spike's
- * existing shape so the factory can drop in without changing tool
- * expectations.
- */
-export interface TelegramChannelState {
-  readonly chatId: number;
-  readonly isGroup: boolean;
-  readonly fromUserId: number | null;
-  readonly fromLanguageCode: string | null;
-}
+export type { TelegramChannelState, TelegramSessionAuth, TelegramTriggerKind } from "./types.js";
+import type { TelegramChannelState, TelegramSessionAuth, TelegramTriggerKind } from "./types.js";
 
 /**
  * Caller-supplied dependencies. The spike webhook wires these to its
@@ -677,13 +655,6 @@ export interface ProcessUpdateDeps {
  *                                        the channel handles those
  *                                        taps deterministically.
  */
-export type TelegramTriggerKind =
-  | "telegram.text-dm"
-  | "telegram.group"
-  | "telegram.photo"
-  | "telegram.slash-receive"
-  | "telegram.callback";
-
 /**
  * v2.1 #100: Flow 2 entry routes return this discriminated union so the
  * orchestrator can decide whether to skip the agent entirely (channel
@@ -2709,16 +2680,37 @@ export async function processInboundTelegramUpdate(
   // buildState throws for non-registration dm cases (Slices 4–5 pending) —
   // those also fall through to the legacy path below.
   if (inbound.photoFileId === null && !inbound.isGroup && inbound.fromUserId !== null) {
+    // Two failure modes need different handling. `buildState` throwing is
+    // the expected signal that the DM isn't a registration shape (Slices 4–5
+    // not yet migrated) — silently fall through to the legacy dispatcher.
+    // `runActions` throwing means `registerResident` rejected (Redis hiccup,
+    // schema drift, …); the deleted `handleRegistrationDm` logged + fell
+    // through, and we want the same diagnostic so the failure isn't silent.
+    let state: State | null = null;
     try {
-      const state = await buildState({ kind: "dm", message: inbound }, deps);
-      if (state.kind === "dm-registration") {
+      state = await buildState({ kind: "dm", message: inbound }, deps);
+    } catch {
+      // Expected fallthrough — non-registration DM. No log.
+    }
+    if (state !== null && state.kind === "dm-registration") {
+      try {
         const { actions } = match(state);
         await runActions(actions, deps);
         return new Response(null, { status: 204 });
+      } catch (err) {
+        console.error(
+          "[process-update] registration runActions failed for chatId",
+          inbound.chatId,
+          "userId",
+          inbound.fromUserId,
+          "error:",
+          err instanceof Error
+            ? { name: err.name, message: err.message, stack: err.stack }
+            : err,
+        );
+        // Fall through to the legacy dispatcher so the user gets some
+        // response. Same fallback as the deleted handleRegistrationDm.
       }
-    } catch {
-      // Non-registration dm (buildState throws) or registerResident failure
-      // (runActions throws) — fall through to the legacy dispatcher below.
     }
   }
 

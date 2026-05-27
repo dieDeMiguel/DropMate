@@ -5,7 +5,7 @@ import type {
   CreateReceptionRequestResult,
 } from "../../reception-request.js";
 import type { RegisterPackageInput, RegisterPackageResult } from "../../package.js";
-import type { RegisterResidentInput, RegisterResidentResult } from "../../registration.js";
+import type { RegisterResidentInput } from "../../registration.js";
 import type { ConfirmPickupResult } from "../../pickup.js";
 import type { Resident } from "../../redis.js";
 import type { InlineKeyboardMarkup, TelegramMessageEntity } from "../send.js";
@@ -13,7 +13,7 @@ import type {
   TelegramChannelState,
   TelegramSessionAuth,
   TelegramTriggerKind,
-} from "../process-update.js";
+} from "../types.js";
 
 /**
  * Discriminated union of all effects the orchestrator can emit (ADR D4).
@@ -41,12 +41,6 @@ export type Action =
       readonly kind: "register-package";
       readonly holder: Resident | null;
       readonly input: RegisterPackageInput;
-      readonly traceStage: string;
-      readonly traceExtras?: Readonly<Record<string, unknown>>;
-    }
-  | {
-      readonly kind: "register-resident";
-      readonly input: RegisterResidentInput;
       readonly traceStage: string;
       readonly traceExtras?: Readonly<Record<string, unknown>>;
     }
@@ -160,18 +154,6 @@ export namespace Action {
     return {
       kind: "register-package",
       holder,
-      input,
-      traceStage: opts.traceStage,
-      ...(opts.traceExtras ? { traceExtras: opts.traceExtras } : {}),
-    };
-  }
-
-  export function registerResident(
-    input: RegisterResidentInput,
-    opts: { traceStage: string; traceExtras?: Readonly<Record<string, unknown>> },
-  ): Action {
-    return {
-      kind: "register-resident",
       input,
       traceStage: opts.traceStage,
       ...(opts.traceExtras ? { traceExtras: opts.traceExtras } : {}),
