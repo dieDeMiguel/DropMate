@@ -67,7 +67,7 @@ export interface RunActionsDeps {
   ) => Promise<Session>;
   readonly drainSession: (session: Session, chatId: number) => Promise<void>;
   readonly waitUntil: (task: Promise<unknown>) => void;
-  readonly setTriggerAttribute?: (trigger: TelegramTriggerKind) => void;
+  readonly setTriggerAttribute: (trigger: TelegramTriggerKind) => void;
 }
 
 /**
@@ -249,7 +249,7 @@ async function executeOne(action: Action, deps: RunActionsDeps): Promise<void> {
     }
 
     case "set-trigger-attribute":
-      deps.setTriggerAttribute?.(action.trigger);
+      deps.setTriggerAttribute(action.trigger);
       return;
 
     case "emit-trace":

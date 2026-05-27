@@ -5991,24 +5991,6 @@ describe("processInboundTelegramUpdate — setTriggerAttribute (v2.1 #99)", () =
     expect(setTriggerAttribute).not.toHaveBeenCalled();
   });
 
-  it("orchestrator tolerates an absent setTriggerAttribute dep (optional)", async () => {
-    // The spike webhook + tests that don't care about observability
-    // wiring shouldn't need to provide the dep. Optional-chaining at
-    // every call site keeps the channel running without it.
-    const { deps, sendToAsh } = buildDeps();
-    const depsWithoutTrigger: ProcessUpdateDeps = {
-      ...deps,
-      setTriggerAttribute: undefined,
-    };
-
-    const res = await processInboundTelegramUpdate(
-      makeRequest(dmUpdate({ chatId: 1, text: "hi", fromUserId: 99 })),
-      depsWithoutTrigger,
-    );
-
-    expect(res.status).toBe(204);
-    expect(sendToAsh).toHaveBeenCalledTimes(1);
-  });
 });
 
 describe("processInboundTelegramUpdate — Flow 1 group text (v2.1 #106 Slice 1 — channel-deterministic register-package)", () => {

@@ -139,11 +139,13 @@ export type State =
       readonly caller: Resident;
     }
   // Callback `confirm_pickup` failed with a generic (recoverable) error
-  // — Redis hiccup, Bot API outage, etc.
+  // — Redis hiccup, Bot API outage, etc. Carries only the resolved
+  // language because the toast is the sole user-visible output (the
+  // caller's Resident record may not even exist if the lookup threw).
   | {
       readonly kind: "callback-pickup-error";
       readonly inbound: TelegramInboundCallback;
-      readonly caller: Resident;
+      readonly language: string | null;
     }
   // Callback `confirm_pickup` from an unregistered or anonymous tapper.
   // Treated as not-recipient (same toast) per v2.1 #108.
@@ -178,10 +180,13 @@ export type State =
     }
   // `accept_reception_request` failed with a generic (recoverable) error.
   // Generic retry toast; keyboard stays live so the volunteer can re-tap.
+  // Carries only the resolved language because the toast is the sole
+  // user-visible output (the volunteer's Resident record may not even
+  // exist if the lookup threw or returned null after the gate).
   | {
       readonly kind: "callback-accept-error";
       readonly inbound: TelegramInboundCallback;
-      readonly volunteer: Resident;
+      readonly language: string | null;
     }
   // `accept_reception_group` tap from an unregistered tapper (the
   // `isRegisteredResident` gate failed). German /register nudge toast;

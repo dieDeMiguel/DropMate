@@ -170,12 +170,9 @@ function callbackPickupAlreadyDoneActions(
 function callbackPickupErrorActions(
   state: Extract<State, { kind: "callback-pickup-error" }>,
 ): Action[] {
-  const { inbound: cb, caller } = state;
+  const { inbound: cb, language } = state;
   return [
-    Action.answerCallback(
-      cb.callbackId,
-      pickupRetryToast(caller.language ?? cb.fromLanguageCode),
-    ),
+    Action.answerCallback(cb.callbackId, pickupRetryToast(language)),
     // Keyboard stays live so the recipient can re-tap once the
     // underlying hiccup clears.
   ];
@@ -290,8 +287,7 @@ function callbackAcceptCrossStreetActions(
 function callbackAcceptErrorActions(
   state: Extract<State, { kind: "callback-accept-error" }>,
 ): Action[] {
-  const { inbound: cb, volunteer } = state;
-  const language = volunteer.language ?? cb.fromLanguageCode;
+  const { inbound: cb, language } = state;
   return [
     Action.answerCallback(cb.callbackId, retryToastForLanguage(language)),
     // Recoverable failure → keyboard stays live so the volunteer can

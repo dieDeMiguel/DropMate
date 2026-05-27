@@ -152,7 +152,7 @@ async function buildCallbackPickupState(
     return {
       kind: "callback-pickup-error",
       inbound: cb,
-      caller: callerPlaceholder(cb.fromLanguageCode),
+      language: cb.fromLanguageCode,
     };
   }
   if (!caller) {
@@ -187,7 +187,11 @@ async function buildCallbackPickupState(
         : err,
     );
     emitTrace("flow1", "pickup.reject.redis-hiccup", { packageId });
-    return { kind: "callback-pickup-error", inbound: cb, caller };
+    return {
+      kind: "callback-pickup-error",
+      inbound: cb,
+      language: caller.language ?? cb.fromLanguageCode,
+    };
   }
 }
 
@@ -238,14 +242,12 @@ async function buildCallbackAcceptState(
         ? { name: err.name, message: err.message, stack: err.stack }
         : err,
     );
-    // Fake a "volunteer" of null to drive the error toast. We need a
-    // Resident on the state variant for the volunteer's language —
-    // but here we have nothing. Build a minimal placeholder so the
-    // toast resolves via cb.fromLanguageCode.
+    // The volunteer's Resident record is unavailable, so the toast
+    // falls back to cb.fromLanguageCode.
     return {
       kind: "callback-accept-error",
       inbound: cb,
-      volunteer: volunteerPlaceholder(cb.fromLanguageCode),
+      language: cb.fromLanguageCode,
     };
   }
   if (!volunteer) {
@@ -257,7 +259,7 @@ async function buildCallbackAcceptState(
     return {
       kind: "callback-accept-error",
       inbound: cb,
-      volunteer: volunteerPlaceholder(cb.fromLanguageCode),
+      language: cb.fromLanguageCode,
     };
   }
 
@@ -290,34 +292,13 @@ async function buildCallbackAcceptState(
         : err,
     );
     emitTrace("flow2", "reject.redis-hiccup", { stage: "accept" });
-    return { kind: "callback-accept-error", inbound: cb, volunteer };
+    return {
+      kind: "callback-accept-error",
+      inbound: cb,
+      language: volunteer.language ?? cb.fromLanguageCode,
+    };
   }
 }
-
-/**
- * Minimal Resident shape used purely to drive the
- * `callback-accept-error` / `callback-pickup-error` toast's language
- * fallback when the caller's Resident record can't be resolved (the
- * lookup threw before we could populate it). The match arm only reads
- * `.language`, so the other fields are placeholders.
- */
-function volunteerPlaceholder(languageCode: string | null): Resident {
-  return {
-    id: "",
-    name: "",
-    street: "",
-    houseNumber: "",
-    platformId: "",
-    platform: "telegram",
-    language: languageCode ?? undefined,
-    availabilityPatterns: [],
-    registeredAt: 0,
-    source: "explicit",
-    confirmed: false,
-  };
-}
-
-const callerPlaceholder = volunteerPlaceholder;
 
 /**
  * Pre-computes the full context for an inbound update and returns the
