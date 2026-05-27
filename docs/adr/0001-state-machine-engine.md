@@ -86,6 +86,15 @@ await runActions(actions, deps);
 
 **Trade-off accepted:** the builder owns the fixed I/O graph (one function, no decisions). If a future flow legitimately needs "based on classifier result, decide whether to also call vision", that's the day to revisit — for now no such flow exists.
 
+#### Amendment (2026-05-27, after Slice 4 / #135)
+
+`buildState` MAY invoke a canonical-state mutation directly **when, and only when, the routing decision in `match` depends on the outcome of that mutation** (e.g. error-code dispatch vs success class). The outcome is then encoded as a State variant. This is the *only* permitted deviation from "mechanical dispatch, no business logic":
+
+- **Reads** (resident lookup, vision, classifier) remain unconstrained — already permitted by D3.
+- **Mutations whose outcome is not load-bearing for `match`'s dispatch** stay as runner-executed actions (Tier 2 per D6).
+
+Introduced by Slice 4's callback handling: `confirm_pickup` / `accept_reception_group` taps dispatch on `PICKUP_NOT_RECIPIENT` / `PICKUP_ALREADY_DONE` / `ACCEPT_SELF_NOT_ALLOWED` / `ACCEPT_DIFFERENT_STREET`. The rejected alternatives (multi-step machine with event feedback; impure runner cases routing on error codes) were re-evaluated; the same conclusions held — putting the mutation in `buildState` was the simplest correct shape.
+
 ### D4. Trace topology: hybrid — auto-trace side-effect actions, explicit `EmitTrace` actions for decision-only signals
 
 Two trace flavors exist in today's code:
@@ -122,6 +131,10 @@ type Action =
 - "Runner emits all" — loses decision-only traces (no side effect to attach them to).
 - "Engine emits all inline via `emitTrace(...)`" — engine becomes impure, tests need ALS context propagation, re-introduces exactly the impurity the refactor is killing.
 
+#### Amendment (2026-05-27, after Slice 4 / #135)
+
+When `buildState` owns a canonical-state mutation per D3's amendment, it also owns the corresponding action-outcome trace (`<flow>.<stage>.start/end/error`). **Stage names are identical** to what the runner's auto-trace would have emitted for the equivalent action — emit location is implementation detail; stage names are the contract. Inventing a `buildState.*` namespace is explicitly forbidden — trace consumers (live diagram, observability bus, evals) must not need to know which path emitted a given event.
+
 ### D5. Action runner: sequential by default, explicit `Action.parallel([...])` for fan-out
 
 Actions in the returned array execute in array order, awaiting each before the next. Concurrency is opt-in via an `Action.parallel([...])` wrapper.
@@ -145,6 +158,21 @@ const actions: Action[] = [
 - Concurrency we actually want (observation writes, trace emits) is rare and obvious — easy to wrap in `Action.parallel([...])` at the few spots.
 
 **Rejected alternative:** parallel-by-default with `Action.sequence([...])` for ordering — flips today's semantics, makes every existing ordered pair a migration trap.
+
+### D6. Runner tolerance contract (added 2026-05-27, post Slice 4 / #135)
+
+The runner classifies actions into two tiers:
+
+- **Tier 1 — Communication side effects** (`send-direct-message`, `edit-group-card`, `answer-callback`, `strip-keyboard`). The runner catches thrown errors, logs them, emits `<traceStage>.error`, and **continues**. A failed DM never bails a multi-DM flow. Matches the legacy dispatcher's tolerance semantics.
+- **Tier 2 — Canonical-state writes** (`register-package`, `create-reception-request`; historically `confirm-pickup` / `accept-reception-request` / `register-resident` until D3's amendment moved them into `buildState`). The runner emits `<traceStage>.error` and **rethrows**. The caller (the webhook handler) decides whether to swallow or surface.
+
+**Compound actions** (e.g. Slice 3's `register-and-confirm-resident`, which atomically writes a resident then DMs the localised confirmation) combine both tiers. Their runner case is the source of truth — it owns the internal try/catch split, deciding which inner step rethrows and which swallows. The runner does **not** auto-classify compound actions; the action's case takes responsibility for the tier mapping.
+
+**Why two tiers:**
+
+- Communication is best-effort by Telegram-channel design: a flaked DM shouldn't roll back canonical state.
+- Canonical-state writes are the source of truth; silently swallowing a write failure would diverge the system from reality.
+- Single-tier flattening was considered and rejected: always-rethrow breaks the legacy multi-DM tolerance (one flaked DM bails the whole pickup-confirm flow), always-swallow silently loses Redis-write failures.
 
 ## Consequences
 
