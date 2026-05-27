@@ -281,6 +281,76 @@ describe("match — dm-text-vlc (welcome-wall structural guarantee, #136)", () =
 });
 
 // ---------------------------------------------------------------------------
+// buildState → match — welcome-wall end-to-end regression (Slice 7 / #138)
+//
+// Sister test to the `match — dm-text-vlc` block above. That test asserts on
+// a literal `dm-text-vlc` state; this one drives a real classifier inbound
+// through `buildState` to pin the structural guarantee at the seam where
+// the regression originally lived: medium-conf classifier + registered
+// resident MUST produce a bounded action set (3-path VLC DM, NO sendToAsh).
+//
+// If a future refactor reintroduces an agent fallthrough on this path, this
+// test fails. It's the umbrella's load-bearing regression.
+// ---------------------------------------------------------------------------
+
+describe("buildState → match — welcome-wall regression (#138)", () => {
+  function dmTextInbound() {
+    return {
+      kind: "dm" as const,
+      message: {
+        chatId: 200,
+        text: "I will receive a package today but won't be at home",
+        isGroup: false,
+        fromUserId: 200,
+        fromLanguageCode: "de",
+        fromFirstName: "Test",
+        fromLastName: null,
+        fromUsername: null,
+        photoFileId: null,
+      },
+    };
+  }
+
+  it("medium-conf classifier on a registered resident → bounded VLC DM, NEVER sendToAsh", async () => {
+    const registeredResident: Resident = { ...resident, language: "de" };
+    const deps = makeBuildDeps({
+      getRegisteredResident: vi.fn().mockResolvedValue(registeredResident),
+      classifyDmIntent: vi.fn().mockResolvedValue({
+        kind: "flow2-reception",
+        confidence: "medium",
+        reason: "absence signal but no carrier/window",
+      }),
+    });
+
+    const state = await buildState(dmTextInbound(), deps);
+    const { actions } = match(state);
+
+    expect(state.kind).toBe("dm-text-vlc");
+    expect(actions.some((a) => a.kind === "send-to-ash")).toBe(false);
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({ kind: "send-direct-message", chatId: 200 });
+  });
+
+  it("low-conf classifier on a registered resident → bounded VLC DM, NEVER sendToAsh", async () => {
+    const registeredResident: Resident = { ...resident, language: "de" };
+    const deps = makeBuildDeps({
+      getRegisteredResident: vi.fn().mockResolvedValue(registeredResident),
+      classifyDmIntent: vi.fn().mockResolvedValue({
+        kind: "pickup-confirmation",
+        confidence: "low",
+        reason: "ambiguous text",
+      }),
+    });
+
+    const state = await buildState(dmTextInbound(), deps);
+    const { actions } = match(state);
+
+    expect(state.kind).toBe("dm-text-vlc");
+    expect(actions.some((a) => a.kind === "send-to-ash")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // match — dm-text-agent (registered fallthrough is the ONLY agent path on
 // the DM text surface after Slice 5 — see the welcome-wall test above).
 // ---------------------------------------------------------------------------
@@ -1221,7 +1291,7 @@ function makeBuildDeps(overrides: Partial<BuildStateDeps> = {}): BuildStateDeps 
     getFileUrl: vi.fn().mockResolvedValue("https://example.test/file"),
     classifyDmIntent: vi
       .fn()
-      .mockResolvedValue({ kind: "other", absenceSignal: false, confidence: "low", reason: "test" }),
+      .mockResolvedValue({ kind: "other", confidence: "low", reason: "test" }),
     classifyGroupMessage: vi.fn().mockResolvedValue({
       isPackageRegistration: false,
       recipients: [],
@@ -1837,14 +1907,18 @@ describe("buildState: callback-accept family", () => {
 describe("buildState: callback-agent fallthrough", () => {
   const cases: Array<{ data: string; matches: RegExp }> = [
     {
-      // Legacy v2 DM-3 button — channel never wires it now; surfaces an apology synthetic.
+      // Legacy v2 DM-3 button — channel never wires it now; Slice 7 (#138)
+      // removed the dedicated apology synthetic since the backing tool no
+      // longer exists. The generic default arm still routes the inbound to
+      // the agent with "use your best judgement".
       data: "accept_reception_request:rr_old",
-      matches: /old 'I can help' button/i,
+      matches: /\[button-tap\] action=accept_reception_request id=rr_old/,
     },
     {
-      // Malformed `accept_reception_group` (no id) — falls through to agent.
+      // Malformed `accept_reception_group` (no id) — falls through to agent
+      // via the generic default arm (Slice 7 #138 removed the dedicated case).
       data: "accept_reception_group:",
-      matches: /no request id was attached/i,
+      matches: /\[button-tap\] action=accept_reception_group/,
     },
     {
       data: "decline_reception_request:rr_2",

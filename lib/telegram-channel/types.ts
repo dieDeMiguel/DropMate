@@ -39,10 +39,14 @@ export interface TelegramChannelState {
  * Trigger-attribute kind set the channel stamps on each inbound so the
  * agent's tools can dispatch on the original Telegram shape. Mirrors the
  * union used by `setTelegramTriggerAttribute` in the factory.
+ *
+ * `telegram.photo` was retired in Slice 7 (#138): photo turns are now
+ * fully channel-deterministic (DM photo → Flow 1 register / Flow 2 create
+ * / VLC; group photo → privacy nudge), so no photo inbound reaches the
+ * agent and no inbound stamps `telegram.photo` anymore.
  */
 export type TelegramTriggerKind =
   | "telegram.text-dm"
   | "telegram.group"
-  | "telegram.photo"
   | "telegram.slash-receive"
   | "telegram.callback";

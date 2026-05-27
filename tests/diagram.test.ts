@@ -481,7 +481,7 @@ describe("createEngine — synthetic trace stream", () => {
       kind: "photo",
       stage: "agent",
       phase: "start",
-      extras: { trigger: "telegram.photo" },
+      extras: { trigger: "telegram.text-dm" },
       ts: 0,
     });
     await vi.advanceTimersByTimeAsync(1500);

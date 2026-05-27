@@ -48,7 +48,6 @@ export type DmIntentKind =
 
 export interface ClassifierVerdict {
   readonly kind: DmIntentKind;
-  readonly absenceSignal: boolean;
   readonly carrier?: PackageCarrier;
   readonly expectedDate?: string;
   readonly expectedWindowStartAt?: number;

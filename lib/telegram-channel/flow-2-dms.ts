@@ -23,8 +23,8 @@
  * synthetics anymore — there's no fallback path to drop the example
  * line and let the model improvise.
  *
- * @see lib/telegram-channel/process-update.ts — routeDmTextThroughClassifier,
- *   routeReceiveCommand, routeDmPhoto
+ * @see lib/telegram-channel/orchestrator/build-state.ts — buildDmTextState,
+ *   buildDmReceiveCmdState, buildDmPhotoState
  */
 
 import { normaliseLanguageCode } from "../language.js";
