@@ -63,6 +63,7 @@ function makeDeps(overrides: Partial<RunActionsDeps> = {}): RunActionsDeps {
     sendToAsh: vi.fn().mockResolvedValue({ sessionId: "sess_1" }),
     drainSession: vi.fn().mockResolvedValue(undefined),
     waitUntil: vi.fn(),
+    setTriggerAttribute: vi.fn(),
     ...overrides,
   };
 }

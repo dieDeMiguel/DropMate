@@ -621,7 +621,7 @@ export interface ProcessUpdateDeps {
    * chip reads `telegram` while downstream filters can still tell
    * text DMs apart from button taps and photo uploads.
    */
-  readonly setTriggerAttribute?: (trigger: TelegramTriggerKind) => void;
+  readonly setTriggerAttribute: (trigger: TelegramTriggerKind) => void;
 }
 
 /**
@@ -2791,7 +2791,7 @@ export async function processInboundTelegramUpdate(
   // column populates whenever the channel hands a message to the
   // agent — channel-deterministic paths (Flow 2 entries, registration,
   // volunteer-accept) return earlier and never reach this line.
-  deps.setTriggerAttribute?.(trigger);
+  deps.setTriggerAttribute(trigger);
 
   // #102 live diagram: the AGENT box only lights on these fallthrough
   // paths — Flow 2 entries, registration, volunteer-accept all return

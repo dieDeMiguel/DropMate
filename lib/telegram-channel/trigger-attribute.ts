@@ -5,7 +5,7 @@
  *
  * Why this lives separately from `process-update.ts`: the orchestrator
  * doesn't need to know how the attribute lands on the span — it just
- * calls `deps.setTriggerAttribute?.("telegram.text-dm")` and trusts the
+ * calls `deps.setTriggerAttribute("telegram.text-dm")` and trusts the
  * factory to wire a real implementation. This module is that wire.
  *
  * Synchronous setAttribute on the active span is the canonical OTel
