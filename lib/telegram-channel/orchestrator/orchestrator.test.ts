@@ -90,21 +90,6 @@ function makeDeps(overrides: Partial<RunActionsDeps> = {}): RunActionsDeps {
 describe("match", () => {
   const states: Array<{ label: string; state: State; sliceRef: string }> = [
     {
-      label: "dm-photo",
-      state: { kind: "dm-photo", inbound: { chatId: 3, text: "", isGroup: false, fromUserId: 1, fromLanguageCode: null, fromFirstName: null, fromLastName: null, fromUsername: null, photoFileId: "file_1" }, resident, vision: { kind: "unknown", confidence: "low", reason: "test" } },
-      sliceRef: "Slice 5 (#136)",
-    },
-    {
-      label: "dm-text",
-      state: { kind: "dm-text", inbound: { chatId: 4, text: "hello", isGroup: false, fromUserId: 1, fromLanguageCode: null, fromFirstName: null, fromLastName: null, fromUsername: null, photoFileId: null }, resident, classifier: { kind: "other", absenceSignal: false, confidence: "low", reason: "test" } },
-      sliceRef: "Slice 5 (#136)",
-    },
-    {
-      label: "dm-receive-cmd",
-      state: { kind: "dm-receive-cmd", inbound: { chatId: 5, text: "/receive", isGroup: false, fromUserId: 1, fromLanguageCode: null, fromFirstName: null, fromLastName: null, fromUsername: null, photoFileId: null }, resident: null },
-      sliceRef: "Slice 5 (#136)",
-    },
-    {
       label: "group-photo",
       state: { kind: "group-photo", inbound: { chatId: 6, text: "", isGroup: true, fromUserId: 1, fromLanguageCode: null, fromFirstName: null, fromLastName: null, fromUsername: null, photoFileId: "file_2" }, resident: null, vision: { kind: "unknown", confidence: "low", reason: "test" } },
       sliceRef: "Slice 6 (#137)",
@@ -123,11 +108,11 @@ describe("match", () => {
     });
   }
 
-  it("covers all 5 unmigrated state variants (exhaustiveness regression)", () => {
-    // Slices 3 (#134) and 4 (#135) migrated dm-registration + callback-*
-    // arms; only Slices 5 (#136) and 6 (#137) still have unmigrated kinds:
-    // dm-photo, dm-text, dm-receive-cmd, group-photo, group-text.
-    expect(states).toHaveLength(5);
+  it("covers all 2 unmigrated state variants (exhaustiveness regression)", () => {
+    // Slices 3 (#134), 4 (#135), 5 (#136) migrated dm-registration +
+    // callback-* + dm-photo/dm-text/dm-receive-cmd; only Slice 6 (#137)
+    // still has unmigrated kinds: group-photo, group-text.
+    expect(states).toHaveLength(2);
   });
 
   it("throws on unknown state kind (never branch)", () => {
@@ -232,6 +217,111 @@ describe("match — dm-registration", () => {
     const { actions } = match(state);
     const dmText = (actions[1] as Extract<typeof actions[1], { kind: "send-direct-message" }>).text;
     expect(dmText).toContain("Please write: /register");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// match — dm-text-vlc (Welcome-wall structural guarantee, Slice 5 / #136)
+//
+// The match arm for `dm-text-vlc` MUST emit a bounded `send-direct-message`
+// action with the 3-path VLC recovery text — NOT a `send-to-ash`
+// fallthrough. This is the structural impossibility the umbrella refactor
+// (#139) was created to deliver:
+//
+//   Pre-Slice-5: medium/low-conf classifier + registered resident →
+//     sendToAsh fallthrough → agent regresses to training prior →
+//     emits a welcome wall of registration prompts.
+//   Post-Slice-5: same input → `dm-text-vlc` State → bounded VLC DM action.
+//
+// If this test ever fails by emitting `Action.SendToAsh`, the welcome-wall
+// regression class is back. Treat it as a release blocker.
+// ---------------------------------------------------------------------------
+
+describe("match — dm-text-vlc (welcome-wall structural guarantee, #136)", () => {
+  function dmTextInbound(language: string | null = "de") {
+    return {
+      chatId: 200,
+      text: "I will receive a package today but won't be at home",
+      isGroup: false,
+      fromUserId: 200,
+      fromLanguageCode: language,
+      fromFirstName: "Test",
+      fromLastName: null,
+      fromUsername: null,
+      photoFileId: null,
+    };
+  }
+
+  it("emits Action.SendDirectMessage with the 3-path VLC text, NOT Action.SendToAsh", () => {
+    const state: State = {
+      kind: "dm-text-vlc",
+      inbound: dmTextInbound("de"),
+      language: "de",
+    };
+    const { actions } = match(state);
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({
+      kind: "send-direct-message",
+      chatId: 200,
+      traceStage: "dm",
+    });
+    // The action MUST NOT be a send-to-ash — that would re-introduce the
+    // welcome-wall regression class.
+    expect(actions[0]!.kind).not.toBe("send-to-ash");
+    const dmText = (actions[0] as Extract<typeof actions[0], { kind: "send-direct-message" }>).text;
+    // 3-path VLC content — the same text dm-photo `kind:"unknown"` emits.
+    expect(dmText).toContain("Etikett");
+    expect(dmText).toContain("/receive");
+    expect(dmText).toContain("/register");
+  });
+
+  it("localises to en/es/tr via the language field", () => {
+    for (const language of ["en", "es", "tr"] as const) {
+      const state: State = {
+        kind: "dm-text-vlc",
+        inbound: dmTextInbound(language),
+        language,
+      };
+      const { actions } = match(state);
+      const dmText = (actions[0] as Extract<typeof actions[0], { kind: "send-direct-message" }>).text;
+      // Each language emits its own VLC copy; the agent is never invoked.
+      expect(actions[0]!.kind).toBe("send-direct-message");
+      expect(dmText.length).toBeGreaterThan(0);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// match — dm-text-agent (registered fallthrough is the ONLY agent path on
+// the DM text surface after Slice 5 — see the welcome-wall test above).
+// ---------------------------------------------------------------------------
+
+describe("match — dm-text-agent (legitimate fallthrough)", () => {
+  it("emits setTriggerAttribute + agent-start trace + Action.SendToAsh with raw text", () => {
+    const inbound = {
+      chatId: 200,
+      text: "Hi, can you help me?",
+      isGroup: false,
+      fromUserId: 200,
+      fromLanguageCode: "de",
+      fromFirstName: "Test",
+      fromLastName: null,
+      fromUsername: null,
+      photoFileId: null,
+    };
+    const state: State = { kind: "dm-text-agent", inbound };
+    const { actions } = match(state);
+    expect(actions).toHaveLength(3);
+    expect(actions[0]).toMatchObject({
+      kind: "set-trigger-attribute",
+      trigger: "telegram.text-dm",
+    });
+    expect(actions[1]).toMatchObject({ kind: "emit-trace", stage: "agent", phase: "start" });
+    expect(actions[2]).toMatchObject({
+      kind: "send-to-ash",
+      message: "Hi, can you help me?",
+      continuationToken: "tg:200",
+    });
   });
 });
 
@@ -373,7 +463,11 @@ describe("runActions", () => {
       );
 
       unsub();
-      expect(deps.sendDirectMessage).toHaveBeenCalledWith(42, "hello", undefined, undefined);
+      // Slice 5 / #136: runner forwards only the args the action carries
+      // — trailing `undefined` filler args are omitted so test
+      // `toEqual([chatId, text])` style assertions match the legacy
+      // dispatcher's 2-arg call shape.
+      expect(deps.sendDirectMessage).toHaveBeenCalledWith(42, "hello");
       expect(events).toEqual([
         { stage: "dm", phase: "start" },
         { stage: "dm", phase: "end" },
@@ -793,6 +887,21 @@ function makeBuildDeps(overrides: Partial<BuildStateDeps> = {}): BuildStateDeps 
       confidence: "low",
       reason: "test",
     }),
+    registerPackage: vi.fn().mockResolvedValue({
+      package: {} as never,
+      holder: resident,
+      recipientResolution: { kind: "unknown" } as never,
+      receptionRequestFulfilled: null,
+    }),
+    createReceptionRequest: vi.fn().mockResolvedValue({
+      receptionRequest: {} as never,
+    }),
+    resolveRecipient: vi.fn().mockResolvedValue({ kind: "unknown" } as never),
+    listOpenPackagesForRecipient: vi.fn().mockResolvedValue([]),
+    listMatchedReceptionRequestsForRequester: vi.fn().mockResolvedValue([]),
+    listMatchedReceptionRequestsForVolunteer: vi.fn().mockResolvedValue([]),
+    getResidentByPlatformId: vi.fn().mockResolvedValue(null),
+    streetGroupChatId: vi.fn().mockReturnValue(null),
     ...overrides,
   };
 }
