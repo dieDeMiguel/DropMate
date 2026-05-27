@@ -95,12 +95,27 @@ async function executeOne(action: Action, deps: RunActionsDeps): Promise<void> {
     case "send-direct-message": {
       emitTrace(action.traceStage, "start", action.traceExtras);
       try {
-        await deps.sendDirectMessage(
-          action.chatId,
-          action.text,
-          action.entities,
-          action.keyboard,
-        );
+        // Forward only the args the action actually carries — the legacy
+        // dispatcher call sites used 2/3/4-arg shapes interchangeably, and
+        // tests use `toEqual([chatId, text])` which is sensitive to
+        // trailing `undefined` fillers. Mirrors the answer-callback
+        // ergonomics.
+        if (action.keyboard !== undefined) {
+          await deps.sendDirectMessage(
+            action.chatId,
+            action.text,
+            action.entities,
+            action.keyboard,
+          );
+        } else if (action.entities !== undefined) {
+          await deps.sendDirectMessage(
+            action.chatId,
+            action.text,
+            action.entities,
+          );
+        } else {
+          await deps.sendDirectMessage(action.chatId, action.text);
+        }
         emitTrace(action.traceStage, "end", action.traceExtras);
       } catch (err) {
         emitTrace(action.traceStage, "error", {

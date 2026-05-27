@@ -4347,7 +4347,12 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
     expect(sendToAsh.mock.calls[0]![0]).toBe("Hab abgeholt");
   });
 
-  it("medium-confidence pickup-confirmation → fallthrough to agent (high-conf gate)", async () => {
+  it("medium-confidence pickup-confirmation → bounded 3-path VLC DM, NOT agent fallthrough (welcome-wall structural fix, Slice 5 / #136)", async () => {
+    // Pre-Slice-5 behaviour was a sendToAsh fallthrough — that's the v2
+    // regression class #130 documented. The Slice 5 state-machine refactor
+    // routes ALL classifier medium/low-conf verdicts for a registered
+    // resident to `dm-text-vlc` (bounded VLC DM). The agent is never
+    // invoked on this branch — welcome-wall is structurally impossible.
     const resident = recipientResident("de");
     const {
       deps,
@@ -4380,9 +4385,10 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
 
     expect(listOpenPackagesForRecipient).not.toHaveBeenCalled();
     expect(confirmPickup).not.toHaveBeenCalled();
-    expect(sendDirectMessage).not.toHaveBeenCalled();
-    expect(sendToAsh).toHaveBeenCalledTimes(1);
-    expect(sendToAsh.mock.calls[0]![0]).toBe("ich habe das");
+    expect(sendToAsh).not.toHaveBeenCalled();
+    expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+    expect(sendDirectMessage.mock.calls[0]![0]).toBe(200);
+    expect(sendDirectMessage.mock.calls[0]![1]).toMatch(/Etikett/i);
   });
 
   it("classifier returns kind='registration' or 'other' → does NOT call list/confirm even at high confidence", async () => {
@@ -4786,7 +4792,11 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
     expect(sendToAsh).toHaveBeenCalledTimes(1);
   });
 
-  it("medium-confidence flow2-volunteer-early-arrival → fallthrough to agent (high-conf gate)", async () => {
+  it("medium-confidence flow2-volunteer-early-arrival → bounded 3-path VLC DM, NOT agent fallthrough (welcome-wall structural fix, Slice 5 / #136)", async () => {
+    // Pre-Slice-5 medium-conf fell through to the agent. After #136 the
+    // engine routes every classifier medium/low-conf verdict on a
+    // registered resident to `dm-text-vlc` — bounded VLC recovery DM,
+    // never agent. Welcome-wall regression class structurally impossible.
     const volunteer = melanieVolunteer("de");
     const {
       deps,
@@ -4819,11 +4829,11 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
       deps,
     );
 
-    // Medium → no deterministic route fires; falls through to agent.
     expect(listMatchedReceptionRequestsForVolunteer).not.toHaveBeenCalled();
     expect(registerPackage).not.toHaveBeenCalled();
-    expect(sendDirectMessage).not.toHaveBeenCalled();
-    expect(sendToAsh).toHaveBeenCalledTimes(1);
+    expect(sendToAsh).not.toHaveBeenCalled();
+    expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+    expect(sendDirectMessage.mock.calls[0]![1]).toMatch(/Etikett/i);
   });
 
   it("listMatchedReceptionRequestsForVolunteer throws → fallthrough to agent (no register, no DM)", async () => {

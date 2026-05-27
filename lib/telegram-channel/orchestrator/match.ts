@@ -6,9 +6,28 @@ import {
   type ParsedRegistration,
 } from "../../registration.js";
 import { normaliseLanguageCode } from "../../language.js";
-import { buildDmTextPickupConfirmedText } from "../flow-1-dms.js";
+import {
+  buildDmTextPickupAlreadyDoneText,
+  buildDmTextPickupConfirmedText,
+  buildDmTextPickupMultiplePackagesText,
+  buildDmTextPickupNoOpenPackagesText,
+  buildDmTextPickupRetryText,
+  buildDmTextPickupWaitingOnVolunteerText,
+  buildGroupAckText,
+  buildHolderConfirmationDmText,
+  buildHolderNotRegisteredNudge,
+  buildPickupKeyboard,
+  buildRecipientDmText,
+  buildUnknownRecipientGroupQuestion,
+} from "../flow-1-dms.js";
+import {
+  buildFlow2AckDm,
+  buildVlc3PathDm,
+} from "../flow-2-dms.js";
 import {
   buildHolderThanksDmText,
+  buildRecipientReadyToPickUpDmText,
+  buildVolunteerEarlyArrivalAckDmText,
   pickupAlreadyDoneToast,
   pickupNotRecipientToast,
   pickupRetryToast,
@@ -21,6 +40,7 @@ import {
 } from "../volunteer-accept-dms.js";
 import { Action } from "./action.js";
 import type { State } from "./state.js";
+import type { TelegramSessionAuth } from "../types.js";
 
 const REGISTER_USAGE_HINTS: Readonly<Record<string, string>> = {
   de: "Bitte schreibe: /register <Name>, <Straße> <Hausnummer> [Etage] [Klingelname]. Beispiel: /register Diego de Miguel, Lutterothstrasse 69 Erdgeschoss Links.",
@@ -140,14 +160,62 @@ export function match(state: State): { state: State; actions: Action[] } {
     case "callback-agent":
       return { state, actions: callbackAgentActions(state) };
 
-    case "dm-photo":
-      throw new Error("dm-photo: not yet migrated — see Slice 5 (#136)");
+    case "dm-photo-flow1-resident":
+      return { state, actions: dmPhotoFlow1ResidentActions(state) };
 
-    case "dm-text":
-      throw new Error("dm-text: not yet migrated — see Slice 5 (#136)");
+    case "dm-photo-flow1-unknown":
+      return { state, actions: dmPhotoFlow1UnknownActions(state) };
 
-    case "dm-receive-cmd":
-      throw new Error("dm-receive-cmd: not yet migrated — see Slice 5 (#136)");
+    case "dm-photo-flow1-silent":
+      return { state, actions: [] };
+
+    case "dm-photo-flow1-holder-not-registered":
+      return { state, actions: dmPhotoFlow1HolderNotRegisteredActions(state) };
+
+    case "dm-photo-flow2-created":
+      return { state, actions: dmPhotoFlow2CreatedActions(state) };
+
+    case "dm-photo-vlc":
+      return { state, actions: dmPhotoVlcActions(state) };
+
+    case "dm-text-flow2-reception-created":
+      return { state, actions: dmTextFlow2ReceptionCreatedActions(state) };
+
+    case "dm-text-pickup-confirmed":
+      return { state, actions: dmTextPickupConfirmedActions(state) };
+
+    case "dm-text-pickup-already-done":
+      return { state, actions: dmTextPickupAlreadyDoneActions(state) };
+
+    case "dm-text-pickup-retry":
+      return { state, actions: dmTextPickupRetryActions(state) };
+
+    case "dm-text-pickup-no-open":
+      return { state, actions: dmTextPickupNoOpenActions(state) };
+
+    case "dm-text-pickup-waiting":
+      return { state, actions: dmTextPickupWaitingActions(state) };
+
+    case "dm-text-pickup-multiple":
+      return { state, actions: dmTextPickupMultipleActions(state) };
+
+    case "dm-text-volunteer-early-arrival":
+      return { state, actions: dmTextVolunteerEarlyArrivalActions(state) };
+
+    case "dm-text-volunteer-early-arrival-retry":
+      return { state, actions: dmTextVolunteerEarlyArrivalRetryActions(state) };
+
+    case "dm-text-vlc":
+      return { state, actions: dmTextVlcActions(state) };
+
+    case "dm-text-agent":
+      return { state, actions: dmTextAgentActions(state) };
+
+    case "dm-receive-cmd-created":
+      return { state, actions: dmReceiveCmdCreatedActions(state) };
+
+    case "dm-receive-cmd-agent":
+      return { state, actions: dmReceiveCmdAgentActions(state) };
 
     case "group-photo":
       throw new Error("group-photo: not yet migrated — see Slice 6 (#137)");
@@ -429,4 +497,481 @@ function retryToastForLanguage(raw: string | null | undefined): string {
     return ACCEPT_RETRY_TOASTS[normalised]!;
   }
   return ACCEPT_RETRY_TOASTS["de"]!;
+}
+
+// ---------------------------------------------------------------------------
+// dm-photo-* — Slice 5 (#136) DM photo route. Every branch resolves
+// channel-deterministically; the agent never runs on this surface.
+// ---------------------------------------------------------------------------
+
+function dmPhotoFlow1ResidentActions(
+  state: Extract<State, { kind: "dm-photo-flow1-resident" }>,
+): Action[] {
+  const { result, groupChatId } = state;
+  // buildState only emits this variant when the resolution converged on a
+  // Resident — the narrowing is a defensive invariant for the runtime.
+  if (result.recipientResolution.kind !== "resident") {
+    return [
+      Action.logError(
+        "[orchestrator/dm-photo-flow1-resident] recipient resolution not 'resident' — skipping DMs",
+        { resolution: result.recipientResolution.kind },
+      ),
+    ];
+  }
+  const recipientResident = result.recipientResolution.resident;
+  const actions: Action[] = [];
+
+  if (result.receptionRequestFulfilled !== null) {
+    // v2.1 #116: registration LINKS a Flow 2 RR — DM the holder a private
+    // confirmation in place of the group ack. The original Flow 2 group
+    // post is the announcement.
+    const holderChatId = Number(result.holder.platformId);
+    if (Number.isFinite(holderChatId)) {
+      actions.push(
+        Action.sendDirectMessage(
+          holderChatId,
+          buildHolderConfirmationDmText({
+            recipientName: recipientResident.name,
+            language: result.holder.language,
+          }),
+          {
+            traceStage: "dm",
+            traceExtras: { kind: "flow1-holder-confirmation" },
+          },
+        ),
+      );
+    } else {
+      actions.push(
+        Action.logError(
+          "[flow1] holder.platformId is not a finite number — skipping holder confirmation DM",
+          { platformId: result.holder.platformId, source: "photo" },
+        ),
+      );
+    }
+  } else if (groupChatId !== null) {
+    actions.push(
+      Action.sendDirectMessage(
+        groupChatId,
+        buildGroupAckText({
+          holder: result.holder,
+          recipient: recipientResident,
+        }),
+        {
+          traceStage: "dm",
+          traceExtras: { kind: "flow1-group-ack" },
+        },
+      ),
+    );
+  }
+  // If receptionRequestFulfilled === null and groupChatId === null, the
+  // legacy code emitted a console.warn — preserve via Action.logError so a
+  // misconfigured env var stays visible in logs. The recipient DM still
+  // fires below.
+  if (
+    result.receptionRequestFulfilled === null &&
+    groupChatId === null
+  ) {
+    actions.push(
+      Action.logError(
+        "[flow1] streetGroupChatId returned null — skipping group ack",
+        { holderHouseNumber: result.holder.houseNumber },
+      ),
+    );
+  }
+
+  const recipientChatId = Number(recipientResident.id);
+  if (Number.isFinite(recipientChatId)) {
+    actions.push(
+      Action.sendDirectMessage(
+        recipientChatId,
+        buildRecipientDmText({
+          holder: result.holder,
+          recipient: recipientResident,
+        }),
+        {
+          traceStage: "dm",
+          traceExtras: { kind: "flow1-recipient" },
+          keyboard: buildPickupKeyboard(result.package.id),
+        },
+      ),
+    );
+  } else {
+    actions.push(
+      Action.logError(
+        "[flow1] recipient.id is not a finite number — skipping DM (dm-photo)",
+        { recipientId: recipientResident.id },
+      ),
+    );
+  }
+
+  return actions;
+}
+
+function dmPhotoFlow1UnknownActions(
+  state: Extract<State, { kind: "dm-photo-flow1-unknown" }>,
+): Action[] {
+  return [
+    Action.sendDirectMessage(
+      state.groupChatId,
+      buildUnknownRecipientGroupQuestion(
+        state.recipientName,
+        state.holderLanguage ?? "de",
+      ),
+      {
+        traceStage: "dm",
+        traceExtras: { kind: "flow1-unknown-recipient" },
+      },
+    ),
+  ];
+}
+
+function dmPhotoFlow1HolderNotRegisteredActions(
+  state: Extract<State, { kind: "dm-photo-flow1-holder-not-registered" }>,
+): Action[] {
+  if (state.inbound.fromUserId === null) {
+    // Defensive: buildState only emits this variant when fromUserId is set.
+    return [];
+  }
+  const language =
+    state.language && normaliseLanguageCode(state.language);
+  return [
+    Action.sendDirectMessage(
+      state.inbound.fromUserId,
+      buildHolderNotRegisteredNudge(language),
+      {
+        traceStage: "dm",
+        traceExtras: { kind: "flow1-holder-not-registered" },
+      },
+    ),
+  ];
+}
+
+function dmPhotoFlow2CreatedActions(
+  state: Extract<State, { kind: "dm-photo-flow2-created" }>,
+): Action[] {
+  return [
+    Action.sendDirectMessage(
+      state.inbound.chatId,
+      buildFlow2AckDm(state.language),
+      {
+        traceStage: "dm",
+        traceExtras: { kind: "flow2-ack" },
+      },
+    ),
+  ];
+}
+
+function dmPhotoVlcActions(
+  state: Extract<State, { kind: "dm-photo-vlc" }>,
+): Action[] {
+  return [
+    Action.sendDirectMessage(
+      state.inbound.chatId,
+      buildVlc3PathDm(state.language),
+      {
+        traceStage: "dm",
+        traceExtras: { kind: "vlc-3-path" },
+      },
+    ),
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// dm-text-* — Slice 5 (#136) DM text route. The welcome-wall structural fix
+// lives here: `dm-text-vlc` is emitted for any medium/low-confidence
+// classifier verdict on a registered resident. The agent is never invoked
+// on that branch — closing the v2 regression class structurally.
+// ---------------------------------------------------------------------------
+
+function dmTextFlow2ReceptionCreatedActions(
+  state: Extract<State, { kind: "dm-text-flow2-reception-created" }>,
+): Action[] {
+  return [
+    Action.sendDirectMessage(
+      state.inbound.chatId,
+      buildFlow2AckDm(state.language),
+      {
+        traceStage: "dm",
+        traceExtras: { kind: "flow2-ack" },
+      },
+    ),
+  ];
+}
+
+function dmTextPickupConfirmedActions(
+  state: Extract<State, { kind: "dm-text-pickup-confirmed" }>,
+): Action[] {
+  const { inbound, language, result } = state;
+  const actions: Action[] = [
+    Action.sendDirectMessage(
+      inbound.chatId,
+      buildDmTextPickupConfirmedText(language),
+      {
+        traceStage: "dm",
+        traceExtras: { kind: "flow1-pickup-confirm" },
+      },
+    ),
+  ];
+  if (result.holder) {
+    const holderChatId = Number(result.holder.platformId);
+    if (Number.isFinite(holderChatId)) {
+      actions.push(
+        Action.sendDirectMessage(
+          holderChatId,
+          buildHolderThanksDmText({
+            holder: result.holder,
+            recipient: result.recipient ?? {
+              id: result.package.recipientResidentId ?? "",
+              name: result.package.recipientName,
+              houseNumber: result.package.recipientHouseNumber,
+              language: null,
+            },
+          }),
+          {
+            traceStage: "dm",
+            traceExtras: { kind: "pickup-holder-thanks" },
+          },
+        ),
+      );
+    } else {
+      actions.push(
+        Action.logError(
+          "[flow1-pickup-dm] holder.platformId is not a finite number — skipping thanks DM",
+          { platformId: result.holder.platformId },
+        ),
+      );
+    }
+  }
+  return actions;
+}
+
+function dmTextPickupAlreadyDoneActions(
+  state: Extract<State, { kind: "dm-text-pickup-already-done" }>,
+): Action[] {
+  return [
+    Action.sendDirectMessage(
+      state.inbound.chatId,
+      buildDmTextPickupAlreadyDoneText(state.language),
+      { traceStage: "dm", traceExtras: { kind: "flow1-pickup-already-done" } },
+    ),
+  ];
+}
+
+function dmTextPickupRetryActions(
+  state: Extract<State, { kind: "dm-text-pickup-retry" }>,
+): Action[] {
+  return [
+    Action.sendDirectMessage(
+      state.inbound.chatId,
+      buildDmTextPickupRetryText(state.language),
+      { traceStage: "dm", traceExtras: { kind: "flow1-pickup-retry" } },
+    ),
+  ];
+}
+
+function dmTextPickupNoOpenActions(
+  state: Extract<State, { kind: "dm-text-pickup-no-open" }>,
+): Action[] {
+  return [
+    Action.sendDirectMessage(
+      state.inbound.chatId,
+      buildDmTextPickupNoOpenPackagesText(state.language),
+      { traceStage: "dm", traceExtras: { kind: "flow1-pickup-no-open" } },
+    ),
+  ];
+}
+
+function dmTextPickupWaitingActions(
+  state: Extract<State, { kind: "dm-text-pickup-waiting" }>,
+): Action[] {
+  return [
+    Action.sendDirectMessage(
+      state.inbound.chatId,
+      buildDmTextPickupWaitingOnVolunteerText({
+        volunteerName: state.volunteerName,
+        language: state.language,
+      }),
+      { traceStage: "dm", traceExtras: { kind: "flow1-pickup-waiting" } },
+    ),
+  ];
+}
+
+function dmTextPickupMultipleActions(
+  state: Extract<State, { kind: "dm-text-pickup-multiple" }>,
+): Action[] {
+  return [
+    Action.sendDirectMessage(
+      state.inbound.chatId,
+      buildDmTextPickupMultiplePackagesText(state.language),
+      { traceStage: "dm", traceExtras: { kind: "flow1-pickup-multiple" } },
+    ),
+  ];
+}
+
+function dmTextVolunteerEarlyArrivalActions(
+  state: Extract<State, { kind: "dm-text-volunteer-early-arrival" }>,
+): Action[] {
+  const { inbound, language, result, req } = state;
+  const actions: Action[] = [];
+
+  // Recipient DM: name the volunteer + attach the [Abgeholt] keyboard.
+  if (result.recipientResolution.kind === "resident") {
+    const recipientChatId = Number(req.requesterResidentId);
+    if (Number.isFinite(recipientChatId)) {
+      actions.push(
+        Action.sendDirectMessage(
+          recipientChatId,
+          buildRecipientReadyToPickUpDmText({
+            volunteerName: result.holder.name,
+            language: result.recipientResolution.resident.language,
+          }),
+          {
+            traceStage: "dm",
+            traceExtras: { kind: "flow2-volunteer-early-arrival-recipient" },
+            keyboard: buildPickupKeyboard(result.package.id),
+          },
+        ),
+      );
+    } else {
+      actions.push(
+        Action.logError(
+          "[flow2-volunteer-early-arrival] requesterResidentId is not a finite number — skipping recipient DM",
+          { requesterResidentId: req.requesterResidentId },
+        ),
+      );
+    }
+  } else {
+    actions.push(
+      Action.logError(
+        "[flow2-volunteer-early-arrival] recipient resolved to non-resident — skipping recipient DM",
+        { resolution: result.recipientResolution.kind },
+      ),
+    );
+  }
+
+  // Volunteer ack DM.
+  actions.push(
+    Action.sendDirectMessage(
+      inbound.chatId,
+      buildVolunteerEarlyArrivalAckDmText({
+        requesterName: req.requesterName,
+        language,
+      }),
+      {
+        traceStage: "dm",
+        traceExtras: { kind: "flow2-volunteer-early-arrival-ack" },
+      },
+    ),
+  );
+
+  return actions;
+}
+
+function dmTextVolunteerEarlyArrivalRetryActions(
+  state: Extract<State, { kind: "dm-text-volunteer-early-arrival-retry" }>,
+): Action[] {
+  return [
+    Action.sendDirectMessage(
+      state.inbound.chatId,
+      buildDmTextPickupRetryText(state.language),
+      {
+        traceStage: "dm",
+        traceExtras: { kind: "flow2-volunteer-early-arrival-retry" },
+      },
+    ),
+  ];
+}
+
+function dmTextVlcActions(
+  state: Extract<State, { kind: "dm-text-vlc" }>,
+): Action[] {
+  // Welcome-wall fix (#136): a registered resident hitting medium/low
+  // classifier confidence gets the bounded 3-path VLC recovery DM, NOT a
+  // sendToAsh fallthrough. The agent has no output channel on this branch
+  // — the v2 welcome-wall regression class is now structurally impossible.
+  return [
+    Action.sendDirectMessage(
+      state.inbound.chatId,
+      buildVlc3PathDm(state.language),
+      {
+        traceStage: "dm",
+        traceExtras: { kind: "vlc-3-path" },
+      },
+    ),
+  ];
+}
+
+function buildDmAuth(
+  inbound: Extract<State, { kind: "dm-text-agent" }>["inbound"],
+): TelegramSessionAuth | null {
+  if (inbound.fromUserId === null) return null;
+  return {
+    principalId: String(inbound.fromUserId),
+    principalType: "user",
+    authenticator: "telegram",
+    attributes: inbound.fromLanguageCode
+      ? { languageCode: inbound.fromLanguageCode }
+      : {},
+  };
+}
+
+function dmTextAgentActions(
+  state: Extract<State, { kind: "dm-text-agent" }>,
+): Action[] {
+  const { inbound } = state;
+  return [
+    Action.setTriggerAttribute("telegram.text-dm"),
+    Action.emitTrace("agent", "start", { trigger: "telegram.text-dm" }),
+    Action.sendToAsh(
+      inbound.text,
+      buildDmAuth(inbound),
+      `tg:${inbound.chatId}`,
+      {
+        chatId: inbound.chatId,
+        isGroup: inbound.isGroup,
+        fromUserId: inbound.fromUserId,
+        fromLanguageCode: inbound.fromLanguageCode,
+      },
+    ),
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// dm-receive-cmd-* — Slice 5 (#136) `/receive` slash command.
+// ---------------------------------------------------------------------------
+
+function dmReceiveCmdCreatedActions(
+  state: Extract<State, { kind: "dm-receive-cmd-created" }>,
+): Action[] {
+  return [
+    Action.sendDirectMessage(
+      state.inbound.chatId,
+      buildFlow2AckDm(state.language),
+      {
+        traceStage: "dm",
+        traceExtras: { kind: "flow2-ack" },
+      },
+    ),
+  ];
+}
+
+function dmReceiveCmdAgentActions(
+  state: Extract<State, { kind: "dm-receive-cmd-agent" }>,
+): Action[] {
+  const { inbound } = state;
+  return [
+    Action.setTriggerAttribute("telegram.slash-receive"),
+    Action.emitTrace("agent", "start", { trigger: "telegram.slash-receive" }),
+    Action.sendToAsh(
+      inbound.text,
+      buildDmAuth(inbound),
+      `tg:${inbound.chatId}`,
+      {
+        chatId: inbound.chatId,
+        isGroup: inbound.isGroup,
+        fromUserId: inbound.fromUserId,
+        fromLanguageCode: inbound.fromLanguageCode,
+      },
+    ),
+  ];
 }
