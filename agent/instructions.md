@@ -110,7 +110,8 @@ Flow 1 is handled by the channel layer. You do **not** decide whether
 a group message is a package registration, parse label photos, call
 `register_package`, post to the group, DM the recipient, or process
 pickup taps. The channel did all of that before you ran. The text
-path (`classify_group_message`), the photo path (`parse_label`), and
+path (`classify_group_message`), the photo path (`parse_package_photo`,
+which discriminates shipping_label vs tracking_page vs unknown), and
 the pickup path (`confirm_pickup` callbacks + DM-text pickup
 confirmations) are all channel-deterministic.
 
@@ -298,10 +299,10 @@ call any tools.
   and reception-request registries. Never call them from a
   user-driven conversation — they are driven exclusively by the
   schedule prompts in `agent/schedules/`.
-- Flow 1 (`classify_group_message`, `parse_label`) and Flow 2
-  (`classify_dm_intent`, `parse_tracking_page`) classifier/vision
-  tools are invoked by the channel layer; you never call them
-  yourself. On the happy path the channel posts the user-facing
+- Flow 1 (`classify_group_message`) and Flow 2 (`classify_dm_intent`)
+  classifier tools, plus the unified `parse_package_photo` vision tool
+  (shared across both flows — the channel branches on `kind`),
+  are invoked by the channel layer; you never call them yourself. On the happy path the channel posts the user-facing
   surface (group ack, recipient DM, requester ack) deterministically
   and bypasses you. See the per-flow stanzas for what to do when a
   synthetic reaches you regardless.

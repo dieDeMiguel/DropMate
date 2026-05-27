@@ -9,6 +9,7 @@ import {
   buildDmTextPickupWaitingOnVolunteerText,
   buildFlow1ClarificationSynthetic,
   buildGroupAckText,
+  buildGroupLabelPrivacyNudge,
   buildHolderConfirmationDmText,
   buildHolderNotRegisteredNudge,
   buildPickupKeyboard,
@@ -326,6 +327,41 @@ describe("flow-1-dms", () => {
       ).toBe(
         "Dein Paket ist noch nicht da – ein:e Nachbar:in nimmt es für dich an. Ich melde mich, sobald es übergeben wird.",
       );
+    });
+  });
+
+  describe("buildGroupLabelPrivacyNudge (v2.1 #128)", () => {
+    it("renders the German nudge by default", () => {
+      const dm = buildGroupLabelPrivacyNudge("de");
+      expect(dm).toMatch(/Etikett/i);
+      expect(dm).toMatch(/DM/);
+      // PRD §9 + #128: the copy must NAME the privacy concern (the
+      // recipient's name / house number is what leaks to the group).
+      expect(dm).toMatch(/Name|Hausnummer/i);
+    });
+    it("renders the English nudge for 'en'", () => {
+      const dm = buildGroupLabelPrivacyNudge("en");
+      expect(dm).toMatch(/label/i);
+      expect(dm).toMatch(/DM/);
+      expect(dm).toMatch(/recipient/i);
+    });
+    it("renders the Spanish nudge for 'es'", () => {
+      const dm = buildGroupLabelPrivacyNudge("es");
+      expect(dm).toMatch(/etiqueta/i);
+      expect(dm).toMatch(/DM/);
+    });
+    it("renders the Turkish nudge for 'tr'", () => {
+      const dm = buildGroupLabelPrivacyNudge("tr");
+      expect(dm).toMatch(/etiket/i);
+      expect(dm).toMatch(/DM/);
+    });
+    it("falls back to German on unknown language code", () => {
+      const dm = buildGroupLabelPrivacyNudge("ja");
+      expect(dm).toMatch(/Etikett/i);
+    });
+    it("falls back to German on null input", () => {
+      const dm = buildGroupLabelPrivacyNudge(null);
+      expect(dm).toMatch(/Etikett/i);
     });
   });
 

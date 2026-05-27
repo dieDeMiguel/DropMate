@@ -73,8 +73,8 @@ interface BuiltDeps {
   waitUntil: ReturnType<typeof vi.fn>;
   drainSession: ReturnType<typeof vi.fn>;
   getFileUrl: ReturnType<typeof vi.fn>;
-  parseTrackingPage: ReturnType<typeof vi.fn>;
-  parseLabel: ReturnType<typeof vi.fn>;
+  parsePackagePhoto: ReturnType<typeof vi.fn>;
+  streetGroupChatId: ReturnType<typeof vi.fn>;
   answerCallback: ReturnType<typeof vi.fn>;
   stripKeyboard: ReturnType<typeof vi.fn>;
   recordTelegramObservation: ReturnType<typeof vi.fn>;
@@ -97,18 +97,17 @@ interface BuiltDeps {
   setTriggerAttribute: ReturnType<typeof vi.fn>;
 }
 
-type ParsedTrackingPage = NonNullable<
-  Awaited<ReturnType<ProcessUpdateDeps["parseTrackingPage"]>>
+type ParsedPackagePhoto = Awaited<
+  ReturnType<ProcessUpdateDeps["parsePackagePhoto"]>
 >;
-type ParsedLabel = Awaited<ReturnType<ProcessUpdateDeps["parseLabel"]>>;
 
 function buildDeps(overrides: {
   session?: Session;
   expectedSecret?: string | undefined;
   fileUrl?: string;
-  parsedTrackingPage?: ParsedTrackingPage | null;
-  parsedLabel?: ParsedLabel;
-  parsedLabelError?: Error;
+  parsedPackagePhoto?: ParsedPackagePhoto;
+  parsedPackagePhotoError?: Error;
+  streetGroupChatId?: number | null;
   isRegisteredResident?: boolean;
   classification?: DmIntentClassificationResult;
   groupClassification?: ClassifyGroupMessageResult;
@@ -143,27 +142,11 @@ function buildDeps(overrides: {
       overrides.fileUrl ??
         "https://api.telegram.org/file/bot111:AAA/photos/file_42.jpg",
     );
-  const defaultParsedTrackingPage: ParsedTrackingPage = {
-    carrier: "DHL",
-    trackingNumber: "00340434161094021899",
-    expectedWindowStartAt: "2026-05-19T13:00:00Z",
-    expectedWindowEndAt: "2026-05-19T16:00:00Z",
-    absenceSignal: true,
-    confidence: "high",
-    reason: "all fields legible",
-  };
-  const parseTrackingPage = vi
-    .fn()
-    .mockResolvedValue(
-      "parsedTrackingPage" in overrides
-        ? overrides.parsedTrackingPage
-        : defaultParsedTrackingPage,
-    );
-  // v2.1 #107 Slice 2: default parse_label verdict is the Flow 1
-  // happy path — a high-confidence parse with a registered Resident
-  // recipient (matches the defaultRegisterPackageResult below).
-  // Tests exercising the disambiguation cases override this.
-  const defaultParsedLabel: ParsedLabel = {
+  // v2.1 #128: default unified-vision verdict is shipping_label so the
+  // Flow 1 happy-path tests get a useful starting point. Tests that
+  // exercise tracking_page or unknown branches override this.
+  const defaultParsedPackagePhoto: ParsedPackagePhoto = {
+    kind: "shipping_label",
     carrier: "DHL",
     trackingNumber: "00340434161094021899",
     recipientName: "Marlene Hartmann",
@@ -171,11 +154,20 @@ function buildDeps(overrides: {
     confidence: "high",
     reason: "all fields legible",
   };
-  const parseLabel = overrides.parsedLabelError
-    ? vi.fn().mockRejectedValue(overrides.parsedLabelError)
+  const parsePackagePhoto = overrides.parsedPackagePhotoError
+    ? vi.fn().mockRejectedValue(overrides.parsedPackagePhotoError)
     : vi
         .fn()
-        .mockResolvedValue(overrides.parsedLabel ?? defaultParsedLabel);
+        .mockResolvedValue(
+          overrides.parsedPackagePhoto ?? defaultParsedPackagePhoto,
+        );
+  const streetGroupChatId = vi
+    .fn()
+    .mockReturnValue(
+      "streetGroupChatId" in overrides
+        ? overrides.streetGroupChatId
+        : -100123,
+    );
   const answerCallback = vi.fn().mockResolvedValue(undefined);
   const stripKeyboard = vi.fn().mockResolvedValue(undefined);
   const recordTelegramObservation = vi.fn().mockResolvedValue(undefined);
@@ -458,8 +450,8 @@ function buildDeps(overrides: {
     waitUntil,
     drainSession,
     getFileUrl,
-    parseTrackingPage,
-    parseLabel,
+    parsePackagePhoto,
+    streetGroupChatId,
     answerCallback,
     stripKeyboard,
     recordTelegramObservation,
@@ -487,8 +479,8 @@ function buildDeps(overrides: {
       waitUntil,
       drainSession,
       getFileUrl,
-      parseTrackingPage,
-      parseLabel,
+      parsePackagePhoto,
+      streetGroupChatId,
       answerCallback,
       stripKeyboard,
       recordTelegramObservation,
@@ -641,30 +633,15 @@ describe("processInboundTelegramUpdate", () => {
     });
   });
 
-  describe("group photo → channel-deterministic Flow 1 (v2.1 #107 Slice 2 of #106)", () => {
-    // v2.1 #107 / Slice 2 of #106: group photos no longer reach the
-    // agent on the happy path. The channel resolves the file URL,
-    // calls parse_label itself, and on a high-confidence parse with a
-    // registered-resident recipient posts the deterministic group ack
-    // + recipient DM via lib/telegram-channel/flow-1-dms.ts. Closes
-    // the agent text-leak surface the live trace 2026-05-22 produced
-    // (#105 — 20+ free-form German messages on a single inbound).
-
-    function holderResident(): Resident {
-      return {
-        id: "100",
-        name: "Diego Demiguel",
-        street: "Lutterothstrasse",
-        houseNumber: "69",
-        platformId: "100",
-        platform: "telegram",
-        language: "de",
-        availabilityPatterns: [],
-        registeredAt: Date.now(),
-        source: "explicit",
-        confirmed: true,
-      };
-    }
+  describe("group photo route (v2.1 #128 — privacy nudge only, never registers)", () => {
+    // v2.1 #128: group photos no longer trigger Flow 1 registration.
+    // A shipping-label photo posted to the group is a privacy leak by
+    // design (label PII lands in public chat); the channel's only job
+    // on `kind: "shipping_label"` is to DM the sender privately so they
+    // know to use DM next time. On every other kind (tracking_page,
+    // unknown) and on every failure mode (vision throw, getFileUrl
+    // throw), the route stays silent. The agent NEVER runs on a group
+    // photo turn.
 
     function groupPhotoUpdate(opts: {
       caption?: string;
@@ -697,26 +674,34 @@ describe("processInboundTelegramUpdate", () => {
       };
     }
 
-    it("on high-confidence parse + registered-resident recipient: calls parseLabel + registerPackage + posts announce-only group ack + DMs recipient with [Abgeholt] keyboard (v2.1 #114: no group keyboard), no agent invocation", async () => {
+    it("on kind='shipping_label': DMs the sender the privacy nudge — no register, no group post, no agent", async () => {
       const fileUrl =
         "https://api.telegram.org/file/bot111:AAA/photos/file_99.jpg";
       const {
         deps,
         sendToAsh,
         getFileUrl,
-        parseLabel,
-        parseTrackingPage,
+        parsePackagePhoto,
         registerPackage,
         sendDirectMessage,
       } = buildDeps({
         fileUrl,
-        registeredResident: holderResident(),
+        parsedPackagePhoto: {
+          kind: "shipping_label",
+          carrier: "DHL",
+          recipientName: "Marlene Hartmann",
+          recipientHouseNumber: "88",
+          confidence: "high",
+          reason: "all legible",
+        },
       });
 
       const res = await processInboundTelegramUpdate(
         makeRequest(
           groupPhotoUpdate({
-            caption: "Paket für Marlene",
+            fromUserId: 555,
+            languageCode: "de",
+            caption: "Paket angekommen",
             photoFileIds: ["small", "large"],
           }),
         ),
@@ -724,209 +709,61 @@ describe("processInboundTelegramUpdate", () => {
       );
 
       expect(res.status).toBe(204);
-
-      // The orchestrator picks the largest photo size (last entry).
+      // Orchestrator picks the largest photo size (last entry).
       expect(getFileUrl).toHaveBeenCalledWith("large");
-
-      // parseLabel is invoked channel-side now (not the agent).
-      // parseTrackingPage is the DM-photo branch; never fires here.
-      expect(parseLabel).toHaveBeenCalledTimes(1);
-      expect(parseLabel).toHaveBeenCalledWith({
-        imageUrl: fileUrl,
-        caption: "Paket für Marlene",
-      });
-      expect(parseTrackingPage).not.toHaveBeenCalled();
-
-      expect(registerPackage).toHaveBeenCalledTimes(1);
-      // Two sendDirectMessage calls: one to the group (announce-only),
-      // one to the recipient (carries the [Abgeholt] keyboard).
-      expect(sendDirectMessage).toHaveBeenCalledTimes(2);
-      // Agent is NEVER invoked on this path.
+      expect(parsePackagePhoto).toHaveBeenCalledTimes(1);
+      // NO Package row written.
+      expect(registerPackage).not.toHaveBeenCalled();
+      // Exactly ONE DM: the privacy nudge to the sender (NOT to the
+      // group, NOT to a recipient).
+      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+      const [nudgeChatId, nudgeText] = sendDirectMessage.mock.calls[0]!;
+      expect(nudgeChatId).toBe(555);
+      // German nudge content: names the privacy concern + asks for DM.
+      expect(nudgeText).toMatch(/Etikett/i);
+      expect(nudgeText).toMatch(/DM/);
+      // Agent is NEVER invoked.
       expect(sendToAsh).not.toHaveBeenCalled();
-
-      // Group ack: posted to the inbound chat id (the group). v2.1
-      // #114 regression pin: NO inline keyboard on the group ack.
-      const [groupChatId, groupText, groupEntities, groupKeyboard] =
-        sendDirectMessage.mock.calls[0]!;
-      expect(groupChatId).toBe(-100);
-      expect(groupText).toContain("📦 Paket von Diego de Miguel (69)");
-      expect(groupText).toContain("an Marlene Hartmann (88)");
-      expect(groupEntities).toBeUndefined();
-      expect(groupKeyboard).toBeUndefined();
-
-      // Recipient DM: sent to the recipient's chat id (numeric of the
-      // platformId), carries the pickup keyboard (the only surface
-      // that does post-#114).
-      const [recipientChatId, recipientText, _recipientEntities, recipientKeyboard] =
-        sendDirectMessage.mock.calls[1]!;
-      expect(recipientChatId).toBe(200);
-      expect(recipientText).toContain("Hi Marlene Hartmann!");
-      expect(recipientText).toContain("Diego de Miguel hat ein Paket");
-      expect(recipientText).toContain("[Abgeholt]");
-      expect(recipientKeyboard).toBeDefined();
-      expect(
-        (recipientKeyboard as { inline_keyboard: ReadonlyArray<unknown> })
-          .inline_keyboard,
-      ).toHaveLength(1);
     });
 
-    it("v2.1 #116 — on Flow 2 fulfillment linkage (receptionRequestFulfilled !== null): suppresses the group ack, DMs the holder a private confirmation, still DMs the recipient with the [Abgeholt] keyboard", async () => {
-      const {
-        deps,
-        sendToAsh,
-        registerPackage,
-        sendDirectMessage,
-      } = buildDeps({
-        registeredResident: holderResident(),
-        registerPackageResult: {
-          package: {
-            id: "pkg_linked",
-            streetId: "Methfesselstraße",
-            recipientResidentId: "200",
-            recipientName: "Patricia Höfer",
-            recipientHouseNumber: "90",
-            holderResidentId: "100",
-            carrier: "DHL",
-            status: "held",
-            receivedAt: Date.now(),
-            pickedUpAt: null,
-            reminded: false,
-            receptionRequestId: "req_matched",
-          } satisfies Package,
-          holder: {
-            id: "100",
-            platformId: "100",
-            name: "Diego de Miguel",
-            houseNumber: "69",
-            floor: null,
-            buzzerName: null,
-            language: "de",
-          },
-          recipientResolution: {
-            kind: "resident",
-            resident: {
-              id: "200",
-              name: "Patricia Höfer",
-              houseNumber: "90",
-              language: "de",
-              floor: null,
-              buzzerName: null,
-            },
-          },
-          receptionRequestFulfilled: {
-            requestId: "req_matched",
-            requesterResidentId: "200",
-            previousStatus: "matched",
-          },
-        },
-      });
-
-      const res = await processInboundTelegramUpdate(
-        makeRequest(groupPhotoUpdate({ caption: "Paket für Patricia" })),
-        deps,
-      );
-
-      expect(res.status).toBe(204);
-      expect(registerPackage).toHaveBeenCalledTimes(1);
-      // Two DMs: one private holder confirmation, one recipient DM.
-      // NO group ack on this branch.
-      expect(sendDirectMessage).toHaveBeenCalledTimes(2);
-      expect(sendToAsh).not.toHaveBeenCalled();
-
-      // First DM is the holder confirmation — sent to holder.platformId
-      // (Number(100) === 100), NOT to the group chat id (-100).
-      const [holderChatId, holderText, holderEntities, holderKeyboard] =
-        sendDirectMessage.mock.calls[0]!;
-      expect(holderChatId).toBe(100);
-      expect(holderChatId).not.toBe(-100);
-      expect(holderText).toContain("Paket für Patricia Höfer erkannt");
-      expect(holderText).toContain("Patricia Höfer wurde benachrichtigt");
-      expect(holderEntities).toBeUndefined();
-      expect(holderKeyboard).toBeUndefined();
-
-      // Regression pin: the group chat (chatId -100) is NEVER addressed
-      // by sendDirectMessage on the suppression branch.
-      for (const call of sendDirectMessage.mock.calls) {
-        expect(call[0]).not.toBe(-100);
-      }
-
-      // Second DM is the recipient DM — same shape as the
-      // non-suppressed path, with the [Abgeholt] keyboard.
-      const [recipientChatId, recipientText, , recipientKeyboard] =
-        sendDirectMessage.mock.calls[1]!;
-      expect(recipientChatId).toBe(200);
-      expect(recipientText).toContain("Hi Patricia Höfer!");
-      expect(recipientText).toContain("[Abgeholt]");
-      expect(recipientKeyboard).toBeDefined();
-    });
-
-    it("v2.1 #116 — also suppresses when previousStatus='open' (no volunteer accepted yet, but holder showed up anyway)", async () => {
-      const {
-        deps,
-        registerPackage,
-        sendDirectMessage,
-      } = buildDeps({
-        registeredResident: holderResident(),
-        registerPackageResult: {
-          package: {
-            id: "pkg_linked",
-            streetId: "Methfesselstraße",
-            recipientResidentId: "200",
-            recipientName: "Patricia",
-            recipientHouseNumber: "90",
-            holderResidentId: "100",
-            carrier: "DHL",
-            status: "held",
-            receivedAt: Date.now(),
-            pickedUpAt: null,
-            reminded: false,
-            receptionRequestId: "req_open",
-          } satisfies Package,
-          holder: {
-            id: "100",
-            platformId: "100",
-            name: "Diego de Miguel",
-            houseNumber: "69",
-            floor: null,
-            buzzerName: null,
-            language: "de",
-          },
-          recipientResolution: {
-            kind: "resident",
-            resident: {
-              id: "200",
-              name: "Patricia",
-              houseNumber: "90",
-              language: "de",
-              floor: null,
-              buzzerName: null,
-            },
-          },
-          receptionRequestFulfilled: {
-            requestId: "req_open",
-            requesterResidentId: "200",
-            previousStatus: "open",
-          },
+    it("on kind='shipping_label': privacy nudge uses the sender's stored language code (en)", async () => {
+      const { deps, sendDirectMessage } = buildDeps({
+        parsedPackagePhoto: {
+          kind: "shipping_label",
+          carrier: "DHL",
+          recipientName: "Anna",
+          recipientHouseNumber: "5",
+          confidence: "high",
+          reason: "ok",
         },
       });
 
       await processInboundTelegramUpdate(
-        makeRequest(groupPhotoUpdate({ caption: "Paket für Patricia" })),
+        makeRequest(groupPhotoUpdate({ fromUserId: 777, languageCode: "en" })),
         deps,
       );
 
-      expect(registerPackage).toHaveBeenCalledTimes(1);
-      expect(sendDirectMessage).toHaveBeenCalledTimes(2);
-      // No group chat call.
-      for (const call of sendDirectMessage.mock.calls) {
-        expect(call[0]).not.toBe(-100);
-      }
+      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+      const [, text] = sendDirectMessage.mock.calls[0]!;
+      expect(text).toMatch(/label/i);
+      expect(text).toMatch(/DM/);
     });
 
-    it("forwards the caption (or undefined when absent) to parseLabel", async () => {
-      // No caption → parseLabel called with `caption: undefined`.
-      const { deps, parseLabel } = buildDeps({
-        registeredResident: holderResident(),
+    it("on kind='tracking_page': silent — no DM, no register, no group post", async () => {
+      const {
+        deps,
+        sendToAsh,
+        parsePackagePhoto,
+        registerPackage,
+        sendDirectMessage,
+        createReceptionRequest,
+      } = buildDeps({
+        parsedPackagePhoto: {
+          kind: "tracking_page",
+          carrier: "DHL",
+          confidence: "high",
+          reason: "tracking page screenshot in group",
+        },
       });
 
       await processInboundTelegramUpdate(
@@ -934,306 +771,74 @@ describe("processInboundTelegramUpdate", () => {
         deps,
       );
 
-      expect(parseLabel).toHaveBeenCalledTimes(1);
-      expect(parseLabel.mock.calls[0]![0]).toMatchObject({
-        caption: undefined,
-      });
-    });
-
-    it("hands the agent a [FLOW_1 CLARIFICATION reason=low-conf] synthetic when parseLabel returns low confidence (v2.1 #109 Slice 3 of #105)", async () => {
-      const { deps, sendToAsh, registerPackage, sendDirectMessage } = buildDeps({
-        registeredResident: holderResident(),
-        parsedLabel: {
-          carrier: "DHL",
-          recipientName: "Foo",
-          recipientHouseNumber: "12",
-          confidence: "low",
-          reason: "blurry label",
-        },
-      });
-
-      const res = await processInboundTelegramUpdate(
-        makeRequest(groupPhotoUpdate({ caption: "kann das jemand lesen?" })),
-        deps,
-      );
-
-      expect(res.status).toBe(204);
-      // No Package write on the fallthrough path — the agent asks the
-      // holder to clarify; the holder's restated reply gets a fresh
-      // classification run.
+      expect(parsePackagePhoto).toHaveBeenCalledTimes(1);
       expect(registerPackage).not.toHaveBeenCalled();
-      // No group post / DM on fallthrough either.
+      expect(createReceptionRequest).not.toHaveBeenCalled();
       expect(sendDirectMessage).not.toHaveBeenCalled();
-      // The agent IS invoked with the clarification synthetic.
-      expect(sendToAsh).toHaveBeenCalledTimes(1);
-      const [syntheticMessage] = sendToAsh.mock.calls[0]!;
-      expect(syntheticMessage).toContain("[FLOW_1 CLARIFICATION");
-      expect(syntheticMessage).toContain("reason=low-conf");
-      expect(syntheticMessage).toContain("Do NOT call any tools");
+      expect(sendToAsh).not.toHaveBeenCalled();
     });
 
-    it("hands the agent reason=ambiguous-multi when the caption clearly names 2+ recipients at low confidence", async () => {
-      const { deps, sendToAsh, registerPackage } = buildDeps({
-        registeredResident: holderResident(),
-        parsedLabel: {
-          carrier: "DHL",
-          recipientName: "Foo",
-          confidence: "low",
-          reason: "label only shows one name; caption suggests two",
-        },
-      });
-
-      await processInboundTelegramUpdate(
-        makeRequest(groupPhotoUpdate({ caption: "Paket für Anna und Beate" })),
-        deps,
-      );
-
-      expect(registerPackage).not.toHaveBeenCalled();
-      expect(sendToAsh).toHaveBeenCalledTimes(1);
-      const [syntheticMessage] = sendToAsh.mock.calls[0]!;
-      expect(syntheticMessage).toContain("reason=ambiguous-multi");
-    });
-
-    it("on medium-conf + recipient resolves to a Resident: registers deterministically (treats medium as high when the second signal converges, v2.1 #109)", async () => {
+    it("on kind='unknown': silent — no DM, no register, no group post", async () => {
       const {
         deps,
         sendToAsh,
-        parseLabel,
-        resolveRecipient,
         registerPackage,
         sendDirectMessage,
       } = buildDeps({
-        registeredResident: holderResident(),
-        parsedLabel: {
-          carrier: "Hermes",
-          recipientName: "Foo",
-          confidence: "medium",
-          reason: "partial label, name legible",
-        },
-        // resolveRecipient finds the recipient as a registered Resident
-        resolveRecipientResult: {
-          kind: "resident",
-          resident: {
-            id: "200",
-            name: "Foo",
-            houseNumber: "88",
-            language: "de",
-            floor: null,
-            buzzerName: null,
-          },
+        parsedPackagePhoto: {
+          kind: "unknown",
+          confidence: "low",
+          reason: "meme photo unrelated to a package",
         },
       });
 
       await processInboundTelegramUpdate(
-        makeRequest(groupPhotoUpdate({ caption: "Paket für Foo" })),
-        deps,
-      );
-
-      // Resolve first, then register.
-      expect(parseLabel).toHaveBeenCalledTimes(1);
-      expect(resolveRecipient).toHaveBeenCalledTimes(1);
-      expect(registerPackage).toHaveBeenCalledTimes(1);
-      // Group ack + recipient DM, no agent invocation.
-      expect(sendDirectMessage).toHaveBeenCalledTimes(2);
-      expect(sendToAsh).not.toHaveBeenCalled();
-    });
-
-    it("on medium-conf + recipient does NOT resolve to a Resident: falls through to clarification synthetic, NO Package write (v2.1 #109)", async () => {
-      const {
-        deps,
-        sendToAsh,
-        resolveRecipient,
-        registerPackage,
-        sendDirectMessage,
-      } = buildDeps({
-        registeredResident: holderResident(),
-        parsedLabel: {
-          carrier: "Hermes",
-          recipientName: "Stranger",
-          confidence: "medium",
-          reason: "partial label",
-        },
-        // Default resolveRecipient returns unknown — explicit for clarity.
-        resolveRecipientResult: { kind: "unknown" },
-      });
-
-      await processInboundTelegramUpdate(
-        makeRequest(groupPhotoUpdate({ caption: "Paket für Stranger" })),
-        deps,
-      );
-
-      expect(resolveRecipient).toHaveBeenCalledTimes(1);
-      // No Package write — clarification first.
-      expect(registerPackage).not.toHaveBeenCalled();
-      // No group / DM post.
-      expect(sendDirectMessage).not.toHaveBeenCalled();
-      // Clarification synthetic to the agent.
-      expect(sendToAsh).toHaveBeenCalledTimes(1);
-      const [synthetic] = sendToAsh.mock.calls[0]!;
-      expect(synthetic).toContain("reason=low-conf");
-    });
-
-    it("hands the agent reason=missing-recipient when parseLabel omits recipientName even at high confidence (v2.1 #109)", async () => {
-      const { deps, sendToAsh, registerPackage, sendDirectMessage } = buildDeps({
-        registeredResident: holderResident(),
-        parsedLabel: {
-          carrier: "DHL",
-          // recipientName intentionally omitted
-          confidence: "high",
-          reason: "carrier legible, name not",
-        },
-      });
-
-      await processInboundTelegramUpdate(
-        makeRequest(groupPhotoUpdate({ caption: "DHL label" })),
+        makeRequest(groupPhotoUpdate({})),
         deps,
       );
 
       expect(registerPackage).not.toHaveBeenCalled();
       expect(sendDirectMessage).not.toHaveBeenCalled();
-      expect(sendToAsh).toHaveBeenCalledTimes(1);
-      const [synthetic] = sendToAsh.mock.calls[0]!;
-      expect(synthetic).toContain("reason=missing-recipient");
+      expect(sendToAsh).not.toHaveBeenCalled();
     });
 
-    it("hands the agent reason=parse-failed when parseLabel throws (vision outage, both primary + fallback errored) (v2.1 #109)", async () => {
-      const { deps, sendToAsh, registerPackage, sendDirectMessage } = buildDeps({
-        registeredResident: holderResident(),
-        parsedLabelError: new Error("vision outage"),
-      });
+    it("on getFileUrl throwing: silent — vision tool never called, no DM, no agent", async () => {
+      const { deps, sendToAsh, parsePackagePhoto, sendDirectMessage, getFileUrl } = buildDeps();
+      getFileUrl.mockRejectedValueOnce(new Error("CDN 500"));
 
       await processInboundTelegramUpdate(
-        makeRequest(groupPhotoUpdate({ caption: "Paket für jemand" })),
+        makeRequest(groupPhotoUpdate({})),
         deps,
       );
 
-      expect(registerPackage).not.toHaveBeenCalled();
+      expect(parsePackagePhoto).not.toHaveBeenCalled();
       expect(sendDirectMessage).not.toHaveBeenCalled();
-      expect(sendToAsh).toHaveBeenCalledTimes(1);
-      const [synthetic] = sendToAsh.mock.calls[0]!;
-      expect(synthetic).toContain("reason=parse-failed");
-    });
-
-    it("hands the agent reason=parse-failed when getFileUrl throws (cannot resolve the photo to a URL) (v2.1 #109)", async () => {
-      const {
-        deps,
-        sendToAsh,
-        getFileUrl,
-        parseLabel,
-        registerPackage,
-      } = buildDeps({
-        registeredResident: holderResident(),
-      });
-      getFileUrl.mockRejectedValueOnce(new Error("Bot API 404"));
-
-      await processInboundTelegramUpdate(
-        makeRequest(groupPhotoUpdate({ caption: "kann das jemand lesen?" })),
-        deps,
-      );
-
-      // parse_label never runs without a URL.
-      expect(parseLabel).not.toHaveBeenCalled();
-      expect(registerPackage).not.toHaveBeenCalled();
-      expect(sendToAsh).toHaveBeenCalledTimes(1);
-      const [synthetic] = sendToAsh.mock.calls[0]!;
-      expect(synthetic).toContain("reason=parse-failed");
-    });
-
-    it("DMs the unregistered holder a /register nudge when registerPackage throws REGISTER_PACKAGE_HOLDER_NOT_REGISTERED — silent in the group", async () => {
-      const error = Object.assign(new Error("not registered"), {
-        code: "REGISTER_PACKAGE_HOLDER_NOT_REGISTERED",
-      });
-      const { deps, sendToAsh, registerPackage, sendDirectMessage } = buildDeps({
-        registeredResident: null, // holder not registered
-        registerPackageError: error,
-      });
-
-      await processInboundTelegramUpdate(
-        makeRequest(
-          groupPhotoUpdate({
-            caption: "Paket für Marlene",
-            fromUserId: 999,
-            languageCode: "de",
-          }),
-        ),
-        deps,
-      );
-
-      expect(registerPackage).toHaveBeenCalledTimes(1);
-      // ONE DM goes out — the localised /register nudge to the holder.
-      // Group stays silent (no group ack on this branch).
-      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
-      const [nudgeChatId, nudgeText] = sendDirectMessage.mock.calls[0]!;
-      expect(nudgeChatId).toBe(999);
-      expect(nudgeText).toContain("/register");
       expect(sendToAsh).not.toHaveBeenCalled();
     });
 
-    it("on high-conf + recipient resolution 'unknown': posts the deterministic group question (📦 Paket für X – kennt jemand X?), no agent invocation (v2.1 #109)", async () => {
-      const { deps, sendToAsh, registerPackage, sendDirectMessage } = buildDeps({
-        registeredResident: holderResident(),
-        parsedLabel: {
-          carrier: "DHL",
-          recipientName: "Stranger",
-          recipientHouseNumber: "999",
-          confidence: "high",
-          reason: "ok",
-        },
-        registerPackageResult: {
-          package: {
-            id: "pkg_unknown",
-            streetId: "Lutterothstrasse",
-            recipientResidentId: null,
-            recipientName: "Stranger",
-            recipientHouseNumber: "999",
-            holderResidentId: "100",
-            carrier: "DHL",
-            status: "held",
-            receivedAt: Date.now(),
-            pickedUpAt: null,
-            reminded: false,
-          } satisfies Package,
-          holder: {
-            id: "100",
-            platformId: "100",
-            name: "Diego Demiguel",
-            houseNumber: "69",
-            floor: null,
-            buzzerName: null,
-            language: "de",
-          },
-          recipientResolution: { kind: "unknown" },
-          receptionRequestFulfilled: null,
-        },
+    it("on parsePackagePhoto throwing: silent — no DM, no agent", async () => {
+      const { deps, sendToAsh, sendDirectMessage } = buildDeps({
+        parsedPackagePhotoError: new Error("gateway down"),
       });
 
       await processInboundTelegramUpdate(
-        makeRequest(
-          groupPhotoUpdate({ caption: "Paket für Stranger (Hs.999)" }),
-        ),
+        makeRequest(groupPhotoUpdate({})),
         deps,
       );
 
-      // Package is still registered (the cron sweep ages it out if
-      // nobody claims), AND the group question is posted.
-      expect(registerPackage).toHaveBeenCalledTimes(1);
-      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
-      const [chatId, text] = sendDirectMessage.mock.calls[0]!;
-      expect(chatId).toBe(-100);
-      expect(text).toBe("📦 Paket für Stranger – kennt jemand Stranger?");
+      expect(sendDirectMessage).not.toHaveBeenCalled();
       expect(sendToAsh).not.toHaveBeenCalled();
     });
 
-    it("anonymous group photo (no fromUserId) stays silent — parseLabel is not even called", async () => {
-      const { deps, sendToAsh, parseLabel, sendDirectMessage } = buildDeps();
+    it("anonymous group photo (no fromUserId) stays silent — vision tool never called", async () => {
+      const { deps, sendToAsh, parsePackagePhoto, sendDirectMessage } = buildDeps();
 
       await processInboundTelegramUpdate(
         makeRequest({
-          update_id: 600,
+          update_id: 999,
           message: {
             message_id: 1,
             date: 1,
-            caption: "Paket für jemanden",
             chat: { id: -100, type: "supergroup" },
             // No `from` — anonymous group post.
             photo: [{ file_id: "f", file_size: 100, width: 90, height: 90 }],
@@ -1242,13 +847,59 @@ describe("processInboundTelegramUpdate", () => {
         deps,
       );
 
-      expect(parseLabel).not.toHaveBeenCalled();
+      expect(parsePackagePhoto).not.toHaveBeenCalled();
       expect(sendDirectMessage).not.toHaveBeenCalled();
+      expect(sendToAsh).not.toHaveBeenCalled();
+    });
+
+    it("forwards the caption (or undefined when absent) to parsePackagePhoto", async () => {
+      const { deps, parsePackagePhoto } = buildDeps({
+        parsedPackagePhoto: {
+          kind: "unknown",
+          confidence: "low",
+          reason: "ok",
+        },
+      });
+
+      await processInboundTelegramUpdate(
+        makeRequest(groupPhotoUpdate({ caption: undefined })),
+        deps,
+      );
+
+      expect(parsePackagePhoto).toHaveBeenCalledTimes(1);
+      expect(parsePackagePhoto.mock.calls[0]![0]).toMatchObject({
+        caption: undefined,
+      });
+    });
+
+    it("logs but does not crash when the privacy nudge DM send fails (e.g. sender hasn't opened a chat with the bot)", async () => {
+      const { deps, sendToAsh, sendDirectMessage } = buildDeps({
+        parsedPackagePhoto: {
+          kind: "shipping_label",
+          carrier: "DHL",
+          recipientName: "Anna",
+          recipientHouseNumber: "5",
+          confidence: "high",
+          reason: "ok",
+        },
+      });
+      sendDirectMessage.mockRejectedValueOnce(
+        new Error("Forbidden: bot can't initiate conversation with a user"),
+      );
+
+      const res = await processInboundTelegramUpdate(
+        makeRequest(groupPhotoUpdate({})),
+        deps,
+      );
+
+      // Route still returns 204 — the nudge failure is logged, not
+      // escalated to the agent.
+      expect(res.status).toBe(204);
       expect(sendToAsh).not.toHaveBeenCalled();
     });
   });
 
-  describe("DM photo → parseTrackingPage → channel-side Flow 2 routing (v2.1 Slice 3, #88)", () => {
+  describe("DM photo route (v2.1 #128 — branches on parse_package_photo kind)", () => {
     function dmRegisteredResident(language: string | undefined = "de"): Resident {
       return {
         id: "patricia",
@@ -1300,456 +951,668 @@ describe("processInboundTelegramUpdate", () => {
       };
     }
 
-    // v2.1 #100: the DM photo path is now fully channel-deterministic.
-    // On every outcome (success ack OR vision-low-confidence recovery)
-    // the channel sends ONE localised DM via sendDirectMessage and does
-    // NOT invoke the agent. The agent text-leak surface that produced
-    // the welcome wall + duplicate registration confirmation + tripled
-    // ack on the live trace is closed structurally.
-
-    it("on high-confidence + absenceSignal:true + registered caller, writes a ReceptionRequest and sends the German ack DM (no agent invocation)", async () => {
-      const fileUrl =
-        "https://api.telegram.org/file/bot111:AAA/photos/file_77.jpg";
-      const resident = dmRegisteredResident("de");
-      const {
-        deps,
-        sendToAsh,
-        sendDirectMessage,
-        waitUntil,
-        getFileUrl,
-        parseTrackingPage,
-        createReceptionRequest,
-        getRegisteredResident,
-      } = buildDeps({
-        fileUrl,
-        parsedTrackingPage: {
-          carrier: "DHL",
-          trackingNumber: "00340434161094021899",
-          expectedWindowStartAt: "2026-05-19T13:00:00Z",
-          expectedWindowEndAt: "2026-05-19T16:00:00Z",
-          absenceSignal: true,
-          confidence: "high",
-          reason: "all fields legible",
-        },
-        registeredResident: resident,
-      });
-
-      const res = await processInboundTelegramUpdate(
-        makeRequest(
-          dmPhotoUpdate({
-            caption: "kann jemand annehmen? bin nicht da",
-            fromUserId: 99,
-            languageCode: "de",
-            photoFileIds: ["small", "large"],
-          }),
-        ),
-        deps,
-      );
-
-      expect(res.status).toBe(204);
-      expect(getFileUrl).toHaveBeenCalledWith("large");
-
-      expect(parseTrackingPage).toHaveBeenCalledTimes(1);
-      const parseArgs = parseTrackingPage.mock.calls[0]![0];
-      expect(parseArgs.imageUrl).toBe(fileUrl);
-      expect(parseArgs.caption).toBe("kann jemand annehmen? bin nicht da");
-
-      // Channel writes the ReceptionRequest deterministically.
-      expect(getRegisteredResident).toHaveBeenCalledWith(99);
-      expect(createReceptionRequest).toHaveBeenCalledTimes(1);
-      const [caller, input] = createReceptionRequest.mock.calls[0]!;
-      expect(caller).toBe(resident);
-      expect(input.carrier).toBe("DHL");
-      expect(input.expectedWindowStartAt).toBe(
-        Date.parse("2026-05-19T13:00:00Z"),
-      );
-      expect(input.expectedWindowEndAt).toBe(
-        Date.parse("2026-05-19T16:00:00Z"),
-      );
-
-      // #100: agent NEVER runs on the DM photo success path. Channel
-      // sent the deterministic ack DM in the requester's language.
-      expect(sendToAsh).not.toHaveBeenCalled();
-      expect(waitUntil).not.toHaveBeenCalled();
-      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
-      const [chatId, text] = sendDirectMessage.mock.calls[0]!;
-      expect(chatId).toBe(42);
-      expect(text).toBe(
-        "Habe in der Gruppe gefragt — ich melde mich, sobald jemand zusagt.",
-      );
-    });
-
-    it("treats absenceSignal:undefined as implicit absence (uploading a tracking page in DM is itself the absence signal)", async () => {
-      const resident = dmRegisteredResident("de");
-      const { deps, sendToAsh, sendDirectMessage, createReceptionRequest } =
-        buildDeps({
-          parsedTrackingPage: {
-            carrier: "Hermes",
+    describe("kind='shipping_label' → Flow 1 register (privacy-correct entry surface)", () => {
+      it("high-conf + resident recipient: registers + posts group ack to streetGroupChatId + DMs recipient with [Abgeholt] keyboard, no agent", async () => {
+        const fileUrl =
+          "https://api.telegram.org/file/bot111:AAA/photos/file_77.jpg";
+        const holder = dmRegisteredResident();
+        const {
+          deps,
+          sendToAsh,
+          getFileUrl,
+          parsePackagePhoto,
+          registerPackage,
+          streetGroupChatId,
+          sendDirectMessage,
+        } = buildDeps({
+          fileUrl,
+          registeredResident: holder,
+          parsedPackagePhoto: {
+            kind: "shipping_label",
+            carrier: "DHL",
+            recipientName: "Marlene Hartmann",
+            recipientHouseNumber: "88",
+            trackingNumber: "00340434161094021899",
             confidence: "high",
-            reason: "clean tracking page, empty caption",
+            reason: "all legible",
           },
-          registeredResident: resident,
+          streetGroupChatId: -100123,
         });
 
-      await processInboundTelegramUpdate(
-        makeRequest(dmPhotoUpdate({ fromUserId: 99, languageCode: "de" })),
-        deps,
-      );
+        const res = await processInboundTelegramUpdate(
+          makeRequest(
+            dmPhotoUpdate({
+              fromUserId: 42,
+              caption: "Paket für Marlene",
+              photoFileIds: ["small", "large"],
+            }),
+          ),
+          deps,
+        );
 
-      expect(createReceptionRequest).toHaveBeenCalledTimes(1);
-      const [, input] = createReceptionRequest.mock.calls[0]!;
-      expect(input.carrier).toBe("Hermes");
-      expect(input.expectedWindowStartAt).toBeUndefined();
-      expect(input.expectedWindowEndAt).toBeUndefined();
+        expect(res.status).toBe(204);
+        // Largest photo size picked.
+        expect(getFileUrl).toHaveBeenCalledWith("large");
+        // Single unified vision call.
+        expect(parsePackagePhoto).toHaveBeenCalledTimes(1);
+        expect(parsePackagePhoto).toHaveBeenCalledWith({
+          imageUrl: fileUrl,
+          caption: "Paket für Marlene",
+        });
+        expect(registerPackage).toHaveBeenCalledTimes(1);
+        expect(registerPackage).toHaveBeenCalledWith(holder, {
+          recipientName: "Marlene Hartmann",
+          recipientHouseNumber: "88",
+          carrier: "DHL",
+          trackingNumber: "00340434161094021899",
+        });
+        // streetGroupChatId resolved for the holder's street.
+        expect(streetGroupChatId).toHaveBeenCalledWith("Methfesselstraße");
 
-      expect(sendToAsh).not.toHaveBeenCalled();
-      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
-      expect(sendDirectMessage.mock.calls[0]![1]).toBe(
-        "Habe in der Gruppe gefragt — ich melde mich, sobald jemand zusagt.",
-      );
+        // Two sendDirectMessage calls: group ack + recipient DM.
+        expect(sendDirectMessage).toHaveBeenCalledTimes(2);
+
+        const [groupChatId, groupText, , groupKeyboard] =
+          sendDirectMessage.mock.calls[0]!;
+        // Group ack lands on the STREET group chat, NOT the holder's
+        // DM chat.
+        expect(groupChatId).toBe(-100123);
+        expect(groupText).toContain("📦 Paket von Diego de Miguel");
+        expect(groupText).toContain("Marlene Hartmann");
+        // v2.1 #114 regression pin: NO inline keyboard on group ack.
+        expect(groupKeyboard).toBeUndefined();
+
+        const [recipientChatId, recipientText, , recipientKeyboard] =
+          sendDirectMessage.mock.calls[1]!;
+        expect(recipientChatId).toBe(200);
+        expect(recipientText).toContain("Hi Marlene Hartmann");
+        // Recipient DM carries the [Abgeholt] keyboard.
+        expect(recipientKeyboard).toEqual({
+          inline_keyboard: [
+            [
+              { text: "Abgeholt", callback_data: "confirm_pickup:pkg_test" },
+            ],
+          ],
+        });
+
+        // Agent NEVER runs on this path.
+        expect(sendToAsh).not.toHaveBeenCalled();
+      });
+
+      it("falls back to holder.houseNumber when the label house number is missing (high-conf + resident match)", async () => {
+        const holder = dmRegisteredResident();
+        const { deps, registerPackage, sendDirectMessage } = buildDeps({
+          registeredResident: holder,
+          parsedPackagePhoto: {
+            kind: "shipping_label",
+            carrier: "DHL",
+            recipientName: "Marlene Hartmann",
+            // recipientHouseNumber omitted → fall back to holder.houseNumber (90).
+            confidence: "high",
+            reason: "house number not visible on label",
+          },
+        });
+
+        await processInboundTelegramUpdate(
+          makeRequest(dmPhotoUpdate({ fromUserId: 42 })),
+          deps,
+        );
+
+        expect(registerPackage).toHaveBeenCalledTimes(1);
+        expect(registerPackage.mock.calls[0]![1]).toMatchObject({
+          recipientHouseNumber: "90",
+        });
+        expect(sendDirectMessage).toHaveBeenCalledTimes(2);
+      });
+
+      it("medium-conf + recipient resolves to a Resident → registers", async () => {
+        const holder = dmRegisteredResident();
+        const { deps, registerPackage, resolveRecipient } = buildDeps({
+          registeredResident: holder,
+          parsedPackagePhoto: {
+            kind: "shipping_label",
+            carrier: "DHL",
+            recipientName: "M Hartmann",
+            recipientHouseNumber: "88",
+            confidence: "medium",
+            reason: "partial recipient legibility",
+          },
+          resolveRecipientResult: {
+            kind: "resident",
+            resident: {
+              id: "200",
+              name: "Marlene Hartmann",
+              houseNumber: "88",
+              language: "de",
+              floor: null,
+              buzzerName: null,
+            },
+          },
+        });
+
+        await processInboundTelegramUpdate(
+          makeRequest(dmPhotoUpdate({ fromUserId: 42 })),
+          deps,
+        );
+
+        expect(resolveRecipient).toHaveBeenCalledTimes(1);
+        expect(registerPackage).toHaveBeenCalledTimes(1);
+      });
+
+      it("medium-conf + non-resident → 3-path VLC DM, no register", async () => {
+        const { deps, registerPackage, sendDirectMessage, sendToAsh } =
+          buildDeps({
+            registeredResident: dmRegisteredResident(),
+            parsedPackagePhoto: {
+              kind: "shipping_label",
+              carrier: "DHL",
+              recipientName: "Unknown Person",
+              recipientHouseNumber: "999",
+              confidence: "medium",
+              reason: "uncertain recipient",
+            },
+            resolveRecipientResult: { kind: "unknown" },
+          });
+
+        await processInboundTelegramUpdate(
+          makeRequest(dmPhotoUpdate({ fromUserId: 42 })),
+          deps,
+        );
+
+        expect(registerPackage).not.toHaveBeenCalled();
+        expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+        expect(sendDirectMessage.mock.calls[0]![1]).toMatch(/Etikett/i);
+        expect(sendToAsh).not.toHaveBeenCalled();
+      });
+
+      it("low-conf → 3-path VLC DM, no register", async () => {
+        const { deps, registerPackage, sendDirectMessage } = buildDeps({
+          registeredResident: dmRegisteredResident(),
+          parsedPackagePhoto: {
+            kind: "shipping_label",
+            carrier: "unknown",
+            confidence: "low",
+            reason: "blurry label",
+          },
+        });
+
+        await processInboundTelegramUpdate(
+          makeRequest(dmPhotoUpdate({ fromUserId: 42 })),
+          deps,
+        );
+
+        expect(registerPackage).not.toHaveBeenCalled();
+        expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+        expect(sendDirectMessage.mock.calls[0]![1]).toMatch(/Etikett/i);
+      });
+
+      it("missing recipientName → 3-path VLC DM, no register", async () => {
+        const { deps, registerPackage, sendDirectMessage } = buildDeps({
+          registeredResident: dmRegisteredResident(),
+          parsedPackagePhoto: {
+            kind: "shipping_label",
+            carrier: "DHL",
+            recipientHouseNumber: "88",
+            // recipientName omitted.
+            confidence: "high",
+            reason: "name not visible",
+          },
+        });
+
+        await processInboundTelegramUpdate(
+          makeRequest(dmPhotoUpdate({ fromUserId: 42 })),
+          deps,
+        );
+
+        expect(registerPackage).not.toHaveBeenCalled();
+        expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+      });
+
+      it("holder-not-registered → /register nudge DM, no agent", async () => {
+        const holderNotRegisteredError = Object.assign(
+          new Error("holder not registered"),
+          { code: "REGISTER_PACKAGE_HOLDER_NOT_REGISTERED" },
+        );
+        const { deps, sendDirectMessage, sendToAsh, registerPackage } =
+          buildDeps({
+            registeredResident: null,
+            registerPackageError: holderNotRegisteredError,
+          });
+
+        const res = await processInboundTelegramUpdate(
+          makeRequest(dmPhotoUpdate({ fromUserId: 42, languageCode: "de" })),
+          deps,
+        );
+
+        expect(res.status).toBe(204);
+        expect(registerPackage).toHaveBeenCalledTimes(1);
+        // Single DM: the /register nudge.
+        expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+        expect(sendDirectMessage.mock.calls[0]![1]).toMatch(/register/i);
+        expect(sendToAsh).not.toHaveBeenCalled();
+      });
+
+      it("high-conf unknown recipient + group chat available → registers + posts unknown-recipient question to the group", async () => {
+        const { deps, registerPackage, sendDirectMessage } = buildDeps({
+          registeredResident: dmRegisteredResident(),
+          parsedPackagePhoto: {
+            kind: "shipping_label",
+            carrier: "DHL",
+            recipientName: "Anna Unbekannt",
+            recipientHouseNumber: "5",
+            confidence: "high",
+            reason: "label clear, recipient unknown to directory",
+          },
+          registerPackageResult: {
+            package: {
+              id: "pkg_unknown",
+              streetId: "Methfesselstraße",
+              recipientResidentId: null as unknown as string,
+              recipientName: "Anna Unbekannt",
+              recipientHouseNumber: "5",
+              holderResidentId: "patricia",
+              carrier: "DHL",
+              status: "held",
+              receivedAt: Date.now(),
+              pickedUpAt: null,
+              reminded: false,
+            } as unknown as Package,
+            holder: {
+              id: "patricia",
+              platformId: "patricia",
+              name: "Patricia Höfer",
+              houseNumber: "90",
+              floor: null,
+              buzzerName: null,
+              language: "de",
+            },
+            recipientResolution: { kind: "unknown" },
+            receptionRequestFulfilled: null,
+          },
+        });
+
+        await processInboundTelegramUpdate(
+          makeRequest(dmPhotoUpdate({ fromUserId: 42 })),
+          deps,
+        );
+
+        expect(registerPackage).toHaveBeenCalledTimes(1);
+        // Single DM: the group question to the resolved group chat.
+        expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+        const [groupChatId, groupText] = sendDirectMessage.mock.calls[0]!;
+        expect(groupChatId).toBe(-100123);
+        expect(groupText).toContain("Anna Unbekannt");
+        expect(groupText).toContain("kennt jemand");
+      });
+
+      it("receptionRequestFulfilled !== null → suppresses group ack + sends holder confirmation DM (regression for v2.1 #116)", async () => {
+        const holder = dmRegisteredResident();
+        const { deps, sendDirectMessage } = buildDeps({
+          registeredResident: holder,
+          parsedPackagePhoto: {
+            kind: "shipping_label",
+            carrier: "DHL",
+            recipientName: "Marlene Hartmann",
+            recipientHouseNumber: "88",
+            confidence: "high",
+            reason: "ok",
+          },
+          registerPackageResult: {
+            package: {
+              id: "pkg_test",
+              streetId: "Methfesselstraße",
+              recipientResidentId: "200",
+              recipientName: "Marlene Hartmann",
+              recipientHouseNumber: "88",
+              holderResidentId: "patricia",
+              carrier: "DHL",
+              status: "held",
+              receivedAt: Date.now(),
+              pickedUpAt: null,
+              reminded: false,
+              receptionRequestId: "req_999",
+            } as unknown as Package,
+            holder: {
+              id: "patricia",
+              platformId: "42",
+              name: "Patricia Höfer",
+              houseNumber: "90",
+              floor: null,
+              buzzerName: null,
+              language: "de",
+            },
+            recipientResolution: {
+              kind: "resident",
+              resident: {
+                id: "200",
+                name: "Marlene Hartmann",
+                houseNumber: "88",
+                language: "de",
+                floor: null,
+                buzzerName: null,
+              },
+            },
+            // The linked Flow 2 RR fulfillment — triggers the suppression branch.
+            receptionRequestFulfilled: {
+              requestId: "req_999",
+              requesterResidentId: "200",
+              previousStatus: "matched",
+            },
+          },
+        });
+
+        await processInboundTelegramUpdate(
+          makeRequest(dmPhotoUpdate({ fromUserId: 42 })),
+          deps,
+        );
+
+        // Two DMs: holder confirmation + recipient DM. NO group ack.
+        expect(sendDirectMessage).toHaveBeenCalledTimes(2);
+        const [holderChatId, holderText] = sendDirectMessage.mock.calls[0]!;
+        // Holder confirmation goes to the holder's DM (platformId=42).
+        expect(holderChatId).toBe(42);
+        expect(holderText).toMatch(/Paket für Marlene Hartmann erkannt/);
+        // Recipient DM still fires unchanged.
+        const [recipientChatId] = sendDirectMessage.mock.calls[1]!;
+        expect(recipientChatId).toBe(200);
+        // Neither call went to the group chat (no group ack).
+        for (const call of sendDirectMessage.mock.calls) {
+          expect(call[0]).not.toBe(-100123);
+        }
+      });
+
+      it("registerPackage throws a non-typed error → 3-path VLC DM, no agent", async () => {
+        const { deps, sendDirectMessage, sendToAsh } = buildDeps({
+          registeredResident: dmRegisteredResident(),
+          registerPackageError: new Error("redis hiccup"),
+        });
+
+        await processInboundTelegramUpdate(
+          makeRequest(dmPhotoUpdate({ fromUserId: 42 })),
+          deps,
+        );
+
+        expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+        expect(sendDirectMessage.mock.calls[0]![1]).toMatch(/Etikett/i);
+        expect(sendToAsh).not.toHaveBeenCalled();
+      });
+
+      it("when streetGroupChatId returns null (env missing), skips the group ack but still DMs the recipient", async () => {
+        const holder = dmRegisteredResident();
+        const { deps, sendDirectMessage, streetGroupChatId } = buildDeps({
+          registeredResident: holder,
+          streetGroupChatId: null,
+        });
+
+        await processInboundTelegramUpdate(
+          makeRequest(dmPhotoUpdate({ fromUserId: 42 })),
+          deps,
+        );
+
+        expect(streetGroupChatId).toHaveBeenCalledTimes(1);
+        // Only the recipient DM lands; the group ack is skipped.
+        expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+        const [chatId] = sendDirectMessage.mock.calls[0]!;
+        expect(chatId).toBe(200);
+      });
     });
 
-    it("on absenceSignal:false (explicit non-absence — search intent), sends the German recovery DM and does NOT post the card", async () => {
-      const resident = dmRegisteredResident("de");
-      const { deps, sendToAsh, sendDirectMessage, createReceptionRequest } =
-        buildDeps({
-          parsedTrackingPage: {
+    describe("kind='tracking_page' → Flow 2 reception request", () => {
+      it("high-conf + registered caller: createReceptionRequest + Flow 2 ack DM, no agent", async () => {
+        const fileUrl =
+          "https://api.telegram.org/file/bot111:AAA/photos/file_77.jpg";
+        const caller = dmRegisteredResident();
+        const {
+          deps,
+          sendToAsh,
+          parsePackagePhoto,
+          createReceptionRequest,
+          sendDirectMessage,
+        } = buildDeps({
+          fileUrl,
+          registeredResident: caller,
+          parsedPackagePhoto: {
+            kind: "tracking_page",
             carrier: "DHL",
             trackingNumber: "00340434161094021899",
             expectedWindowStartAt: "2026-05-19T13:00:00Z",
             expectedWindowEndAt: "2026-05-19T16:00:00Z",
-            absenceSignal: false,
             confidence: "high",
-            reason: "tracking page legible but caption is a search query",
+            reason: "DHL tracking page with explicit window",
           },
-          registeredResident: resident,
         });
 
-      await processInboundTelegramUpdate(
-        makeRequest(
-          dmPhotoUpdate({
-            caption: "wo ist mein Paket?",
-            fromUserId: 99,
-            languageCode: "de",
-          }),
-        ),
-        deps,
-      );
+        const res = await processInboundTelegramUpdate(
+          makeRequest(
+            dmPhotoUpdate({
+              fromUserId: 42,
+              languageCode: "de",
+              caption: "Bin morgen nicht zu Hause",
+            }),
+          ),
+          deps,
+        );
 
-      // Critical privacy guarantee: no card posted when the caption
-      // explicitly disclaims absence.
-      expect(createReceptionRequest).not.toHaveBeenCalled();
-      // #100: agent never runs on the recovery path either.
-      expect(sendToAsh).not.toHaveBeenCalled();
-      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
-      const [, text] = sendDirectMessage.mock.calls[0]!;
-      expect(text).toContain("Ich konnte den Beleg nicht eindeutig lesen");
-      expect(text).toContain("/receive");
-    });
-
-    it("on confidence:low, sends the German recovery DM and does NOT post the card", async () => {
-      const resident = dmRegisteredResident("de");
-      const { deps, sendToAsh, sendDirectMessage, createReceptionRequest } =
-        buildDeps({
-          parsedTrackingPage: {
-            carrier: "unknown",
-            confidence: "low",
-            reason: "carrier logo cropped",
-          },
-          registeredResident: resident,
+        expect(res.status).toBe(204);
+        expect(parsePackagePhoto).toHaveBeenCalledTimes(1);
+        expect(createReceptionRequest).toHaveBeenCalledTimes(1);
+        expect(createReceptionRequest.mock.calls[0]![1]).toMatchObject({
+          carrier: "DHL",
+          // ISO → ms conversion.
+          expectedWindowStartAt: Date.parse("2026-05-19T13:00:00Z"),
+          expectedWindowEndAt: Date.parse("2026-05-19T16:00:00Z"),
         });
+        // ONE DM: the German Flow 2 ack.
+        expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+        expect(sendDirectMessage.mock.calls[0]![1]).toContain(
+          "Habe in der Gruppe gefragt",
+        );
+        expect(sendToAsh).not.toHaveBeenCalled();
+      });
 
-      await processInboundTelegramUpdate(
-        makeRequest(dmPhotoUpdate({ fromUserId: 99, languageCode: "de" })),
-        deps,
-      );
-
-      expect(createReceptionRequest).not.toHaveBeenCalled();
-      expect(sendToAsh).not.toHaveBeenCalled();
-      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
-      expect(sendDirectMessage.mock.calls[0]![1]).toContain(
-        "Ich konnte den Beleg nicht eindeutig lesen",
-      );
-    });
-
-    it("on confidence:medium (not high), sends the German recovery DM and does NOT post the card", async () => {
-      const resident = dmRegisteredResident("de");
-      const { deps, sendToAsh, sendDirectMessage, createReceptionRequest } =
-        buildDeps({
-          parsedTrackingPage: {
+      it("uses the caller's stored language for the ack DM (es)", async () => {
+        const caller = dmRegisteredResident("es");
+        const { deps, sendDirectMessage } = buildDeps({
+          registeredResident: caller,
+          parsedPackagePhoto: {
+            kind: "tracking_page",
             carrier: "DHL",
-            absenceSignal: true,
+            confidence: "high",
+            reason: "ok",
+          },
+        });
+
+        await processInboundTelegramUpdate(
+          makeRequest(dmPhotoUpdate({ fromUserId: 42 })),
+          deps,
+        );
+
+        expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+        expect(sendDirectMessage.mock.calls[0]![1]).toMatch(/Pregunté en el grupo/);
+      });
+
+      it("medium-conf tracking_page → 3-path VLC DM, no createReceptionRequest", async () => {
+        const { deps, createReceptionRequest, sendDirectMessage } = buildDeps({
+          registeredResident: dmRegisteredResident(),
+          parsedPackagePhoto: {
+            kind: "tracking_page",
+            carrier: "DHL",
             confidence: "medium",
-            reason: "carrier legible but window obscured",
+            reason: "partial tracking page",
           },
-          registeredResident: resident,
         });
 
-      await processInboundTelegramUpdate(
-        makeRequest(dmPhotoUpdate({ fromUserId: 99, languageCode: "de" })),
-        deps,
-      );
+        await processInboundTelegramUpdate(
+          makeRequest(dmPhotoUpdate({ fromUserId: 42 })),
+          deps,
+        );
 
-      expect(createReceptionRequest).not.toHaveBeenCalled();
-      expect(sendToAsh).not.toHaveBeenCalled();
-      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
-      expect(sendDirectMessage.mock.calls[0]![1]).toContain(
-        "Ich konnte den Beleg nicht eindeutig lesen",
-      );
-    });
+        expect(createReceptionRequest).not.toHaveBeenCalled();
+        expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+        expect(sendDirectMessage.mock.calls[0]![1]).toMatch(/Etikett/i);
+      });
 
-    it("on parseTrackingPage returning null, sends the German recovery DM", async () => {
-      const {
-        deps,
-        sendToAsh,
-        sendDirectMessage,
-        parseTrackingPage,
-        createReceptionRequest,
-      } = buildDeps({ parsedTrackingPage: null });
-
-      await processInboundTelegramUpdate(
-        makeRequest(
-          dmPhotoUpdate({
-            caption: "kannst du das lesen?",
-            fromUserId: 99,
-            languageCode: "de",
-          }),
-        ),
-        deps,
-      );
-
-      expect(parseTrackingPage).toHaveBeenCalledTimes(1);
-      expect(createReceptionRequest).not.toHaveBeenCalled();
-      expect(sendToAsh).not.toHaveBeenCalled();
-      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
-      expect(sendDirectMessage.mock.calls[0]![1]).toContain(
-        "Ich konnte den Beleg nicht eindeutig lesen",
-      );
-    });
-
-    it("on parseTrackingPage throwing, sends the German recovery DM", async () => {
-      const {
-        deps,
-        sendToAsh,
-        sendDirectMessage,
-        parseTrackingPage,
-        createReceptionRequest,
-      } = buildDeps();
-      parseTrackingPage.mockRejectedValueOnce(
-        new Error("vision provider down"),
-      );
-
-      await processInboundTelegramUpdate(
-        makeRequest(dmPhotoUpdate({ fromUserId: 99, languageCode: "de" })),
-        deps,
-      );
-
-      expect(createReceptionRequest).not.toHaveBeenCalled();
-      expect(sendToAsh).not.toHaveBeenCalled();
-      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
-      expect(sendDirectMessage.mock.calls[0]![1]).toContain(
-        "Ich konnte den Beleg nicht eindeutig lesen",
-      );
-    });
-
-    it("on getFileUrl throwing (DM photo), sends the German recovery DM without invoking the tracking-page vision tool", async () => {
-      const {
-        deps,
-        sendToAsh,
-        sendDirectMessage,
-        parseTrackingPage,
-        getFileUrl,
-        createReceptionRequest,
-      } = buildDeps();
-      getFileUrl.mockRejectedValueOnce(new Error("Bot API 404"));
-
-      await processInboundTelegramUpdate(
-        makeRequest(dmPhotoUpdate({ fromUserId: 99, languageCode: "de" })),
-        deps,
-      );
-
-      expect(parseTrackingPage).not.toHaveBeenCalled();
-      expect(createReceptionRequest).not.toHaveBeenCalled();
-      expect(sendToAsh).not.toHaveBeenCalled();
-      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
-      expect(sendDirectMessage.mock.calls[0]![1]).toContain(
-        "Ich konnte den Beleg nicht eindeutig lesen",
-      );
-    });
-
-    it("on high-confidence but unregistered caller, sends the German recovery DM (no Resident to attach the request to)", async () => {
-      const { deps, sendToAsh, sendDirectMessage, createReceptionRequest } =
-        buildDeps({
-          parsedTrackingPage: {
-            carrier: "DHL",
-            absenceSignal: true,
-            confidence: "high",
-            reason: "clean tracking page",
-          },
+      it("unregistered caller → 3-path VLC DM (includes /register inline hint)", async () => {
+        const { deps, createReceptionRequest, sendDirectMessage } = buildDeps({
           registeredResident: null,
-        });
-
-      await processInboundTelegramUpdate(
-        makeRequest(dmPhotoUpdate({ fromUserId: 99, languageCode: "de" })),
-        deps,
-      );
-
-      expect(createReceptionRequest).not.toHaveBeenCalled();
-      expect(sendToAsh).not.toHaveBeenCalled();
-      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
-      // The recovery DM embeds the /register hint inline so an
-      // unregistered photo sender gets the right next step without a
-      // second turn.
-      expect(sendDirectMessage.mock.calls[0]![1]).toContain("/register");
-    });
-
-    it("on high-confidence + createReceptionRequest throwing (Redis hiccup), sends the German recovery DM", async () => {
-      const resident = dmRegisteredResident("de");
-      const { deps, sendToAsh, sendDirectMessage, createReceptionRequest } =
-        buildDeps({
-          parsedTrackingPage: {
+          parsedPackagePhoto: {
+            kind: "tracking_page",
             carrier: "DHL",
-            absenceSignal: true,
             confidence: "high",
-            reason: "clean tracking page",
+            reason: "ok",
           },
-          registeredResident: resident,
         });
-      createReceptionRequest.mockRejectedValueOnce(new Error("redis down"));
 
-      await processInboundTelegramUpdate(
-        makeRequest(dmPhotoUpdate({ fromUserId: 99, languageCode: "de" })),
-        deps,
-      );
+        await processInboundTelegramUpdate(
+          makeRequest(dmPhotoUpdate({ fromUserId: 42 })),
+          deps,
+        );
 
-      // The throw means no card was posted. User gets the recovery
-      // prompt instead — better than an ack for a card that's not up.
-      expect(sendToAsh).not.toHaveBeenCalled();
-      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
-      expect(sendDirectMessage.mock.calls[0]![1]).toContain(
-        "Ich konnte den Beleg nicht eindeutig lesen",
-      );
+        expect(createReceptionRequest).not.toHaveBeenCalled();
+        expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+        expect(sendDirectMessage.mock.calls[0]![1]).toMatch(/\/register/);
+      });
+
+      it("createReceptionRequest throws → 3-path VLC DM, no agent", async () => {
+        const { deps, sendToAsh, sendDirectMessage, createReceptionRequest } =
+          buildDeps({
+            registeredResident: dmRegisteredResident(),
+            parsedPackagePhoto: {
+              kind: "tracking_page",
+              carrier: "DHL",
+              confidence: "high",
+              reason: "ok",
+            },
+          });
+        createReceptionRequest.mockRejectedValueOnce(new Error("redis hiccup"));
+
+        await processInboundTelegramUpdate(
+          makeRequest(dmPhotoUpdate({ fromUserId: 42 })),
+          deps,
+        );
+
+        expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+        expect(sendDirectMessage.mock.calls[0]![1]).toMatch(/Etikett/i);
+        expect(sendToAsh).not.toHaveBeenCalled();
+      });
     });
 
-    it("on anonymous DM photo (no fromUserId), sends the German recovery DM without consulting the directory", async () => {
+    describe("kind='unknown' → 3-path VLC DM", () => {
+      it("on kind='unknown': sends the 3-path VLC DM listing retake/text/receive paths", async () => {
+        const { deps, sendDirectMessage, registerPackage, createReceptionRequest, sendToAsh } =
+          buildDeps({
+            parsedPackagePhoto: {
+              kind: "unknown",
+              confidence: "low",
+              reason: "photo of a cat",
+            },
+          });
+
+        await processInboundTelegramUpdate(
+          makeRequest(dmPhotoUpdate({ fromUserId: 42, languageCode: "de" })),
+          deps,
+        );
+
+        expect(registerPackage).not.toHaveBeenCalled();
+        expect(createReceptionRequest).not.toHaveBeenCalled();
+        expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+        const dmText = sendDirectMessage.mock.calls[0]![1];
+        // German 3-path copy: bullet list with /receive + /register hint.
+        expect(dmText).toMatch(/Etikett/i);
+        expect(dmText).toMatch(/Text/i);
+        expect(dmText).toMatch(/\/receive/);
+        expect(dmText).toMatch(/\/register/);
+        expect(sendToAsh).not.toHaveBeenCalled();
+      });
+
+      it("uses the caller's stored language for the VLC DM when registered (en)", async () => {
+        const { deps, sendDirectMessage } = buildDeps({
+          registeredResident: dmRegisteredResident("en"),
+          parsedPackagePhoto: {
+            kind: "unknown",
+            confidence: "low",
+            reason: "ok",
+          },
+        });
+
+        await processInboundTelegramUpdate(
+          makeRequest(dmPhotoUpdate({ fromUserId: 42, languageCode: "en" })),
+          deps,
+        );
+
+        expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+        // English copy is selected from `inbound.fromLanguageCode` (the
+        // unknown branch doesn't fetch the Resident, so the language
+        // hint is what drives the template).
+        expect(sendDirectMessage.mock.calls[0]![1]).toMatch(/label/i);
+      });
+    });
+
+    describe("vision / getFileUrl failure → 3-path VLC DM", () => {
+      it("on getFileUrl throwing: 3-path VLC DM, vision tool never called", async () => {
+        const { deps, parsePackagePhoto, sendDirectMessage, sendToAsh, getFileUrl } =
+          buildDeps();
+        getFileUrl.mockRejectedValueOnce(new Error("CDN 500"));
+
+        await processInboundTelegramUpdate(
+          makeRequest(dmPhotoUpdate({ fromUserId: 42 })),
+          deps,
+        );
+
+        expect(parsePackagePhoto).not.toHaveBeenCalled();
+        expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+        expect(sendDirectMessage.mock.calls[0]![1]).toMatch(/Etikett/i);
+        expect(sendToAsh).not.toHaveBeenCalled();
+      });
+
+      it("on parsePackagePhoto throwing: 3-path VLC DM, no agent", async () => {
+        const { deps, sendDirectMessage, sendToAsh } = buildDeps({
+          parsedPackagePhotoError: new Error("gateway down"),
+        });
+
+        await processInboundTelegramUpdate(
+          makeRequest(dmPhotoUpdate({ fromUserId: 42 })),
+          deps,
+        );
+
+        expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+        expect(sendDirectMessage.mock.calls[0]![1]).toMatch(/Etikett/i);
+        expect(sendToAsh).not.toHaveBeenCalled();
+      });
+    });
+
+    it("regression pin: shipping_label routes Flow 1 even without any absenceSignal field (the pre-#128 absenceSignal=undefined→Flow 2 heuristic is gone)", async () => {
+      // Pre-#128 a DM photo with `parseTrackingPage` returning
+      // `absenceSignal: undefined` would auto-route to Flow 2. The
+      // unified tool replaces that heuristic with the model's `kind`
+      // — a `shipping_label` verdict goes to Flow 1 unconditionally,
+      // never to Flow 2.
+      const holder = dmRegisteredResident();
       const {
         deps,
-        sendToAsh,
-        sendDirectMessage,
+        registerPackage,
         createReceptionRequest,
-        getRegisteredResident,
       } = buildDeps({
-        parsedTrackingPage: {
+        registeredResident: holder,
+        parsedPackagePhoto: {
+          kind: "shipping_label",
           carrier: "DHL",
-          absenceSignal: true,
+          recipientName: "Marlene Hartmann",
+          recipientHouseNumber: "88",
           confidence: "high",
-          reason: "clean tracking page",
+          reason: "ok",
         },
       });
 
       await processInboundTelegramUpdate(
-        // No `from` field → fromUserId is null.
-        makeRequest(dmPhotoUpdate({})),
+        makeRequest(dmPhotoUpdate({ fromUserId: 42 })),
         deps,
       );
 
-      expect(getRegisteredResident).not.toHaveBeenCalled();
+      // Goes to Flow 1, NOT Flow 2.
+      expect(registerPackage).toHaveBeenCalledTimes(1);
       expect(createReceptionRequest).not.toHaveBeenCalled();
-      expect(sendToAsh).not.toHaveBeenCalled();
-      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
-      expect(sendDirectMessage.mock.calls[0]![1]).toContain(
-        "Ich konnte den Beleg nicht eindeutig lesen",
-      );
     });
-
-    it("uses the resident's stored language for the ack DM when present (tr)", async () => {
-      const resident = dmRegisteredResident("tr");
-      const { deps, sendToAsh, sendDirectMessage } = buildDeps({
-        parsedTrackingPage: {
-          carrier: "DHL",
-          absenceSignal: true,
-          confidence: "high",
-          reason: "clean tracking page",
-        },
-        registeredResident: resident,
-      });
-
-      await processInboundTelegramUpdate(
-        makeRequest(dmPhotoUpdate({ fromUserId: 99, languageCode: "tr" })),
-        deps,
-      );
-
-      expect(sendToAsh).not.toHaveBeenCalled();
-      expect(sendDirectMessage.mock.calls[0]![1]).toBe(
-        "Gruba sordum — biri yanıt verince haber veririm.",
-      );
-    });
-
-    it("falls back to the Telegram client language code when the resident has no stored language (en)", async () => {
-      const resident: Resident = {
-        ...dmRegisteredResident("de"),
-        language: undefined,
-      };
-      const { deps, sendToAsh, sendDirectMessage } = buildDeps({
-        parsedTrackingPage: {
-          carrier: "DHL",
-          absenceSignal: true,
-          confidence: "high",
-          reason: "clean tracking page",
-        },
-        registeredResident: resident,
-      });
-
-      await processInboundTelegramUpdate(
-        makeRequest(dmPhotoUpdate({ fromUserId: 99, languageCode: "en" })),
-        deps,
-      );
-
-      expect(sendToAsh).not.toHaveBeenCalled();
-      expect(sendDirectMessage.mock.calls[0]![1]).toBe(
-        "Asked in the group — I'll let you know as soon as someone says yes.",
-      );
-    });
-
-    it("falls back to 'de' when neither the resident nor Telegram supply a language code on the low-confidence path", async () => {
-      const { deps, sendToAsh, sendDirectMessage } = buildDeps({
-        parsedTrackingPage: {
-          carrier: "unknown",
-          confidence: "low",
-          reason: "blurry image",
-        },
-      });
-
-      // No language_code on the Telegram side AND unregistered caller.
-      await processInboundTelegramUpdate(
-        makeRequest(dmPhotoUpdate({ fromUserId: 99 })),
-        deps,
-      );
-
-      expect(sendToAsh).not.toHaveBeenCalled();
-      expect(sendDirectMessage.mock.calls[0]![1]).toContain(
-        "Ich konnte den Beleg nicht eindeutig lesen",
-      );
-    });
-
-    it("still sends the recovery DM (no agent fallback) even when the photo arrives without a caption on the low-confidence path", async () => {
-      const { deps, sendToAsh, sendDirectMessage } = buildDeps({
-        parsedTrackingPage: {
-          carrier: "unknown",
-          confidence: "low",
-          reason: "blurry image",
-        },
-      });
-
-      await processInboundTelegramUpdate(
-        makeRequest(dmPhotoUpdate({ fromUserId: 99, languageCode: "de" })),
-        deps,
-      );
-
-      expect(sendToAsh).not.toHaveBeenCalled();
-      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
-    });
-
   });
 
   it("does not call getFileUrl on text-only updates", async () => {
@@ -1969,12 +1832,20 @@ describe("processInboundTelegramUpdate — callback_query", () => {
       // bot, so the group never learns the package was closed.
       expect(editGroupCard).not.toHaveBeenCalled();
 
-      // Holder thanks DM lands.
-      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
-      const [holderChatId, dmText] = sendDirectMessage.mock.calls[0]!;
+      // Two DMs land: recipient confirmation (first), holder thanks (second).
+      // The recipient confirmation closes the DM thread visually so the
+      // tap produces something the recipient can read in the chat — the
+      // empty `answerCallback` toast is too transient on its own.
+      expect(sendDirectMessage).toHaveBeenCalledTimes(2);
+
+      const [recipientChatId, recipientText] = sendDirectMessage.mock.calls[0]!;
+      expect(recipientChatId).toBe(200); // cb.chatId = recipient's DM
+      expect(recipientText).toBe("Hab notiert — danke!");
+
+      const [holderChatId, holderText] = sendDirectMessage.mock.calls[1]!;
       expect(holderChatId).toBe(100); // holder.platformId from default mock
-      expect(dmText).toContain("Marlene Hartmann");
-      expect(dmText).toContain("danke");
+      expect(holderText).toContain("Marlene Hartmann");
+      expect(holderText).toContain("danke");
 
       // Agent is NEVER invoked on this path.
       expect(sendToAsh).not.toHaveBeenCalled();
@@ -2238,7 +2109,12 @@ describe("processInboundTelegramUpdate — callback_query", () => {
           confirmed: true,
         } satisfies Resident,
       });
-      sendDirectMessage.mockRejectedValueOnce(new Error("dm failed"));
+      // First call = recipient confirmation (succeeds). Second call =
+      // holder thanks (fails). Asserts the failure is swallowed and
+      // doesn't escalate the response status.
+      sendDirectMessage
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error("dm failed"));
 
       const res = await processInboundTelegramUpdate(
         makeRequest(
@@ -2259,7 +2135,8 @@ describe("processInboundTelegramUpdate — callback_query", () => {
       expect(res.status).toBe(204);
       // v2.1 #114: editGroupCard is never called on pickup.
       expect(editGroupCard).not.toHaveBeenCalled();
-      expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+      // Both DMs attempted: recipient confirm (ok) + holder thanks (failed).
+      expect(sendDirectMessage).toHaveBeenCalledTimes(2);
       expect(sendToAsh).not.toHaveBeenCalled();
     });
 
@@ -5938,8 +5815,8 @@ describe("processInboundTelegramUpdate — setTriggerAttribute (v2.1 #99)", () =
     // don't pollute the dashboard with phantom Trigger entries on rows
     // that have no turns.
     const { deps, sendToAsh, setTriggerAttribute } = buildDeps({
-      parsedTrackingPage: {
-        carrier: "DHL",
+      parsedPackagePhoto: {
+        kind: "unknown",
         confidence: "low",
         reason: "blurry receipt",
       },

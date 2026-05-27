@@ -34,56 +34,43 @@
  * double-taps), and — for group confirm_pickup taps — gate on the
  * tapper actually being the package's recipient.
  *
- * Photo path: routing is by chat type. Both branches are fully
- * channel-deterministic — the agent never runs on a Flow 1 / Flow 2
- * photo on the happy path.
+ * Photo path (v2.1 #128): routing is by the unified
+ * `parse_package_photo` tool's `kind` discriminator, not chat type. Both
+ * branches are fully channel-deterministic — the agent never runs on a
+ * photo turn under any condition.
  *
- *   - Group photo → Flow 1 (the holder is showing a shipping label
- *     they received on someone else's package). The channel resolves
- *     the Telegram `file_id` to a signed HTTPS URL via `getFileUrl`,
- *     calls `parseLabel({ imageUrl, caption })` itself (v2.1 #107 /
- *     Slice 2 of #106 — partial revert of #79 for parse_label), and
- *     on `confidence === "high"` + a recipient that resolves to a
- *     registered Resident calls `registerPackage` directly, posts the
- *     deterministic group ack, and DMs the recipient with the
- *     `[Abgeholt]` keyboard. `sendToAsh` is never called. Every other
- *     branch (low/medium-conf parse, missing recipient,
- *     known_telegram / unknown recipient, parse_label outage,
- *     getFileUrl failure) stays silent in Slice 2; Slice 3 (#109)
- *     introduces the `[FLOW_1 CLARIFICATION]` synthetic with hard
- *     prohibitions on free-form output for the disambiguation cases.
- *     Pre-#107: the orchestrator handed the agent a `[photo received]
- *     file_url=…` synthetic and the agent invoked `parse_label`
- *     itself — that closed the observability gap from pre-#79 but
- *     left the agent on the inbound surface, which the live trace
- *     2026-05-22 (#105) showed produces 20+ free-form German messages
- *     on a single inbound. Pulling the decision OUT of the model
- *     closes the text-leak surface structurally.
- *   - DM photo → `parse_tracking_page` + channel-side routing
- *     (Flow 2 v2.1 / #88, fully agent-bypassed per #100). On
- *     `confidence === "high"` AND `absenceSignal` in {`true`,
- *     `undefined`}, the channel writes the `ReceptionRequest` directly
- *     via `createReceptionRequest` and sends the requester ONE
- *     localised ack DM via `sendDirectMessage`. On any other outcome
- *     (low/medium confidence, explicit `absenceSignal: false`, parse
- *     failure, unregistered caller, Redis hiccup), the channel sends
- *     a localised recovery prompt DM pointing at `/receive` (Slice 2 /
- *     #87) and inline `/register` for unregistered senders. The agent
- *     never runs on the DM photo path under any condition.
+ *   - DM photo → `parse_package_photo` + channel-side routing on `kind`:
+ *     - `kind: "shipping_label"` → Flow 1 register (resolve recipient,
+ *       call `registerPackage`, post announce-only group ack to the
+ *       holder's street group, DM recipient with `[Abgeholt]`). The
+ *       privacy-correct entry surface for photo-based Flow 1.
+ *     - `kind: "tracking_page"`  → Flow 2 (write `ReceptionRequest`,
+ *       send localised ack DM). Same business outcome as the pre-#128
+ *       path; the routing signal is `kind` rather than the previous
+ *       `absenceSignal === undefined` heuristic.
+ *     - `kind: "unknown"`        → 3-path recovery DM (retake label /
+ *       type text / `/receive`).
  *
- * Both vision tools route through Vercel AI Gateway with Gemini 3.1
+ *   - Group photo → `parse_package_photo` + privacy nudge:
+ *     - `kind: "shipping_label"` → DM the SENDER privately with a
+ *       nudge ("please send labels to me in DM"). NO Package write,
+ *       NO group post. The label PII (recipient name + house number)
+ *       must not land in the group; the only correct response is to
+ *       redirect the user to DM. The bot has no admin powers to delete
+ *       the offending group post.
+ *     - `kind: "tracking_page"` / `kind: "unknown"` → silent.
+ *
+ * The vision tool routes through Vercel AI Gateway with Gemini 3.1
  * Flash Lite as primary and Claude Sonnet 4.6 as fallback. The
- * trade-off Slice 2 accepts (per #107's design call): `parse_label`'s
- * token spend no longer lands inside `ash.turn` because the agent
- * never runs on the channel-deterministic happy path. Observability
- * lives on the custom OTel spans emitted by `lib/trace.ts`.
+ * trade-off (inherited from #107): the vision call no longer lands
+ * inside `ash.turn` because the agent never runs on the happy path.
+ * Observability lives on the custom OTel spans emitted by `lib/trace.ts`.
  *
- * @see lib/telegram-channel/verify.ts        — header check (same primitive)
- * @see lib/telegram-channel/inbound.ts       — payload → canonical message
- * @see lib/telegram-channel/outbound.ts      — `drainSessionToTelegram`
- * @see lib/telegram-channel/keyboards.ts     — answer + edit Bot API helpers
- * @see agent/tools/parse_label.ts            — vision tool for the group/label path
- * @see agent/tools/parse_tracking_page.ts    — vision tool for the DM/screenshot path
+ * @see lib/telegram-channel/verify.ts            — header check
+ * @see lib/telegram-channel/inbound.ts           — payload → canonical message
+ * @see lib/telegram-channel/outbound.ts          — `drainSessionToTelegram`
+ * @see lib/telegram-channel/keyboards.ts         — answer + edit Bot API helpers
+ * @see agent/tools/parse_package_photo.ts        — unified vision tool (#128)
  */
 
 import type { Session } from "experimental-ash/channels";
@@ -127,10 +114,7 @@ import {
 } from "../registration.js";
 import { isReceiveCommand, parseReceiveCommand } from "../slash-command.js";
 
-import {
-  buildFlow2AckDm,
-  buildFlow2VisionLowConfidenceDm,
-} from "./flow-2-dms.js";
+import { buildFlow2AckDm, buildVlc3PathDm } from "./flow-2-dms.js";
 import {
   buildDmTextPickupAlreadyDoneText,
   buildDmTextPickupConfirmedText,
@@ -140,6 +124,7 @@ import {
   buildDmTextPickupWaitingOnVolunteerText,
   buildFlow1ClarificationSynthetic,
   buildGroupAckText,
+  buildGroupLabelPrivacyNudge,
   buildHolderConfirmationDmText,
   buildHolderNotRegisteredNudge,
   buildPickupKeyboard,
@@ -211,11 +196,9 @@ export interface ProcessUpdateDeps {
    * without importing the runtime — the spike's `RouteHandlerArgs`
    * passes the real function through verbatim.
    *
-   * Always a plain `string`. For group photos the orchestrator hands
-   * the agent a `[photo received] file_url=… caption='…'` synthetic
-   * (the agent calls `parse_label` itself, #79); for DM photos the
-   * channel handles Flow 2 deterministically (#100) and `sendToAsh`
-   * is not invoked at all on the success path.
+   * Always a plain `string`. Photo turns (DM or group) never invoke
+   * `sendToAsh` after v2.1 #128 — the channel branches on the unified
+   * vision tool's `kind` and handles every outcome deterministically.
    */
   readonly sendToAsh: (
     message: string,
@@ -250,88 +233,59 @@ export interface ProcessUpdateDeps {
    */
   readonly getFileUrl: (fileId: string) => Promise<string>;
   /**
-   * Vision parser for carrier tracking-page screenshots (Flow 2 v2 /
-   * #69; v2.1 Slice 3 / #88 rewired the consumption; #100 made the
-   * downstream DM channel-deterministic). Wired by the factory to
-   * `agent/tools/parse_tracking_page.ts`'s `execute({ imageUrl,
-   * caption })`. The orchestrator calls this exactly once per inbound
-   * DM photo update; the result drives the channel-side routing
-   * decision in `routeDmPhoto`:
+   * v2.1 #128: unified vision parser. Wired by the factory to
+   * `agent/tools/parse_package_photo.ts`'s `execute({ imageUrl,
+   * caption })`. Replaces the pre-#128 `parseLabel` + `parseTrackingPage`
+   * split — one LLM call returns a discriminated union on `kind`, the
+   * channel branches on that:
    *
-   *   - `confidence === "high"` AND `absenceSignal` in {`true`,
-   *     `undefined`} AND registered caller → channel calls
-   *     `createReceptionRequest` directly + sends the deterministic
-   *     ack DM via `sendDirectMessage`. No agent invocation.
-   *   - anything else → channel sends the deterministic recovery
-   *     prompt DM ("retry with /receive, register first if you
-   *     haven't"). No agent invocation either way.
+   *   - `kind: "shipping_label"` → Flow 1 entry. On a DM photo: register
+   *     the package (resolve recipient, call lib `registerPackage`, post
+   *     announce-only group ack, DM the recipient with `[Abgeholt]`).
+   *     On a group photo: NEVER register — DM the sender a privacy
+   *     nudge ("send labels to me directly").
+   *   - `kind: "tracking_page"` → Flow 2 entry. On a DM photo: write
+   *     `ReceptionRequest` + post group volunteer card. On a group photo:
+   *     silent (group photos never go through Flow 2 by design — `/receive`
+   *     is the explicit Flow 2 entry).
+   *   - `kind: "unknown"`        → DM photo: send the 3-path recovery DM
+   *     (retake label / type text / `/receive`). Group photo: silent.
    *
-   * Throws when the underlying model + fallback both fail — the
-   * orchestrator's catch logs the error and sends the recovery prompt
-   * DM so the user gets an actionable next step without the agent
-   * running.
-   *
-   * Group photos route through the channel-side `parseLabel` (Slice 2
-   * of #106 / #107) — the orchestrator picks the DM vs group branch
-   * off `inbound.isGroup`.
-   */
-  readonly parseTrackingPage: (input: {
-    imageUrl: string;
-    caption?: string;
-  }) => Promise<{
-    carrier: PackageCarrier;
-    trackingNumber?: string;
-    expectedWindowStartAt?: string;
-    expectedWindowEndAt?: string;
-    absenceSignal?: boolean;
-    confidence: "high" | "medium" | "low";
-    reason: string;
-  } | null>;
-  /**
-   * v2.1 #107 (Slice 2 of #106): vision parser for shipping-label
-   * photos. Wired by the factory to `agent/tools/parse_label.ts`'s
-   * `execute({ imageUrl, caption })`. The orchestrator calls this
-   * exactly once per inbound group photo update; the structured
-   * result drives the channel-side routing decision in
-   * `routeGroupPhoto`:
-   *
-   *   - `confidence === "high"` AND `recipientName` present AND the
-   *     resolved recipient is a registered Resident → channel calls
-   *     `registerPackage` directly + posts the deterministic group
-   *     ack + DMs the recipient via `sendDirectMessage`. No agent
-   *     invocation.
-   *   - anything else (low/medium confidence, missing recipientName,
-   *     parse_label throws, getFileUrl throws, recipient resolves to
-   *     known_telegram / unknown, unregistered holder) → channel
-   *     stays silent (no group leak). Slice 3 (#109) will introduce
-   *     the `[FLOW_1 CLARIFICATION]` synthetic for the disambiguation
-   *     cases.
+   * Privacy invariant: the routing decision lives in the model output's
+   * `kind`. Even if the agent's reasoning is wrong, no Package row lands
+   * unless `routeDmPhoto` decided to register based on
+   * `kind === "shipping_label"`, and no group post lands ever from a
+   * group photo (group photos are now read-only on the bot's side).
    *
    * Throws when the underlying model + fallback both fail — the
-   * orchestrator's catch logs the error and stays silent (Slice 3
-   * deferral) so the group is never spammed by a vision outage.
-   *
-   * Pre-#107 the agent invoked this tool itself via a `[photo
-   * received] file_url=…` synthetic (#79 promotion). Slice 2 partially
-   * reverts that for `parse_label` specifically — the structural fix
-   * for Flow 1's text-leak surface needs the registration decision OUT
-   * of the model entirely. The trade-off is that the `parse_label`
-   * call no longer lands inside `ash.turn`; on a channel-deterministic
-   * happy path the agent never runs, so there's no `ash.turn` to
-   * attribute the spend to anyway. Observability for the vision call
-   * lands on the custom OTel span this module emits via `emitTrace`.
+   * orchestrator's catch logs the error and sends the deterministic
+   * recovery DM on the DM photo path, stays silent on the group photo
+   * path.
    */
-  readonly parseLabel: (input: {
+  readonly parsePackagePhoto: (input: {
     imageUrl: string;
     caption?: string;
-  }) => Promise<{
-    carrier: PackageCarrier;
-    trackingNumber?: string;
-    recipientName?: string;
-    recipientHouseNumber?: string;
-    confidence: "high" | "medium" | "low";
-    reason: string;
-  }>;
+  }) => Promise<
+    | {
+        kind: "shipping_label";
+        carrier: PackageCarrier;
+        recipientName?: string;
+        recipientHouseNumber?: string;
+        trackingNumber?: string;
+        confidence: "high" | "medium" | "low";
+        reason: string;
+      }
+    | {
+        kind: "tracking_page";
+        carrier: PackageCarrier;
+        trackingNumber?: string;
+        expectedWindowStartAt?: string;
+        expectedWindowEndAt?: string;
+        confidence: "high" | "medium" | "low";
+        reason: string;
+      }
+    | { kind: "unknown"; confidence: "low"; reason: string }
+  >;
   /**
    * Acks a `callback_query` so the Telegram client clears the tap
    * spinner. Optional `text` shows a brief toast to the tapper —
@@ -652,6 +606,23 @@ export interface ProcessUpdateDeps {
     replyMarkup?: InlineKeyboardMarkup,
   ) => Promise<void>;
   /**
+   * v2.1 #128: resolve a street identifier to its Telegram group chat id
+   * so the DM-photo Flow 1 register branch can post the announce-only
+   * group ack to the correct group. The pre-#128 group-photo Flow 1 route
+   * used `inbound.chatId` (which IS the group when the inbound came from
+   * a group); a DM-initiated Flow 1 register doesn't have that, so it
+   * needs an explicit lookup.
+   *
+   * Single-street MVP: the factory returns
+   * `Number(process.env.TELEGRAM_GROUP_CHAT_ID)` regardless of `street`.
+   * Multi-street future: per-street map lookup.
+   *
+   * Returns `null` when the env var is missing or unparseable. The
+   * caller treats `null` as "can't post the group ack" — the Package row
+   * + recipient DM still land; only the group announcement is skipped.
+   */
+  readonly streetGroupChatId: (street: string) => number | null;
+  /**
    * v2.1 #97: channel-side handle for the lib-level `registerResident`.
    * Wired by the factory to `lib/registration.ts::registerResident`. The
    * channel calls this directly (no agent invocation) when a DM matches
@@ -704,9 +675,9 @@ export interface ProcessUpdateDeps {
  *                                        or non-Flow-2 verdict).
  *   - `telegram.group`                 — group text (no Flow 2 in groups).
  *   - `telegram.photo`                 — any photo turn that reaches the
- *                                        agent: group photos (Flow 1 /
- *                                        `parse_label`) and DM photo
- *                                        recovery fallthrough.
+ *                                        agent: never after v2.1 #128
+ *                                        (kept in the union so legacy
+ *                                        traces still parse).
  *   - `telegram.slash-receive`         — `/receive` slash command that
  *                                        fell through to the agent
  *                                        (typically unregistered caller).
@@ -1063,45 +1034,6 @@ async function handleCallbackQuery(
 }
 
 /**
- * v2.1 #107 (Slice 2 of #106): channel-deterministic group photo route.
- *
- * Same architectural shape as `routeGroupTextThroughClassifier` — the
- * channel resolves the photo URL, calls `parse_label` itself (partial
- * revert of #79 for parse_label specifically), and decides whether to
- * register the Package, post a deterministic group question
- * (`kennt jemand X?`), or fall through to the agent with a
- * `[FLOW_1 CLARIFICATION]` synthetic. `sendToAsh` is only invoked on
- * the fallthrough branch — and the synthetic constrains the agent to
- * a single short clarifying question with no tool calls + no group
- * output, so the v1-style 20+-message wall the live trace 2026-05-22
- * (#105) produced stays structurally impossible.
- *
- * Branch table (v2.1 #109 Slice 3 of #105):
- *
- *   - getFileUrl throws            → `fallthrough reason=parse-failed`
- *                                    (no URL, can't surface anything
- *                                    more specific to the agent)
- *   - parseLabel throws            → `fallthrough reason=parse-failed`
- *   - confidence: "low"            → `fallthrough reason=low-conf`
- *                                    (or `ambiguous-multi` when the
- *                                    caption mentions 2+ names)
- *   - high/medium + no recipient   → `fallthrough reason=missing-recipient`
- *                                    (or `ambiguous-multi`)
- *   - high-conf + resident         → register + group ack + recipient DM
- *   - high-conf + known_telegram   → register (Package row landed for
- *                                    later cron sweeps) + silent
- *   - high-conf + unknown          → register + group question
- *                                    (`📦 Paket für X – kennt jemand X?`)
- *   - medium-conf + resident       → register (treat as high-conf when
- *                                    the second signal converges)
- *   - medium-conf + non-resident   → `fallthrough reason=low-conf`
- *                                    (no Package write — holder
- *                                    clarifies, classifier reruns,
- *                                    Slice 1/2 handles deterministically)
- *   - unregistered holder          → `/register` nudge DM, silent in
- *                                    group (matches text path / #106)
- */
-/**
  * v2.1 #116 (Slice 3 of #113): private holder confirmation DM sent
  * INSTEAD of the group ack when a Flow 1 registration LINKS to a Flow 2
  * `ReceptionRequest`. The original Flow 2 group card is the public
@@ -1154,6 +1086,34 @@ async function sendFlow1HolderConfirmation(args: {
   }
 }
 
+/**
+ * v2.1 #128: group photo route — privacy nudge ONLY, never registers.
+ *
+ * Pre-#128, a shipping-label photo posted to the street group would
+ * register the package via the channel-side Flow 1 path. That posted
+ * a group ack and DM'd the recipient, which is the right business
+ * outcome — but the underlying privacy violation (the label PII landed
+ * publicly in the group chat) was baked into the entry surface. #128
+ * inverts the policy: Flow 1 registration is now the DM-photo path
+ * only. The group photo route exists solely to nudge a misbehaving
+ * sender privately.
+ *
+ * Branches by `kind`:
+ *
+ *   - `shipping_label` → DM the sender the privacy nudge in their
+ *     language. NO Package write, NO group post, NO group ack. The
+ *     original group post stays as-is (the bot is not an admin and
+ *     can't delete it).
+ *   - `tracking_page`  → silent. Tracking pages don't carry recipient
+ *     PII but they also don't belong as group public posts; the
+ *     deterministic `/receive` slash + DM photo entry are the
+ *     supported Flow 2 surfaces.
+ *   - `unknown`        → silent. We don't know what was posted; we
+ *     don't comment.
+ *
+ * Failure modes (getFileUrl throw, parse_package_photo throw): silent.
+ * The agent is never in the loop on this surface.
+ */
 async function routeGroupPhoto(
   inbound: TelegramInboundMessage,
   fileId: string,
@@ -1161,49 +1121,14 @@ async function routeGroupPhoto(
 ): Promise<Flow1RouteResult> {
   if (inbound.fromUserId === null) {
     // Anonymous group photo (no `from` on the payload) — can't
-    // resolve the holder, so stay silent.
+    // resolve the sender to DM them privately, so stay silent.
     return { kind: "silent" };
   }
 
   const captionText = inbound.text.length > 0 ? inbound.text : undefined;
-  const holderLanguage = inbound.fromLanguageCode
+  const senderLanguage = inbound.fromLanguageCode
     ? (normaliseLanguageCode(inbound.fromLanguageCode) ?? "de")
     : "de";
-
-  function fallthroughClarification(args: {
-    reason: Flow1ClarificationReason;
-    parsed?: { carrier?: string; recipientName?: string; confidence?: "low" | "medium" | "high" };
-    holder: Resident | null;
-  }): Flow1RouteResult {
-    emitTrace("flow1", "fallthrough", {
-      reason: args.reason,
-      source: "photo",
-    });
-    return {
-      kind: "fallthrough",
-      toAgent: buildFlow1ClarificationSynthetic({
-        language: args.holder?.language ?? holderLanguage,
-        reason: args.reason,
-        source: "photo",
-        carrier: args.parsed?.carrier,
-        recipientName: args.parsed?.recipientName,
-        confidence: args.parsed?.confidence,
-        caption: captionText,
-        holderName: args.holder?.name,
-        holderHouseNumber: args.holder?.houseNumber,
-      }),
-    };
-  }
-
-  // Resolve the holder eagerly — every fallthrough branch needs the
-  // holder name + house in the synthetic so the agent's clarifying
-  // question can address them by name. A null holder still lets us
-  // emit a fallthrough (synthetic embeds "(unknown)") but the
-  // unregistered-holder branch below short-circuits to the /register
-  // nudge before that case is reachable.
-  const holder = await deps
-    .getRegisteredResident(inbound.fromUserId)
-    .catch(() => null);
 
   let imageUrl: string;
   try {
@@ -1217,106 +1142,114 @@ async function routeGroupPhoto(
         ? { name: err.name, message: err.message, stack: err.stack }
         : err,
     );
-    return fallthroughClarification({ reason: "parse-failed", holder });
+    return { kind: "silent" };
   }
 
-  let parsed: Awaited<ReturnType<ProcessUpdateDeps["parseLabel"]>>;
-  emitTrace("vision", "start", { tool: "parse_label" });
+  let parsed: Awaited<ReturnType<ProcessUpdateDeps["parsePackagePhoto"]>>;
+  emitTrace("vision", "start", { tool: "parse_package_photo" });
   try {
-    parsed = await deps.parseLabel({ imageUrl, caption: captionText });
+    parsed = await deps.parsePackagePhoto({ imageUrl, caption: captionText });
     emitTrace("vision", "end", {
-      tool: "parse_label",
+      tool: "parse_package_photo",
+      kind: parsed.kind,
       confidence: parsed.confidence,
     });
   } catch (err) {
     console.error(
-      "[parse_label] failed for chatId",
+      "[parse_package_photo] failed (group) for chatId",
       inbound.chatId,
       "error:",
       err instanceof Error
         ? { name: err.name, message: err.message, stack: err.stack }
         : err,
     );
-    emitTrace("vision", "error", { tool: "parse_label" });
-    return fallthroughClarification({ reason: "parse-failed", holder });
+    emitTrace("vision", "error", { tool: "parse_package_photo" });
+    return { kind: "silent" };
   }
 
-  // Disambiguation branches that don't depend on resolution. The
-  // ambiguous-multi heuristic upgrades a low-conf / missing-recipient
-  // reason when the caption clearly names two recipients — the
-  // agent's clarifying question can then ask about the second label
-  // directly.
-  const multi = captionLooksLikeMultiRecipient(captionText);
-  if (parsed.confidence === "low") {
-    return fallthroughClarification({
-      reason: multi ? "ambiguous-multi" : "low-conf",
-      parsed,
-      holder,
+  if (parsed.kind !== "shipping_label") {
+    // tracking_page / unknown in a group: silent. The bot has nothing
+    // to say without leaking either the photo content or the sender's
+    // identity-around-a-package.
+    emitTrace("flow1", "silent", {
+      reason: parsed.kind === "tracking_page" ? "group-tracking-page" : "group-unknown",
+      source: "photo",
     });
-  }
-  if (!parsed.recipientName) {
-    return fallthroughClarification({
-      reason: multi ? "ambiguous-multi" : "missing-recipient",
-      parsed,
-      holder,
-    });
+    return { kind: "silent" };
   }
 
-  const recipientHouseNumber =
-    parsed.recipientHouseNumber ?? holder?.houseNumber ?? "";
-  if (recipientHouseNumber === "") {
-    return fallthroughClarification({
-      reason: "missing-recipient",
-      parsed,
-      holder,
-    });
+  // shipping_label in a group — the policy break #128 closes. DM the
+  // sender privately with the nudge so they know to send labels in DM
+  // next time. Best-effort: a user who has never opened a chat with the
+  // bot will refuse the outbound; the channel logs that and the group
+  // post is left as-is (no admin powers to delete it).
+  const nudge = buildGroupLabelPrivacyNudge(senderLanguage);
+  try {
+    emitTrace("dm", "start", { kind: "flow1-group-label-privacy-nudge" });
+    await deps.sendDirectMessage(inbound.fromUserId, nudge);
+    emitTrace("dm", "end", { kind: "flow1-group-label-privacy-nudge" });
+  } catch (err) {
+    console.error(
+      "[flow1] group-label privacy nudge DM failed for userId",
+      inbound.fromUserId,
+      "error:",
+      err instanceof Error ? err.message : err,
+    );
+    emitTrace("dm", "error", { kind: "flow1-group-label-privacy-nudge" });
   }
+  return { kind: "silent" };
+}
 
-  // Medium-conf: only register when the recipient resolves to a
-  // registered Resident. Otherwise fall through so the agent can ask
-  // the holder to disambiguate (no Package write — the holder's
-  // restated reply will be re-classified at high confidence and
-  // register cleanly).
-  if (parsed.confidence === "medium") {
-    let resolution: RecipientResolution;
-    try {
-      resolution = await deps.resolveRecipient(
-        parsed.recipientName,
-        recipientHouseNumber,
-      );
-    } catch (err) {
-      console.error(
-        "[resolveRecipient] (photo, medium-conf) failed for recipient",
-        parsed.recipientName,
-        "error:",
-        err instanceof Error
-          ? { name: err.name, message: err.message, stack: err.stack }
-          : err,
-      );
-      return fallthroughClarification({ reason: "low-conf", parsed, holder });
-    }
-    if (resolution.kind !== "resident") {
-      return fallthroughClarification({ reason: "low-conf", parsed, holder });
-    }
-    // Resolution converges; continue to register below.
+/**
+ * v2.1 #128: shared Flow 1 register helper for the DM photo route.
+ *
+ * Mirrors the registration tail of the pre-#128 group photo path:
+ * `registerPackage` (with the holder-not-registered nudge branch) →
+ * group ack OR Flow 2-fulfillment confirmation DM → recipient DM with
+ * `[Abgeholt]`. The group chat id is resolved via `deps.streetGroupChatId`
+ * (env-backed in production) since a DM-initiated Flow 1 doesn't have
+ * `inbound.chatId === group chat id` like the pre-#128 group photo
+ * path did.
+ *
+ * Pre-conditions enforced by the caller (`routeDmPhotoShippingLabel`):
+ * `inbound.fromUserId !== null`, the parsed shipping label has a
+ * resolvable `recipientName + recipientHouseNumber` pair, and we already
+ * confirmed (at medium-conf) that the recipient resolves to a Resident.
+ */
+async function routeDmPhotoFlow1Register(
+  inbound: TelegramInboundMessage,
+  parsed: {
+    readonly carrier: PackageCarrier;
+    readonly recipientName: string;
+    readonly recipientHouseNumber: string;
+    readonly trackingNumber?: string;
+  },
+  holder: Resident | null,
+  deps: ProcessUpdateDeps,
+): Promise<Flow2RouteResult> {
+  if (inbound.fromUserId === null) {
+    // Should be unreachable — caller checks this — but the type
+    // narrowing for `sendDirectMessage(inbound.fromUserId, …)` below
+    // demands the guard.
+    return { kind: "handled" };
   }
 
   let registered: RegisterPackageResult;
   emitTrace("flow1", "register.start", {
     recipient: parsed.recipientName,
-    source: "photo",
+    source: "dm-photo",
   });
   try {
     registered = await deps.registerPackage(holder, {
       recipientName: parsed.recipientName,
-      recipientHouseNumber,
+      recipientHouseNumber: parsed.recipientHouseNumber,
       carrier: parsed.carrier,
       trackingNumber: parsed.trackingNumber,
     });
     emitTrace("flow1", "register.end", {
       recipient: parsed.recipientName,
       resolution: registered.recipientResolution.kind,
-      source: "photo",
+      source: "dm-photo",
     });
   } catch (err) {
     const errorCode =
@@ -1332,17 +1265,19 @@ async function routeGroupPhoto(
         await deps.sendDirectMessage(inbound.fromUserId, nudge);
       } catch (dmErr) {
         console.error(
-          "[flow1] holder-not-registered nudge DM (photo) failed for userId",
+          "[flow1] holder-not-registered nudge DM (dm-photo) failed for userId",
           inbound.fromUserId,
           "error:",
           dmErr instanceof Error ? dmErr.message : dmErr,
         );
       }
-      emitTrace("flow1", "reject.holder-not-registered", { source: "photo" });
+      emitTrace("flow1", "reject.holder-not-registered", {
+        source: "dm-photo",
+      });
       return { kind: "handled" };
     }
     console.error(
-      "[register_package] (photo) failed for holder",
+      "[register_package] (dm-photo) failed for holder",
       inbound.fromUserId,
       "recipient",
       parsed.recipientName,
@@ -1351,27 +1286,42 @@ async function routeGroupPhoto(
         ? { name: err.name, message: err.message, stack: err.stack }
         : err,
     );
-    emitTrace("flow1", "register.error", { source: "photo" });
-    return { kind: "silent" };
+    emitTrace("flow1", "register.error", { source: "dm-photo" });
+    // Send the 3-path recovery so the holder has a concrete next step
+    // instead of silent failure.
+    return sendVlc3PathDm(inbound, holder?.language ?? "de", deps);
   }
 
-  if (registered.recipientResolution.kind === "unknown") {
-    // High-conf unknown recipient: post the deterministic group
-    // question. The Package row is already in Redis so the cron
-    // sweep can age it out if nobody claims (#109 acceptance: no
-    // change to the cron schedule).
+  // Compose the recipient DM eagerly — used unconditionally below.
+  const recipientResident =
+    registered.recipientResolution.kind === "resident"
+      ? registered.recipientResolution.resident
+      : null;
+
+  // Group ack: resolve the holder's street → group chat id. Skip the
+  // group ack entirely when we can't resolve it (single-street MVP:
+  // env var missing). The recipient DM still fires.
+  const groupChatId = holder
+    ? deps.streetGroupChatId(holder.street)
+    : null;
+
+  if (registered.recipientResolution.kind === "unknown" && groupChatId !== null) {
+    // High-conf unknown recipient: post the deterministic group question
+    // ("kennt jemand X?") to the holder's street group. Same template
+    // the pre-#128 group photo path used. The Package row already
+    // landed; the cron sweep ages it out if nobody claims.
     const question = buildUnknownRecipientGroupQuestion(
       parsed.recipientName,
-      holder?.language ?? holderLanguage,
+      holder?.language ?? "de",
     );
     try {
       emitTrace("dm", "start", { kind: "flow1-unknown-recipient" });
-      await deps.sendDirectMessage(inbound.chatId, question);
+      await deps.sendDirectMessage(groupChatId, question);
       emitTrace("dm", "end", { kind: "flow1-unknown-recipient" });
     } catch (err) {
       console.error(
-        "[flow1] unknown-recipient group question (photo) failed for chatId",
-        inbound.chatId,
+        "[flow1] unknown-recipient group question (dm-photo) failed for chatId",
+        groupChatId,
         "error:",
         err instanceof Error ? err.message : err,
       );
@@ -1380,55 +1330,46 @@ async function routeGroupPhoto(
     return { kind: "handled" };
   }
 
-  if (registered.recipientResolution.kind !== "resident") {
-    // known_telegram: the recipient has posted in the group but
-    // hasn't /register'd. The Package row landed; we don't have a
-    // DM channel to them yet. Stay silent (deferred — Slice 4 of a
-    // future iteration could text_mention them in the group ack
-    // without leaking the holder's buzzer/floor).
+  if (recipientResident === null) {
+    // unknown without a group chat id, or known_telegram: Package row
+    // is in Redis for the cron sweep to age out. We have no DM channel
+    // to a non-Resident recipient. Stay handled (no agent involvement).
     emitTrace("flow1", "silent", {
       reason: registered.recipientResolution.kind,
-      source: "photo",
+      source: "dm-photo",
     });
-    return { kind: "silent" };
+    return { kind: "handled" };
   }
 
+  // From here: recipient resolves to a registered Resident.
   const recipientDmText = buildRecipientDmText({
     holder: registered.holder,
-    recipient: registered.recipientResolution.resident,
+    recipient: recipientResident,
   });
-  // v2.1 #114: pickup keyboard lives only on the recipient DM now —
-  // the group ack is announce-only. Pickup is private business
-  // between the recipient and the bot.
   const recipientKeyboard = buildPickupKeyboard(registered.package.id);
 
-  // v2.1 #116 (Slice 3 of #113): if this registration LINKS to a Flow 2
-  // ReceptionRequest (the holder is fulfilling a pre-announced "I won't
-  // be home" ask), suppress the group ack — the original Flow 2 group
-  // post is the announcement — and DM the holder a private confirmation
-  // instead. The recipient DM still fires unchanged.
+  // v2.1 #116: if the registration LINKS to a matched Flow 2 RR (the
+  // holder is fulfilling a pre-announced "I won't be home" ask),
+  // suppress the group ack and DM the holder a private confirmation.
   if (registered.receptionRequestFulfilled !== null) {
     await sendFlow1HolderConfirmation({
       deps,
       registered,
       source: "photo",
     });
-  } else {
+  } else if (groupChatId !== null) {
     const groupAckText = buildGroupAckText({
       holder: registered.holder,
-      recipient: registered.recipientResolution.resident,
+      recipient: recipientResident,
     });
-    // Group ack. `sendDirectMessage` is chat-id-agnostic — sending to
-    // `inbound.chatId` posts to the group when the inbound came from a
-    // group. No inline keyboard (v2.1 #114).
     try {
       emitTrace("dm", "start", { kind: "flow1-group-ack" });
-      await deps.sendDirectMessage(inbound.chatId, groupAckText);
+      await deps.sendDirectMessage(groupChatId, groupAckText);
       emitTrace("dm", "end", { kind: "flow1-group-ack" });
     } catch (err) {
       console.error(
-        "[flow1] group ack post (photo) failed for chatId",
-        inbound.chatId,
+        "[flow1] group ack post (dm-photo) failed for chatId",
+        groupChatId,
         "package",
         registered.package.id,
         "error:",
@@ -1436,9 +1377,16 @@ async function routeGroupPhoto(
       );
       emitTrace("dm", "error", { kind: "flow1-group-ack" });
     }
+  } else {
+    // No env-resolved group chat — log so an ops misconfiguration is
+    // visible, but still deliver the recipient DM.
+    console.warn(
+      "[flow1] streetGroupChatId returned null — skipping group ack",
+      { holderHouseNumber: registered.holder.houseNumber },
+    );
   }
 
-  const recipientChatId = Number(registered.recipientResolution.resident.id);
+  const recipientChatId = Number(recipientResident.id);
   if (Number.isFinite(recipientChatId)) {
     try {
       emitTrace("dm", "start", { kind: "flow1-recipient" });
@@ -1451,8 +1399,8 @@ async function routeGroupPhoto(
       emitTrace("dm", "end", { kind: "flow1-recipient" });
     } catch (err) {
       console.error(
-        "[flow1] recipient DM (photo) failed for resident id",
-        registered.recipientResolution.resident.id,
+        "[flow1] recipient DM (dm-photo) failed for resident id",
+        recipientResident.id,
         "package",
         registered.package.id,
         "error:",
@@ -1462,8 +1410,8 @@ async function routeGroupPhoto(
     }
   } else {
     console.error(
-      "[flow1] recipient.id is not a finite number — skipping DM (photo)",
-      { recipientId: registered.recipientResolution.resident.id },
+      "[flow1] recipient.id is not a finite number — skipping DM (dm-photo)",
+      { recipientId: recipientResident.id },
     );
   }
 
@@ -1471,34 +1419,26 @@ async function routeGroupPhoto(
 }
 
 /**
- * v2.1 Slice 3 (#88) + #100: DM photo route into Flow 2 v2.
+ * v2.1 #128: DM photo route — branches on the unified `parse_package_photo`
+ * tool's `kind` discriminator.
  *
- * Same shape as `routeDmTextThroughClassifier` and `routeReceiveCommand`,
- * but with `parse_tracking_page`'s vision output standing in for the
- * classifier's text verdict. The channel-side decision rule:
+ *   - `kind: "shipping_label"` → Flow 1 register (the privacy-correct
+ *     entry surface for photo-based Flow 1 after #128).
+ *   - `kind: "tracking_page"`  → Flow 2 reception request (unchanged
+ *     business outcome from the pre-#128 path; the routing signal is
+ *     now `kind` rather than `absenceSignal === undefined`).
+ *   - `kind: "unknown"`        → 3-path recovery DM (retake label / type
+ *     text / `/receive`).
  *
- *   - `confidence === "high"` AND `absenceSignal` in {`true`, `undefined`}
- *     (the latter = implicit absence — uploading a tracking page in DM
- *     IS itself a Flow 2 trigger per v2 design) AND a registered caller
- *     AND `createReceptionRequest` succeeds → send a deterministic
- *     localised ack DM via `sendDirectMessage` and return
- *     `{ kind: "handled" }` so the orchestrator skips `sendToAsh`.
- *   - Any other outcome (low/medium confidence, explicit
- *     `absenceSignal: false`, vision tool null/throw, getFileUrl throw,
- *     unregistered caller, Redis hiccup on `createReceptionRequest`) →
- *     send a deterministic localised recovery prompt DM directing the
- *     user at `/receive` (Slice 2 / #87) and `/register` if they're
- *     unregistered, and return `{ kind: "handled" }`. The agent never
- *     runs on the DM photo path — closing #100's text-leak surface
- *     structurally.
+ * Failure modes (getFileUrl throw, parse_package_photo throw) → 3-path
+ * recovery DM. The agent NEVER runs on the DM photo surface under any
+ * branch.
  *
- * Privacy invariant: the card-posting decision lives entirely in this
- * function. Even if the agent's reasoning is wrong, no group card lands
- * unless this function deterministically chose to route to Flow 2.
- *
- * Window endpoints from the vision tool are ISO 8601 strings; we convert
- * to Unix ms here before handing to `createReceptionRequest` (whose
- * input takes ms, matching the Slice 1 classifier path).
+ * Privacy invariant: the registration / card-posting decision lives in
+ * the model's `kind` output, not in chat-type heuristics. Pre-#128 the
+ * channel hardcoded DM photo → Flow 2; that misrouted DM labels and
+ * required an `absenceSignal === undefined → Flow 2` heuristic the
+ * channel had to reason about. Both are gone.
  */
 async function routeDmPhoto(
   inbound: TelegramInboundMessage,
@@ -1520,48 +1460,84 @@ async function routeDmPhoto(
         ? { name: err.name, message: err.message, stack: err.stack }
         : err,
     );
-    return sendFlow2VlcDm(inbound, languageHint, deps);
+    return sendVlc3PathDm(inbound, languageHint, deps);
   }
 
-  let parsed: Awaited<ReturnType<ProcessUpdateDeps["parseTrackingPage"]>> = null;
-  emitTrace("vision", "start", { tool: "parse_tracking_page" });
+  let parsed: Awaited<ReturnType<ProcessUpdateDeps["parsePackagePhoto"]>>;
+  emitTrace("vision", "start", { tool: "parse_package_photo" });
   try {
-    parsed = await deps.parseTrackingPage({ imageUrl, caption: captionText });
+    parsed = await deps.parsePackagePhoto({ imageUrl, caption: captionText });
     console.info(
-      "[parse_tracking_page] ok for chatId",
+      "[parse_package_photo] ok for chatId",
       inbound.chatId,
-      "result:",
-      parsed,
+      "kind:",
+      parsed.kind,
+      "confidence:",
+      parsed.confidence,
     );
     emitTrace("vision", "end", {
-      tool: "parse_tracking_page",
-      confidence: parsed?.confidence ?? "null",
+      tool: "parse_package_photo",
+      kind: parsed.kind,
+      confidence: parsed.confidence,
     });
   } catch (err) {
     console.error(
-      "[parse_tracking_page] failed for chatId",
+      "[parse_package_photo] failed for chatId",
       inbound.chatId,
-      "mediaType-via-fetch (sanitised) — error:",
+      "error:",
       err instanceof Error
         ? { name: err.name, message: err.message, stack: err.stack }
         : err,
     );
-    emitTrace("vision", "error", { tool: "parse_tracking_page" });
-    parsed = null;
+    emitTrace("vision", "error", { tool: "parse_package_photo" });
+    return sendVlc3PathDm(inbound, languageHint, deps);
   }
 
-  if (parsed === null) {
-    emitTrace("flow2", "vlc", { reason: "vision-null" });
-    return sendFlow2VlcDm(inbound, languageHint, deps);
+  if (parsed.kind === "unknown") {
+    emitTrace("flow2", "vlc", { reason: "vision-unknown" });
+    return sendVlc3PathDm(inbound, languageHint, deps);
   }
 
-  const isHighConfidenceFlow2 =
-    parsed.confidence === "high" &&
-    (parsed.absenceSignal === true || parsed.absenceSignal === undefined);
+  if (parsed.kind === "tracking_page") {
+    return routeDmPhotoTrackingPage(inbound, parsed, languageHint, deps);
+  }
 
-  if (!isHighConfidenceFlow2 || inbound.fromUserId === null) {
+  // parsed.kind === "shipping_label" — Flow 1 via the privacy-correct
+  // DM surface. Anonymous DMs can't be holders (we'd have no platformId
+  // to write `holderResidentId`); fall through to recovery DM.
+  if (inbound.fromUserId === null) {
+    emitTrace("flow1", "silent", { reason: "anonymous", source: "dm-photo" });
+    return sendVlc3PathDm(inbound, languageHint, deps);
+  }
+  return routeDmPhotoShippingLabel(inbound, parsed, languageHint, deps);
+}
+
+/**
+ * DM photo + `kind: "tracking_page"`: write the Flow 2 `ReceptionRequest`
+ * + send the deterministic ack DM. Branch table:
+ *
+ *   - high-conf + registered caller + createReceptionRequest OK → ack DM
+ *   - low/medium confidence → 3-path recovery DM
+ *   - unregistered caller   → 3-path recovery DM (it includes the
+ *                             /register hint inline)
+ *   - createReceptionRequest throws → 3-path recovery DM
+ */
+async function routeDmPhotoTrackingPage(
+  inbound: TelegramInboundMessage,
+  parsed: {
+    readonly carrier: PackageCarrier;
+    readonly trackingNumber?: string;
+    readonly expectedWindowStartAt?: string;
+    readonly expectedWindowEndAt?: string;
+    readonly confidence: "high" | "medium" | "low";
+    readonly reason: string;
+  },
+  languageHint: string,
+  deps: ProcessUpdateDeps,
+): Promise<Flow2RouteResult> {
+  if (parsed.confidence !== "high" || inbound.fromUserId === null) {
     emitTrace("flow2", "vlc", { reason: "low-confidence" });
-    return sendFlow2VlcDm(inbound, languageHint, deps);
+    return sendVlc3PathDm(inbound, languageHint, deps);
   }
 
   const caller = await deps
@@ -1569,7 +1545,7 @@ async function routeDmPhoto(
     .catch(() => null);
   if (!caller) {
     emitTrace("flow2", "vlc", { reason: "unregistered" });
-    return sendFlow2VlcDm(inbound, languageHint, deps);
+    return sendVlc3PathDm(inbound, languageHint, deps);
   }
 
   const callerLanguage = caller.language ?? languageHint;
@@ -1594,10 +1570,115 @@ async function routeDmPhoto(
         : err,
     );
     emitTrace("flow2", "reject.redis-hiccup", { source: "photo" });
-    return sendFlow2VlcDm(inbound, callerLanguage, deps);
+    return sendVlc3PathDm(inbound, callerLanguage, deps);
   }
 
   return sendFlow2AckDm(inbound, callerLanguage, deps);
+}
+
+/**
+ * DM photo + `kind: "shipping_label"`: register the package via the
+ * shared `routeDmPhotoFlow1Register` helper. Branch table:
+ *
+ *   - high-conf + registered holder + recipient fields present →
+ *     register (helper handles resident / known_telegram / unknown
+ *     resolutions + the holder-not-registered nudge branch).
+ *   - low confidence              → 3-path recovery DM.
+ *   - missing recipientName       → 3-path recovery DM.
+ *   - missing recipientHouseNumber AND missing holder → 3-path recovery
+ *     DM. (When the holder is registered, we fall back to the holder's
+ *     own house number — same heuristic the pre-#128 group-photo path
+ *     used: a shipping label without a visible house number usually
+ *     means the label addresses someone at the holder's building.)
+ *   - medium confidence + non-resident → 3-path recovery DM (don't
+ *     register guesses).
+ */
+async function routeDmPhotoShippingLabel(
+  inbound: TelegramInboundMessage,
+  parsed: {
+    readonly carrier: PackageCarrier;
+    readonly recipientName?: string;
+    readonly recipientHouseNumber?: string;
+    readonly trackingNumber?: string;
+    readonly confidence: "high" | "medium" | "low";
+    readonly reason: string;
+  },
+  languageHint: string,
+  deps: ProcessUpdateDeps,
+): Promise<Flow2RouteResult> {
+  if (inbound.fromUserId === null) {
+    return sendVlc3PathDm(inbound, languageHint, deps);
+  }
+
+  const holder = await deps
+    .getRegisteredResident(inbound.fromUserId)
+    .catch(() => null);
+  const holderLanguage = holder?.language ?? languageHint;
+
+  if (parsed.confidence === "low") {
+    emitTrace("flow1", "fallthrough", { reason: "low-conf", source: "dm-photo" });
+    return sendVlc3PathDm(inbound, holderLanguage, deps);
+  }
+
+  if (!parsed.recipientName) {
+    emitTrace("flow1", "fallthrough", {
+      reason: "missing-recipient",
+      source: "dm-photo",
+    });
+    return sendVlc3PathDm(inbound, holderLanguage, deps);
+  }
+
+  const recipientHouseNumber =
+    parsed.recipientHouseNumber ?? holder?.houseNumber ?? "";
+  if (recipientHouseNumber === "") {
+    emitTrace("flow1", "fallthrough", {
+      reason: "missing-recipient",
+      source: "dm-photo",
+    });
+    return sendVlc3PathDm(inbound, holderLanguage, deps);
+  }
+
+  // Medium-conf: only register when the recipient resolves to a
+  // registered Resident. Otherwise send the recovery DM (don't write a
+  // Package row on a guess).
+  if (parsed.confidence === "medium") {
+    let resolution: RecipientResolution;
+    try {
+      resolution = await deps.resolveRecipient(
+        parsed.recipientName,
+        recipientHouseNumber,
+      );
+    } catch (err) {
+      console.error(
+        "[resolveRecipient] (dm-photo, medium-conf) failed for recipient",
+        parsed.recipientName,
+        "error:",
+        err instanceof Error
+          ? { name: err.name, message: err.message, stack: err.stack }
+          : err,
+      );
+      return sendVlc3PathDm(inbound, holderLanguage, deps);
+    }
+    if (resolution.kind !== "resident") {
+      emitTrace("flow1", "fallthrough", {
+        reason: "low-conf",
+        source: "dm-photo",
+      });
+      return sendVlc3PathDm(inbound, holderLanguage, deps);
+    }
+  }
+
+  return routeDmPhotoFlow1Register(
+    inbound,
+    {
+      carrier: parsed.carrier,
+      recipientName: parsed.recipientName,
+      recipientHouseNumber,
+      trackingNumber: parsed.trackingNumber,
+    },
+    holder,
+    deps,
+  );
 }
 
 /**
@@ -1633,33 +1714,35 @@ async function sendFlow2AckDm(
 }
 
 /**
- * #100: send the deterministic Flow 2 recovery prompt DM ("retry via
- * /receive, or /register first if you haven't"). Same fail-still-handled
- * contract as `sendFlow2AckDm` — we structurally avoid handing the
- * agent the DM photo turn even when the DM send fails, because the agent
- * has nothing useful to add (it'd just say the same thing in worse
- * shape, or fire a welcome wall).
+ * v2.1 #128: send the deterministic 3-path recovery DM (retake label /
+ * type text / `/receive`) and return `{ kind: "handled" }`. Used by the
+ * DM photo route on any branch that can't deterministically register
+ * (kind=unknown, low confidence, missing fields, vision throw, etc.).
+ *
+ * Fail-still-handled contract: a DM send failure is logged but we still
+ * return "handled" because handing the inbound to the agent has nothing
+ * useful to add (it'd produce the same surface in worse shape).
  */
-async function sendFlow2VlcDm(
+async function sendVlc3PathDm(
   inbound: TelegramInboundMessage,
   language: string,
   deps: ProcessUpdateDeps,
 ): Promise<Flow2RouteResult> {
-  const text = buildFlow2VisionLowConfidenceDm(language);
+  const text = buildVlc3PathDm(language);
   try {
-    emitTrace("dm", "start", { kind: "flow2-vlc" });
+    emitTrace("dm", "start", { kind: "vlc-3-path" });
     await deps.sendDirectMessage(inbound.chatId, text);
-    emitTrace("dm", "end", { kind: "flow2-vlc" });
+    emitTrace("dm", "end", { kind: "vlc-3-path" });
   } catch (err) {
     console.error(
-      "[flow-2-dm-vlc] failed for chatId",
+      "[vlc-3-path] failed for chatId",
       inbound.chatId,
       "error:",
       err instanceof Error
         ? { name: err.name, message: err.message, stack: err.stack }
         : err,
     );
-    emitTrace("dm", "error", { kind: "flow2-vlc" });
+    emitTrace("dm", "error", { kind: "vlc-3-path" });
   }
   return { kind: "handled" };
 }
@@ -3129,6 +3212,35 @@ async function handleConfirmPickup(
   await deps.answerCallback(cb.callbackId).catch(() => undefined);
   await deps.stripKeyboard(cb.chatId, cb.messageId).catch(() => undefined);
 
+  // Send the recipient a written confirmation so the DM thread closes
+  // the loop visually. `stripKeyboard` removes the button, but without
+  // a follow-up message the thread reads identically to before the tap
+  // and the only feedback is Telegram's transient `answerCallback`
+  // toast (which we send empty, and which disappears in ~2s). Reuses
+  // the same localised "Hab notiert — danke!" copy as the DM-text
+  // pickup path (`buildDmTextPickupConfirmedText`) — symmetric UX
+  // regardless of whether the recipient tapped the button or typed
+  // "abgeholt".
+  const recipientLanguage = caller.language ?? cb.fromLanguageCode;
+  try {
+    emitTrace("dm", "start", { kind: "flow1-pickup-confirm" });
+    await deps.sendDirectMessage(
+      cb.chatId,
+      buildDmTextPickupConfirmedText(recipientLanguage),
+    );
+    emitTrace("dm", "end", { kind: "flow1-pickup-confirm" });
+  } catch (err) {
+    console.error(
+      "[confirm_pickup] recipient confirmation DM failed for chatId",
+      cb.chatId,
+      "packageId",
+      packageId,
+      "error:",
+      err instanceof Error ? err.message : err,
+    );
+    emitTrace("dm", "error", { kind: "flow1-pickup-confirm" });
+  }
+
   // DM the holder thanks (when we can resolve a chat id for them).
   // The holder's `platformId` equals their Telegram user id, which
   // is also the 1:1 chat id for DMs. Skipped when the holder record
@@ -3498,15 +3610,12 @@ export async function processInboundTelegramUpdate(
     message = result.toAgent;
     trigger = "telegram.photo";
   } else if (inbound.photoFileId !== null) {
-    // v2.1 #107 (Slice 2 of #106): group photo route is now channel-
-    // deterministic. On a high-confidence parse_label + registered
-    // recipient the channel registers the package, posts the group
-    // ack, and DMs the recipient — sendToAsh is NEVER called. Every
-    // other branch (low/medium-conf parse, missing recipient,
-    // unknown/known_telegram resolution, parse_label outage,
-    // getFileUrl failure) stays silent. Slice 3 (#109) will introduce
-    // the [FLOW_1 CLARIFICATION] synthetic for the disambiguation
-    // cases — until then, silent is the correct interim behaviour.
+    // v2.1 #128: group photo route is privacy-nudge only — on
+    // `kind: "shipping_label"` the channel DMs the sender to send labels
+    // in DM next time; on every other kind (tracking_page, unknown) and
+    // on any vision/getFileUrl failure the route stays silent. NO
+    // registration, NO group post. The agent never runs on a group
+    // photo.
     const result = await routeGroupPhoto(inbound, inbound.photoFileId, deps);
     if (result.kind === "handled" || result.kind === "silent") {
       return new Response(null, { status: 204 });

@@ -465,7 +465,7 @@ describe("createEngine — synthetic trace stream", () => {
       kind: "photo",
       stage: "vision",
       phase: "start",
-      extras: { tool: "parse_label" },
+      extras: { tool: "parse_package_photo" },
       ts: 0,
     });
     engine.enqueue({
@@ -473,7 +473,7 @@ describe("createEngine — synthetic trace stream", () => {
       kind: "photo",
       stage: "vision",
       phase: "end",
-      extras: { tool: "parse_label", confidence: "high" },
+      extras: { tool: "parse_package_photo", kind: "shipping_label", confidence: "high" },
       ts: 0,
     });
     engine.enqueue({

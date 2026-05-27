@@ -199,7 +199,7 @@ describe("agent/instructions.md Flow 1 channel-driven contract (v2.1 #109)", () 
     const stanza = extractFlow1Stanza(contents);
     expect(stanza).toMatch(/channel-driven/i);
     expect(stanza).toMatch(/classify_group_message/);
-    expect(stanza).toMatch(/parse_label/);
+    expect(stanza).toMatch(/parse_package_photo/);
     // The agent must NOT decide whether a group message is a package
     // registration.
     expect(stanza).toMatch(/You do \*\*not\*\* decide/i);
