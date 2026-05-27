@@ -19,14 +19,12 @@ describe("makeTriggerAttributeSetter", () => {
 
     setter("telegram.text-dm");
     setter("telegram.group");
-    setter("telegram.photo");
     setter("telegram.slash-receive");
     setter("telegram.callback");
 
     expect(setAttribute.mock.calls).toEqual([
       ["trigger", "telegram.text-dm"],
       ["trigger", "telegram.group"],
-      ["trigger", "telegram.photo"],
       ["trigger", "telegram.slash-receive"],
       ["trigger", "telegram.callback"],
     ]);
@@ -76,13 +74,11 @@ describe("setTelegramTriggerAttribute", () => {
 
     it("forwards every trigger kind under the `trigger` key", () => {
       setTelegramTriggerAttribute("telegram.group");
-      setTelegramTriggerAttribute("telegram.photo");
       setTelegramTriggerAttribute("telegram.slash-receive");
       setTelegramTriggerAttribute("telegram.callback");
 
       expect(setAttribute.mock.calls).toEqual([
         ["trigger", "telegram.group"],
-        ["trigger", "telegram.photo"],
         ["trigger", "telegram.slash-receive"],
         ["trigger", "telegram.callback"],
       ]);

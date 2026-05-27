@@ -38,10 +38,10 @@
  * one if it errors — a different shape of resilience.
  *
  * Wiring: the channel layer invokes this on every inbound photo update
- * (`lib/telegram-channel/process-update.ts::routeDmPhoto` for DM photos,
- * `routeGroupPhoto` for group photos). The agent is never in the photo
- * loop on either surface; per v2.1 #128 the routing decision lives in
- * the channel based on `kind`.
+ * via `buildState` (`buildDmPhotoState` for DM photos, `buildGroupPhotoState`
+ * for group photos). The agent is never in the photo loop on either
+ * surface; per v2.1 #128 the routing decision lives in the channel based
+ * on `kind`.
  *
  * Privacy invariant (the reason #128 exists): a shipping label carries
  * PII (recipient name + house number). The DM photo path is the only

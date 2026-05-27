@@ -11,13 +11,9 @@
  *   - `send.ts`           — `sendMessage` Bot API primitive (token explicit)
  *   - `keyboards.ts`      — inline-keyboard primitives (#24): answerCallbackQuery,
  *                           editMessageReplyMarkup
- *   - `process-update.ts` — full inbound pipeline orchestrator
+ *   - `process-update.ts` — thin shim driving the orchestrator state machine
+ *   - `orchestrator/*`    — buildState → match → runActions engine (ADR 0001)
  *   - `factory.ts`        — `telegramChannel({ token, webhookSecret })`
- *   - `chat-instance.ts`  — Chat SDK singleton + Redis StateAdapter
- *                           (infrastructure for the Chat-SDK-integrated
- *                           variant; the current factory wraps Ash's
- *                           `defineChannel` directly and does not yet
- *                           consume `getTelegramChatInstance`).
  *
  * Spike webhook callers should import `telegramChannel` and collapse
  * to a one-line `export default telegramChannel({ ... })`.
@@ -71,9 +67,3 @@ export {
 } from "./process-update.js";
 
 export { telegramChannel, type TelegramChannelConfig } from "./factory.js";
-
-export {
-  createTelegramStateAdapter,
-  getTelegramChatInstance,
-  type RedisLike,
-} from "./chat-instance.js";

@@ -128,10 +128,14 @@ function parseCallbackData(data: string): ParsedCallbackData {
 
 /**
  * Compose the agent-bound synthetic message for callback actions that
- * still fall through to `sendToAsh`. Inlines the legacy
- * `synthesizeCallbackMessage` from `process-update.ts` (deleted by
- * Slice 4 / #135) so the unknown / decline / remind / stale-accept
- * paths preserve their existing text.
+ * still fall through to `sendToAsh` (decline / remind / unknown).
+ *
+ * `confirm_pickup` + `accept_reception_group` are channel-deterministic
+ * (own callback-pickup-* / callback-accept-* state variants). Slice 7
+ * (#138) deleted the legacy `accept_reception_request` (DM-3 button — the
+ * backing tool was hard-deleted by v2.1 Slice 5 / #90) and the malformed
+ * `accept_reception_group` fallback cases from this switch — those are
+ * cold paths whose stale-keyboard cases hit the generic default arm.
  *
  * Kept in English regardless of the user's language: the agent's
  * system prompt + the user's stored `Resident.language` drive the
@@ -140,21 +144,6 @@ function parseCallbackData(data: string): ParsedCallbackData {
  */
 function synthesizeAgentSynthetic(parsed: ParsedCallbackData): string {
   switch (parsed.action) {
-    case "accept_reception_request":
-      // Legacy DM-3 button callback. The agent tool that used to back
-      // this branch was hard-deleted by v2.1 Slice 5 (#90); the
-      // channel never wires this callback anymore. Apologise briefly
-      // in the tapper's language if it ever arrives via a stale
-      // message.
-      return "[button-tap] An old 'I can help' button was tapped, but the channel-side flow has changed. Apologise briefly in the tapper's language and ask them to wait for the next group card.";
-    case "accept_reception_group":
-      // Defensive: reachable only on a malformed
-      // `accept_reception_group` (parsed.id missing). The
-      // happy/error paths are owned by `buildState`'s
-      // callback-accept-* variants.
-      return parsed.id
-        ? `[button-tap] A volunteer tap on group-card reception request ${parsed.id} arrived without an identifiable tapper. Apologise briefly in the tapper's language and ask them to try again. Do NOT call any tools.`
-        : "[button-tap] I tapped accept-reception-group but no request id was attached — ignore.";
     case "decline_reception_request":
       return parsed.id
         ? `[button-tap] I'm declining the reception request ${parsed.id}. Acknowledge briefly in my language and don't ask follow-up questions.`

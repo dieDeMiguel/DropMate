@@ -187,7 +187,6 @@ function buildDeps(overrides: {
   // value tested in the pickup-DM-text block below.
   const defaultClassification: DmIntentClassificationResult = {
     kind: "other",
-    absenceSignal: false,
     confidence: "low",
     reason: "default test stub: not Flow 2",
   };
@@ -1721,14 +1720,15 @@ describe("processInboundTelegramUpdate — callback_query", () => {
     };
   }
 
-  it("synthesizes an apology message when a stale 'accept_reception_request:req_99' callback arrives (Slice 5 #90 — tool deleted)", async () => {
+  it("hands a stale 'accept_reception_request:req_99' callback to the agent via the generic default synthetic (Slice 7 #138 — backing tool deleted)", async () => {
     // The v2.1 group-card flow uses `accept_reception_group:<id>` — the
     // legacy `accept_reception_request:<id>` callback is no longer wired
     // anywhere, but Telegram can still deliver it from an old keyboard
-    // sitting in a stale chat. With the backing tool deleted, the
-    // synthetic must NOT prompt the agent to re-run a procedure that
-    // would call accept_reception_request; it should produce a soft
-    // apology instead.
+    // sitting in a stale chat. Slice 7 removed the dedicated stale-case
+    // synthetic; the generic default arm still labels the inbound as a
+    // button-tap and the agent's tool registry no longer exposes
+    // `accept_reception_request`, so there's no way to misroute back into
+    // the deleted procedure structurally.
     const { deps, sendToAsh } = buildDeps();
     await processInboundTelegramUpdate(
       makeRequest(
@@ -1742,8 +1742,8 @@ describe("processInboundTelegramUpdate — callback_query", () => {
       deps,
     );
     const [text] = sendToAsh.mock.calls[0]!;
-    expect(text).toMatch(/old 'I can help' button/i);
-    expect(text).not.toContain("accept_reception_request");
+    expect(text).toMatch(/\[button-tap\]/);
+    expect(text).toMatch(/req_99/);
   });
 
   it("synthesizes a decline message that tells the agent to acknowledge briefly", async () => {
@@ -3376,7 +3376,6 @@ describe("processInboundTelegramUpdate — DM text → classify_dm_intent (v2.1 
     const { deps, sendToAsh, createReceptionRequest } = buildDeps({
       classification: {
         kind: "other",
-        absenceSignal: false,
         confidence: "low",
         reason: "chit-chat",
       },
@@ -3396,7 +3395,6 @@ describe("processInboundTelegramUpdate — DM text → classify_dm_intent (v2.1 
     const { deps, sendToAsh, createReceptionRequest } = buildDeps({
       classification: {
         kind: "flow2-reception",
-        absenceSignal: true,
         confidence: "medium",
         reason: "absence but no supporting field",
       },
@@ -3425,7 +3423,6 @@ describe("processInboundTelegramUpdate — DM text → classify_dm_intent (v2.1 
     } = buildDeps({
       classification: {
         kind: "flow2-reception",
-        absenceSignal: true,
         carrier: "DHL",
         expectedDate: "2026-05-22",
         expectedWindowStartAt: 1747915200000,
@@ -3475,7 +3472,6 @@ describe("processInboundTelegramUpdate — DM text → classify_dm_intent (v2.1 
     const { deps, sendToAsh, sendDirectMessage } = buildDeps({
       classification: {
         kind: "flow2-reception",
-        absenceSignal: true,
         carrier: "DHL",
         confidence: "high",
         reason: "absence + carrier",
@@ -3509,7 +3505,6 @@ describe("processInboundTelegramUpdate — DM text → classify_dm_intent (v2.1 
     const { deps, sendToAsh, sendDirectMessage } = buildDeps({
       classification: {
         kind: "flow2-reception",
-        absenceSignal: true,
         carrier: "Hermes",
         confidence: "high",
         reason: "absence + Hermes",
@@ -3539,7 +3534,6 @@ describe("processInboundTelegramUpdate — DM text → classify_dm_intent (v2.1 
     const { deps, sendToAsh, createReceptionRequest } = buildDeps({
       classification: {
         kind: "flow2-reception",
-        absenceSignal: true,
         carrier: "DHL",
         confidence: "high",
         reason: "absence + DHL",
@@ -3585,7 +3579,6 @@ describe("processInboundTelegramUpdate — DM text → classify_dm_intent (v2.1 
     const { deps, sendToAsh, createReceptionRequest } = buildDeps({
       classification: {
         kind: "flow2-reception",
-        absenceSignal: true,
         carrier: "DHL",
         confidence: "high",
         reason: "absence + DHL",
@@ -3688,7 +3681,6 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
     } = buildDeps({
       classification: {
         kind: "pickup-confirmation",
-        absenceSignal: false,
         confidence: "high",
         reason: "explicit pickup phrasing",
       },
@@ -3731,7 +3723,6 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
     const { deps, sendDirectMessage } = buildDeps({
       classification: {
         kind: "pickup-confirmation",
-        absenceSignal: false,
         confidence: "high",
         reason: "explicit pickup phrasing",
       },
@@ -3759,7 +3750,6 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
     const { deps, sendToAsh, sendDirectMessage, confirmPickup } = buildDeps({
       classification: {
         kind: "pickup-confirmation",
-        absenceSignal: false,
         confidence: "high",
         reason: "explicit pickup phrasing",
       },
@@ -3838,7 +3828,6 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
       } = buildDeps({
         classification: {
           kind: "pickup-confirmation",
-          absenceSignal: false,
           confidence: "high",
           reason: "explicit pickup phrasing",
         },
@@ -3878,7 +3867,6 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
       const { deps, sendDirectMessage } = buildDeps({
         classification: {
           kind: "pickup-confirmation",
-          absenceSignal: false,
           confidence: "high",
           reason: "explicit pickup phrasing",
         },
@@ -3923,7 +3911,6 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
       const { deps, sendDirectMessage, getResidentByPlatformId } = buildDeps({
         classification: {
           kind: "pickup-confirmation",
-          absenceSignal: false,
           confidence: "high",
           reason: "explicit pickup phrasing",
         },
@@ -3957,7 +3944,6 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
       const { deps, sendDirectMessage } = buildDeps({
         classification: {
           kind: "pickup-confirmation",
-          absenceSignal: false,
           confidence: "high",
           reason: "explicit pickup phrasing",
         },
@@ -3989,7 +3975,6 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
       const { deps, sendDirectMessage, confirmPickup, sendToAsh } = buildDeps({
         classification: {
           kind: "pickup-confirmation",
-          absenceSignal: false,
           confidence: "high",
           reason: "explicit pickup phrasing",
         },
@@ -4028,7 +4013,6 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
       const { deps, sendDirectMessage, getResidentByPlatformId } = buildDeps({
         classification: {
           kind: "pickup-confirmation",
-          absenceSignal: false,
           confidence: "high",
           reason: "explicit pickup phrasing",
         },
@@ -4062,7 +4046,6 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
       const { deps, sendDirectMessage, sendToAsh, confirmPickup } = buildDeps({
         classification: {
           kind: "pickup-confirmation",
-          absenceSignal: false,
           confidence: "high",
           reason: "explicit pickup phrasing",
         },
@@ -4101,7 +4084,6 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
       } = buildDeps({
         classification: {
           kind: "pickup-confirmation",
-          absenceSignal: false,
           confidence: "high",
           reason: "explicit pickup phrasing",
         },
@@ -4145,7 +4127,6 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
       } = buildDeps({
         classification: {
           kind: "pickup-confirmation",
-          absenceSignal: false,
           confidence: "high",
           reason: "explicit pickup phrasing",
         },
@@ -4176,7 +4157,6 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
     const { deps, sendToAsh, sendDirectMessage, confirmPickup } = buildDeps({
       classification: {
         kind: "pickup-confirmation",
-        absenceSignal: false,
         confidence: "high",
         reason: "explicit pickup phrasing",
       },
@@ -4216,7 +4196,6 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
     const { deps, sendToAsh, sendDirectMessage } = buildDeps({
       classification: {
         kind: "pickup-confirmation",
-        absenceSignal: false,
         confidence: "high",
         reason: "explicit pickup phrasing",
       },
@@ -4249,7 +4228,6 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
     const { deps, sendToAsh, sendDirectMessage } = buildDeps({
       classification: {
         kind: "pickup-confirmation",
-        absenceSignal: false,
         confidence: "high",
         reason: "explicit pickup phrasing",
       },
@@ -4282,7 +4260,6 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
     const { deps, sendToAsh, sendDirectMessage, confirmPickup } = buildDeps({
       classification: {
         kind: "pickup-confirmation",
-        absenceSignal: false,
         confidence: "high",
         reason: "explicit pickup phrasing",
       },
@@ -4320,7 +4297,6 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
     } = buildDeps({
       classification: {
         kind: "pickup-confirmation",
-        absenceSignal: false,
         confidence: "high",
         reason: "explicit pickup phrasing",
       },
@@ -4363,7 +4339,6 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
     } = buildDeps({
       classification: {
         kind: "pickup-confirmation",
-        absenceSignal: false,
         confidence: "medium",
         reason: "fuzzy closing language",
       },
@@ -4396,7 +4371,6 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
     const { deps, confirmPickup, listOpenPackagesForRecipient } = buildDeps({
       classification: {
         kind: "registration",
-        absenceSignal: false,
         confidence: "high",
         reason: "/register prefix",
       },
@@ -4430,7 +4404,6 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
     } = buildDeps({
       classification: {
         kind: "flow2-reception",
-        absenceSignal: true,
         carrier: "DHL",
         confidence: "high",
         reason: "absence + DHL",
@@ -4557,7 +4530,6 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
     } = buildDeps({
       classification: {
         kind: "flow2-volunteer-early-arrival",
-        absenceSignal: false,
         carrier: "DHL",
         confidence: "high",
         reason: "early-arrival + possession",
@@ -4628,7 +4600,6 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
     const { deps, sendDirectMessage } = buildDeps({
       classification: {
         kind: "flow2-volunteer-early-arrival",
-        absenceSignal: false,
         confidence: "high",
         reason: "possession",
       },
@@ -4684,7 +4655,6 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
     } = buildDeps({
       classification: {
         kind: "flow2-volunteer-early-arrival",
-        absenceSignal: false,
         confidence: "high",
         reason: "possession",
       },
@@ -4721,7 +4691,6 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
     } = buildDeps({
       classification: {
         kind: "flow2-volunteer-early-arrival",
-        absenceSignal: false,
         confidence: "high",
         reason: "possession",
       },
@@ -4764,7 +4733,6 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
     } = buildDeps({
       classification: {
         kind: "flow2-volunteer-early-arrival",
-        absenceSignal: false,
         confidence: "high",
         reason: "possession",
       },
@@ -4807,7 +4775,6 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
     } = buildDeps({
       classification: {
         kind: "flow2-volunteer-early-arrival",
-        absenceSignal: false,
         confidence: "medium",
         reason: "fuzzy possession",
       },
@@ -4841,7 +4808,6 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
     const { deps, sendToAsh, sendDirectMessage, registerPackage } = buildDeps({
       classification: {
         kind: "flow2-volunteer-early-arrival",
-        absenceSignal: false,
         confidence: "high",
         reason: "possession",
       },
@@ -4876,7 +4842,6 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
     } = buildDeps({
       classification: {
         kind: "flow2-volunteer-early-arrival",
-        absenceSignal: false,
         confidence: "high",
         reason: "possession",
       },
@@ -4914,7 +4879,6 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
     const { deps, registerPackage } = buildDeps({
       classification: {
         kind: "flow2-volunteer-early-arrival",
-        absenceSignal: false,
         carrier: "Hermes",
         confidence: "high",
         reason: "possession + Hermes carrier",
@@ -4950,7 +4914,6 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
     const { deps, registerPackage } = buildDeps({
       classification: {
         kind: "flow2-volunteer-early-arrival",
-        absenceSignal: false,
         confidence: "high",
         reason: "possession",
       },
@@ -4989,7 +4952,6 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
     const { deps, registerPackage, sendToAsh } = buildDeps({
       classification: {
         kind: "flow2-volunteer-early-arrival",
-        absenceSignal: false,
         confidence: "high",
         reason: "possession",
       },
@@ -5037,7 +4999,6 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
     } = buildDeps({
       classification: {
         kind: "flow2-volunteer-early-arrival",
-        absenceSignal: false,
         confidence: "high",
         reason: "possession",
       },
