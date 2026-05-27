@@ -56,16 +56,6 @@ describe("match", () => {
       sliceRef: "Slice 3 (#134)",
     },
     {
-      label: "callback-pickup",
-      state: { kind: "callback-pickup", inbound: { callbackId: "cb_1", chatId: 2, messageId: 10, fromUserId: 1, fromLanguageCode: null, fromFirstName: null, fromLastName: null, fromUsername: null, isGroup: false, data: "confirm_pickup:pkg_1" }, resident, packageId: "pkg_1" },
-      sliceRef: "Slice 4 (#135)",
-    },
-    {
-      label: "callback-accept",
-      state: { kind: "callback-accept", inbound: { callbackId: "cb_2", chatId: 2, messageId: 11, fromUserId: 1, fromLanguageCode: null, fromFirstName: null, fromLastName: null, fromUsername: null, isGroup: true, data: "accept_reception_group:rr_1" }, resident, requestId: "rr_1" },
-      sliceRef: "Slice 4 (#135)",
-    },
-    {
       label: "dm-photo",
       state: { kind: "dm-photo", inbound: { chatId: 3, text: "", isGroup: false, fromUserId: 1, fromLanguageCode: null, fromFirstName: null, fromLastName: null, fromUsername: null, photoFileId: "file_1" }, resident, vision: { kind: "unknown", confidence: "low", reason: "test" } },
       sliceRef: "Slice 5 (#136)",
@@ -99,8 +89,11 @@ describe("match", () => {
     });
   }
 
-  it("covers all 8 state variants (exhaustiveness regression)", () => {
-    expect(states).toHaveLength(8);
+  it("covers all 6 unmigrated state variants (exhaustiveness regression)", () => {
+    // Slice 4 (#135) migrated callback-pickup and callback-accept families
+    // (success + 4 error variants each + callback-agent) so they were
+    // removed from this list. Slices 3, 5, 6 still have unmigrated kinds.
+    expect(states).toHaveLength(6);
   });
 
   it("throws on unknown state kind (never branch)", () => {
@@ -135,20 +128,30 @@ describe("runActions", () => {
       ]);
     });
 
-    it("emits error trace and rethrows on failure", async () => {
+    it("emits error trace and swallows the error so the rest of the action list keeps running", async () => {
+      // Communication side effects (DM/card/ack/strip) follow the
+      // legacy dispatcher tolerance contract — a failed DM never
+      // bails a multi-DM flow. The runner emits `<stage>.error` and
+      // continues; the next action still runs.
       const err = new Error("Bot API down");
       const deps = makeDeps({ sendDirectMessage: vi.fn().mockRejectedValue(err) });
       const events: Array<{ stage: string; phase: string }> = [];
       const unsub = subscribe((e) => events.push({ stage: e.stage, phase: e.phase }));
 
       await runWithTrace({ traceId: "t1", kind: "text" }, () =>
-        expect(
-          runActions([Action.sendDirectMessage(42, "hello", { traceStage: "dm" })], deps),
-        ).rejects.toThrow("Bot API down"),
+        runActions(
+          [
+            Action.sendDirectMessage(42, "hello", { traceStage: "dm" }),
+            // The follow-up emit-trace must still fire — tolerance proof.
+            Action.emitTrace("after", "ran"),
+          ],
+          deps,
+        ),
       );
 
       unsub();
       expect(events.map((e) => e.phase)).toContain("error");
+      expect(events.some((e) => e.stage === "after" && e.phase === "ran")).toBe(true);
     });
   });
 
@@ -269,10 +272,13 @@ describe("runActions", () => {
       expect(deps.answerCallback).toHaveBeenCalledWith("cb_1", "toast");
     });
 
-    it("calls answerCallback without text", async () => {
+    it("calls answerCallback without text — single-arg form", async () => {
+      // Matches the legacy `deps.answerCallback(cb.callbackId)` call
+      // sites — preserves single-arg `toHaveBeenCalledWith("cb_id")`
+      // assertions in callback-handler tests.
       const deps = makeDeps();
       await runActions([Action.answerCallback("cb_1")], deps);
-      expect(deps.answerCallback).toHaveBeenCalledWith("cb_1", undefined);
+      expect(deps.answerCallback).toHaveBeenCalledWith("cb_1");
     });
   });
 

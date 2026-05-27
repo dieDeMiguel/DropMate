@@ -1,5 +1,7 @@
 import type { PackageCarrier } from "../../redis.js";
 import type { Resident } from "../../redis.js";
+import type { ConfirmPickupResult } from "../../pickup.js";
+import type { AcceptReceptionRequestResult } from "../../reception-request.js";
 import type {
   TelegramInboundCallback,
   TelegramInboundMessage,
@@ -78,6 +80,15 @@ export interface GroupClassifierVerdict {
  * Nonsensical field access (e.g. `state.classifier` inside `dm-photo`)
  * is a TypeScript error. Adding a new inbound shape without a
  * corresponding `match` branch fails `tsc` via the `never`-typed default.
+ *
+ * Callback variants (#135 Slice 4): `buildState` pre-calls the
+ * lib-level side effect (`confirmPickup` / `acceptReceptionRequest`) and
+ * encodes the outcome as a state variant. This keeps `match` purely
+ * synchronous + lets it dispatch on the success/error class. The
+ * action-outcome traces (`flow1.pickup.start/end/error`,
+ * `flow2.accept.start/end/error`) fire from `buildState` next to the
+ * call rather than via the runner's auto-trace — same stage names,
+ * same shape on the bus.
  */
 export type State =
   | {
@@ -101,17 +112,92 @@ export type State =
       readonly kind: "dm-registration";
       readonly inbound: TelegramInboundMessage;
     }
+  // Callback `confirm_pickup:<packageId>` success — `buildState` resolved
+  // the caller and confirmPickup flipped the package status. `result`
+  // carries the holder + recipient summaries needed for the holder
+  // thanks DM.
   | {
       readonly kind: "callback-pickup";
       readonly inbound: TelegramInboundCallback;
-      readonly resident: Resident;
-      readonly packageId: string;
+      readonly caller: Resident;
+      readonly result: ConfirmPickupResult;
     }
+  // Callback `confirm_pickup` rejected because the caller isn't the
+  // recipient of the package (lib threw `PICKUP_NOT_RECIPIENT`). Same
+  // toast applies when the caller is unregistered (an unregistered
+  // user is by definition not the recipient).
+  | {
+      readonly kind: "callback-pickup-not-recipient";
+      readonly inbound: TelegramInboundCallback;
+      readonly caller: Resident;
+    }
+  // Callback `confirm_pickup` rejected because the package is already
+  // in `picked_up` status (lib threw `PICKUP_ALREADY_DONE`).
+  | {
+      readonly kind: "callback-pickup-already-done";
+      readonly inbound: TelegramInboundCallback;
+      readonly caller: Resident;
+    }
+  // Callback `confirm_pickup` failed with a generic (recoverable) error
+  // — Redis hiccup, Bot API outage, etc.
+  | {
+      readonly kind: "callback-pickup-error";
+      readonly inbound: TelegramInboundCallback;
+      readonly caller: Resident;
+    }
+  // Callback `confirm_pickup` from an unregistered or anonymous tapper.
+  // Treated as not-recipient (same toast) per v2.1 #108.
+  | {
+      readonly kind: "callback-pickup-unregistered";
+      readonly inbound: TelegramInboundCallback;
+    }
+  // Callback `accept_reception_group:<requestId>` success — the lib
+  // flipped the request to `matched`. `result` carries the requester +
+  // volunteer summaries and the group-card location.
   | {
       readonly kind: "callback-accept";
       readonly inbound: TelegramInboundCallback;
-      readonly resident: Resident;
-      readonly requestId: string;
+      readonly volunteer: Resident;
+      readonly result: AcceptReceptionRequestResult;
+    }
+  // `accept_reception_request` rejected because the volunteer is the
+  // request's own requester (lib threw `ACCEPT_RECEPTION_SELF_NOT_ALLOWED`).
+  // Dedicated toast, keyboard stays live (#101 — another neighbour can still claim).
+  | {
+      readonly kind: "callback-accept-self";
+      readonly inbound: TelegramInboundCallback;
+      readonly volunteer: Resident;
+    }
+  // `accept_reception_request` rejected because the volunteer is on a
+  // different street (lib threw `ACCEPT_DIFFERENT_STREET`). Dedicated
+  // toast + keyboard stripped (#96 Part B — permanent rejection).
+  | {
+      readonly kind: "callback-accept-cross-street";
+      readonly inbound: TelegramInboundCallback;
+      readonly volunteer: Resident;
+    }
+  // `accept_reception_request` failed with a generic (recoverable) error.
+  // Generic retry toast; keyboard stays live so the volunteer can re-tap.
+  | {
+      readonly kind: "callback-accept-error";
+      readonly inbound: TelegramInboundCallback;
+      readonly volunteer: Resident;
+    }
+  // `accept_reception_group` tap from an unregistered tapper (the
+  // `isRegisteredResident` gate failed). German /register nudge toast;
+  // keyboard stays live so the tapper can register and retry.
+  | {
+      readonly kind: "callback-accept-unregistered";
+      readonly inbound: TelegramInboundCallback;
+    }
+  // Any callback action that still falls through to the agent (legacy
+  // `accept_reception_request`, `decline_reception_request`,
+  // `remind_later`, unknown actions, malformed accept_reception_group).
+  // `synthetic` is the engineered user-message handed to `sendToAsh`.
+  | {
+      readonly kind: "callback-agent";
+      readonly inbound: TelegramInboundCallback;
+      readonly synthetic: string;
     }
   | {
       readonly kind: "group-photo";
