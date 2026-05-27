@@ -5608,6 +5608,94 @@ describe("processInboundTelegramUpdate — registration (v2.1 #97 — channel-de
     expect(sendDirectMessage).not.toHaveBeenCalled();
   });
 
+  it("logs chatId + fromUserId + error when runActions throws on registerResident failure (#146)", async () => {
+    // The orchestrator catch splits two failure modes: `buildState` throws
+    // on non-registration DMs (silent fallthrough, no log), while
+    // `runActions` throwing because `registerResident` rejected is a real
+    // failure that needs a diagnostic — matches the deleted
+    // `handleRegistrationDm` logger shape. Without this assertion the
+    // catch could silently swallow Redis hiccups again.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { deps, registerResident, sendToAsh } = buildDeps();
+      const libError = new Error("redis down");
+      registerResident.mockRejectedValueOnce(libError);
+
+      const res = await processInboundTelegramUpdate(
+        makeRequest(
+          dmUpdate({
+            chatId: 99,
+            text: "/register Diego de Miguel Lutterothstrasse 69 Erdgeschoss",
+            fromUserId: 42,
+            languageCode: "de",
+          }),
+        ),
+        deps,
+      );
+
+      // Fallthrough: agent took over the turn.
+      expect(res.status).toBe(204);
+      expect(sendToAsh).toHaveBeenCalledTimes(1);
+
+      // The diagnostic log must include chatId, fromUserId, and the
+      // underlying error so on-call can identify the failing inbound.
+      const matching = errorSpy.mock.calls.filter((args) =>
+        args.some(
+          (a) =>
+            typeof a === "string" &&
+            a.includes("registration runActions failed"),
+        ),
+      );
+      expect(matching).toHaveLength(1);
+      const args = matching[0]!;
+      expect(args).toContain(99);
+      expect(args).toContain(42);
+      const errorArg = args.find(
+        (a): a is { name: string; message: string; stack?: string } =>
+          typeof a === "object" &&
+          a !== null &&
+          "name" in (a as Record<string, unknown>) &&
+          "message" in (a as Record<string, unknown>),
+      );
+      expect(errorArg?.message).toBe("redis down");
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("does NOT log when buildState throws (expected fallthrough for non-registration DM)", async () => {
+    // The split-catch behaviour: a non-registration DM is the expected
+    // signal for `buildState` to throw (Slices 4–5 not yet migrated).
+    // No log must fire — the legacy dispatcher handles the inbound.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { deps } = buildDeps();
+
+      await processInboundTelegramUpdate(
+        makeRequest(
+          dmUpdate({
+            chatId: 99,
+            text: "Wo ist mein Paket?",
+            fromUserId: 42,
+            languageCode: "de",
+          }),
+        ),
+        deps,
+      );
+
+      const matching = errorSpy.mock.calls.filter((args) =>
+        args.some(
+          (a) =>
+            typeof a === "string" &&
+            a.includes("registration runActions failed"),
+        ),
+      );
+      expect(matching).toHaveLength(0);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
   it("group `/register` does NOT fire the channel-deterministic registration path", async () => {
     // v2.1 #106 Slice 1: post-#106 a group `/register` goes through
     // the Flow 1 classifier (default mock verdict: not a package

@@ -7,6 +7,7 @@ import type {
   CreateReceptionRequestResult,
 } from "../../reception-request.js";
 import type { RegisterPackageInput, RegisterPackageResult } from "../../package.js";
+import { buildRegistrationConfirmationDm } from "../../registration.js";
 import type { RegisterResidentInput, RegisterResidentResult } from "../../registration.js";
 import type { ConfirmPickupResult } from "../../pickup.js";
 import type { Resident } from "../../redis.js";
@@ -15,7 +16,7 @@ import type {
   TelegramChannelState,
   TelegramSessionAuth,
   TelegramTriggerKind,
-} from "../process-update.js";
+} from "../types.js";
 import type { InlineKeyboardMarkup, TelegramMessageEntity } from "../send.js";
 import type { Action } from "./action.js";
 
@@ -118,21 +119,6 @@ async function executeOne(action: Action, deps: RunActionsDeps): Promise<void> {
       emitTrace(action.traceStage, "start", action.traceExtras);
       try {
         await deps.registerPackage(action.holder, action.input);
-        emitTrace(action.traceStage, "end", action.traceExtras);
-      } catch (err) {
-        emitTrace(action.traceStage, "error", {
-          ...action.traceExtras,
-          error: String(err),
-        });
-        throw err;
-      }
-      return;
-    }
-
-    case "register-resident": {
-      emitTrace(action.traceStage, "start", action.traceExtras);
-      try {
-        await deps.registerResident(action.input);
         emitTrace(action.traceStage, "end", action.traceExtras);
       } catch (err) {
         emitTrace(action.traceStage, "error", {
@@ -259,6 +245,37 @@ async function executeOne(action: Action, deps: RunActionsDeps): Promise<void> {
     case "log-error":
       console.error("[orchestrator]", action.message, action.meta ?? "");
       return;
+
+    case "register-and-confirm-resident": {
+      emitTrace("registration", "start");
+      let result: RegisterResidentResult;
+      try {
+        result = await deps.registerResident(action.input);
+      } catch (err) {
+        // Don't emit registration.end — matches legacy behavior where it only
+        // fires on success. Rethrow so the caller can fall through to the agent.
+        throw err;
+      }
+      const confirmation = buildRegistrationConfirmationDm({
+        resident: result.resident,
+        fallbackLanguageCode: action.fallbackLanguageCode,
+      });
+      emitTrace("dm", "start");
+      try {
+        await deps.sendDirectMessage(action.chatId, confirmation);
+        emitTrace("dm", "end");
+      } catch (err) {
+        // Resident row already landed; DM failure is non-fatal. Log and continue.
+        console.error(
+          "[registration] confirmation DM failed for chatId",
+          action.chatId,
+          "error:",
+          err instanceof Error ? err.message : err,
+        );
+      }
+      emitTrace("registration", "end");
+      return;
+    }
 
     case "parallel":
       await Promise.all(action.actions.map((a) => executeOne(a, deps)));
