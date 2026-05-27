@@ -12,7 +12,8 @@
     "typecheck": "tsgo",
     "test": "vitest run --passWithNoTests",
     "prepare": "husky",
-    "seed-diagram": "./scripts/seed-diagram.sh"
+    "seed-diagram": "./scripts/seed-diagram.sh",
+    "sandcastle": "tsx .sandcastle/main.ts"
   },
   "dependencies": {
     "@chat-adapter/telegram": "^4.28.1",
@@ -25,9 +26,11 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@ai-hero/sandcastle": "^0.4.7",
     "@types/node": "^24.0.0",
     "@typescript/native-preview": "7.0.0-dev.20260331.1",
     "husky": "^9.1.7",
+    "tsx": "^4.19.4",
     "vitest": "^3.0.0"
   },
   "packageManager": "pnpm@10.33.0+sha512.10568bb4a6afb58c9eb3630da90cc9516417abebd3fabbe6739f0ae795728da1491e9db5a544c76ad8eb7570f5c4bb3d6c637b2cb41bfdcdb47fa823c8649319"
