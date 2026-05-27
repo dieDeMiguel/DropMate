@@ -88,18 +88,7 @@ function makeDeps(overrides: Partial<RunActionsDeps> = {}): RunActionsDeps {
 // ---------------------------------------------------------------------------
 
 describe("match", () => {
-  const states: Array<{ label: string; state: State; sliceRef: string }> = [
-    {
-      label: "group-photo",
-      state: { kind: "group-photo", inbound: { chatId: 6, text: "", isGroup: true, fromUserId: 1, fromLanguageCode: null, fromFirstName: null, fromLastName: null, fromUsername: null, photoFileId: "file_2" }, resident: null, vision: { kind: "unknown", confidence: "low", reason: "test" } },
-      sliceRef: "Slice 6 (#137)",
-    },
-    {
-      label: "group-text",
-      state: { kind: "group-text", inbound: { chatId: 7, text: "paket", isGroup: true, fromUserId: 1, fromLanguageCode: null, fromFirstName: null, fromLastName: null, fromUsername: null, photoFileId: null }, resident: null, classifier: { isPackageRegistration: false, recipients: [], confidence: "low", reason: "test" } },
-      sliceRef: "Slice 6 (#137)",
-    },
-  ];
+  const states: Array<{ label: string; state: State; sliceRef: string }> = [];
 
   for (const { label, state, sliceRef } of states) {
     it(`throws "not yet migrated" for ${label}`, () => {
@@ -108,11 +97,11 @@ describe("match", () => {
     });
   }
 
-  it("covers all 2 unmigrated state variants (exhaustiveness regression)", () => {
-    // Slices 3 (#134), 4 (#135), 5 (#136) migrated dm-registration +
-    // callback-* + dm-photo/dm-text/dm-receive-cmd; only Slice 6 (#137)
-    // still has unmigrated kinds: group-photo, group-text.
-    expect(states).toHaveLength(2);
+  it("covers all 0 unmigrated state variants (exhaustiveness regression)", () => {
+    // Slices 3 (#134), 4 (#135), 5 (#136), 6 (#137) migrated every
+    // dispatch arm. Only Slice 7 (#138) — legacy dispatcher deletion —
+    // remains.
+    expect(states).toHaveLength(0);
   });
 
   it("throws on unknown state kind (never branch)", () => {
@@ -725,6 +714,358 @@ describe("runActions", () => {
 
       expect(order).toEqual(["dm:1", "callback", "dm:2"]);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// match — group-silent / group-photo-nudge / group-text-* (Slice 6 / #137)
+// ---------------------------------------------------------------------------
+
+function makeGroupInbound(overrides: {
+  text?: string;
+  fromUserId?: number | null;
+  fromLanguageCode?: string | null;
+  chatId?: number;
+  photoFileId?: string | null;
+}) {
+  return {
+    chatId: overrides.chatId ?? -100,
+    text: overrides.text ?? "",
+    isGroup: true,
+    fromUserId: overrides.fromUserId === undefined ? 555 : overrides.fromUserId,
+    fromLanguageCode: overrides.fromLanguageCode === undefined ? "de" : overrides.fromLanguageCode,
+    fromFirstName: "Holder",
+    fromLastName: null,
+    fromUsername: null,
+    photoFileId: overrides.photoFileId ?? null,
+  };
+}
+
+describe("match — group-silent", () => {
+  it("returns an empty action list", () => {
+    const state: State = {
+      kind: "group-silent",
+      inbound: makeGroupInbound({ text: "Wer hat Lust auf Pizza?" }),
+    };
+    const { actions } = match(state);
+    expect(actions).toEqual([]);
+  });
+});
+
+describe("match — group-photo-nudge", () => {
+  it("emits a single send-direct-message to the sender with the privacy nudge (de)", () => {
+    const state: State = {
+      kind: "group-photo-nudge",
+      inbound: makeGroupInbound({ photoFileId: "f1", fromLanguageCode: "de" }),
+      senderUserId: 555,
+      senderLanguageCode: "de",
+    };
+    const { actions } = match(state);
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({
+      kind: "send-direct-message",
+      chatId: 555,
+      traceStage: "dm",
+    });
+    const text = (actions[0] as Extract<Action, { kind: "send-direct-message" }>).text;
+    expect(text).toMatch(/Etikett/i);
+    expect(text).toMatch(/DM/);
+  });
+
+  it("uses the sender's language for the nudge (en)", () => {
+    const state: State = {
+      kind: "group-photo-nudge",
+      inbound: makeGroupInbound({ fromLanguageCode: "en" }),
+      senderUserId: 777,
+      senderLanguageCode: "en",
+    };
+    const { actions } = match(state);
+    const text = (actions[0] as Extract<Action, { kind: "send-direct-message" }>).text;
+    expect(text).toMatch(/label/i);
+    expect(text).toMatch(/DM/);
+  });
+
+  it("falls back to German when senderLanguageCode is null", () => {
+    const state: State = {
+      kind: "group-photo-nudge",
+      inbound: makeGroupInbound({ fromLanguageCode: null }),
+      senderUserId: 999,
+      senderLanguageCode: null,
+    };
+    const { actions } = match(state);
+    const text = (actions[0] as Extract<Action, { kind: "send-direct-message" }>).text;
+    expect(text).toMatch(/Etikett/i);
+  });
+});
+
+describe("match — group-text-clarification", () => {
+  it("emits setTriggerAttribute + agent.start trace + sendToAsh with the synthetic", () => {
+    const state: State = {
+      kind: "group-text-clarification",
+      inbound: makeGroupInbound({ text: "Paket für jemand", fromUserId: 999 }),
+      synthetic: "[FLOW_1 CLARIFICATION reason=low-conf]",
+    };
+    const { actions } = match(state);
+    expect(actions).toHaveLength(3);
+    expect(actions[0]).toMatchObject({
+      kind: "set-trigger-attribute",
+      trigger: "telegram.group",
+    });
+    expect(actions[1]).toMatchObject({
+      kind: "emit-trace",
+      stage: "agent",
+      phase: "start",
+    });
+    expect(actions[2]).toMatchObject({
+      kind: "send-to-ash",
+      message: "[FLOW_1 CLARIFICATION reason=low-conf]",
+      continuationToken: "tg:-100",
+    });
+    const sendToAsh = actions[2] as Extract<Action, { kind: "send-to-ash" }>;
+    expect(sendToAsh.auth).toMatchObject({
+      principalId: "999",
+      principalType: "user",
+      authenticator: "telegram",
+    });
+    expect(sendToAsh.state.isGroup).toBe(true);
+  });
+
+  it("emits null auth when the inbound is anonymous (fromUserId === null)", () => {
+    const state: State = {
+      kind: "group-text-clarification",
+      inbound: makeGroupInbound({ fromUserId: null }),
+      synthetic: "[FLOW_1 CLARIFICATION]",
+    };
+    const { actions } = match(state);
+    const sendToAsh = actions[2] as Extract<Action, { kind: "send-to-ash" }>;
+    expect(sendToAsh.auth).toBeNull();
+  });
+});
+
+describe("match — group-text-holder-not-registered", () => {
+  it("emits a localised /register nudge DM to the holder", () => {
+    const state: State = {
+      kind: "group-text-holder-not-registered",
+      inbound: makeGroupInbound({ fromLanguageCode: "de" }),
+      holderUserId: 555,
+    };
+    const { actions } = match(state);
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({
+      kind: "send-direct-message",
+      chatId: 555,
+      traceStage: "dm",
+    });
+    const text = (actions[0] as Extract<Action, { kind: "send-direct-message" }>).text;
+    expect(text).toContain("/register");
+  });
+});
+
+describe("match — group-text-registered", () => {
+  function makePackage() {
+    return {
+      id: "pkg_1",
+      streetId: "Test",
+      recipientResidentId: "200",
+      recipientName: "Marlene",
+      recipientHouseNumber: "88",
+      holderResidentId: "100",
+      carrier: "DHL" as const,
+      status: "held" as const,
+      receivedAt: 1700000000,
+      pickedUpAt: null,
+      reminded: false,
+    };
+  }
+  function makeHolder() {
+    return {
+      id: "100",
+      platformId: "100",
+      name: "Diego",
+      houseNumber: "69",
+      floor: null,
+      buzzerName: null,
+      language: "de",
+    };
+  }
+  function makeRecipient() {
+    return {
+      id: "200",
+      name: "Marlene",
+      houseNumber: "88",
+      language: "de",
+      floor: null,
+      buzzerName: null,
+    };
+  }
+
+  it("resident outcome → group ack DM + recipient DM with [Abgeholt] keyboard", () => {
+    const state: State = {
+      kind: "group-text-registered",
+      inbound: makeGroupInbound({ chatId: -100 }),
+      holderLanguage: "de",
+      outcomes: [
+        {
+          kind: "resident",
+          result: {
+            package: makePackage(),
+            holder: makeHolder(),
+            recipientResolution: { kind: "resident", resident: makeRecipient() },
+            receptionRequestFulfilled: null,
+          },
+        },
+      ],
+    };
+    const { actions } = match(state);
+    expect(actions).toHaveLength(2);
+    // Group ack to the group chat
+    expect(actions[0]).toMatchObject({
+      kind: "send-direct-message",
+      chatId: -100,
+      traceStage: "dm",
+    });
+    const ackText = (actions[0] as Extract<Action, { kind: "send-direct-message" }>).text;
+    expect(ackText).toContain("Paket von");
+    // Recipient DM with keyboard
+    expect(actions[1]).toMatchObject({
+      kind: "send-direct-message",
+      chatId: 200,
+      traceStage: "dm",
+    });
+    const recipientAction = actions[1] as Extract<Action, { kind: "send-direct-message" }>;
+    expect(recipientAction.keyboard).toBeDefined();
+  });
+
+  it("resident outcome with Flow 2 fulfillment → holder confirmation DM (NOT group ack) + recipient DM", () => {
+    const state: State = {
+      kind: "group-text-registered",
+      inbound: makeGroupInbound({ chatId: -100 }),
+      holderLanguage: "de",
+      outcomes: [
+        {
+          kind: "resident",
+          result: {
+            package: makePackage(),
+            holder: makeHolder(),
+            recipientResolution: { kind: "resident", resident: makeRecipient() },
+            receptionRequestFulfilled: {
+              requestId: "req_1",
+              requesterResidentId: "200",
+              previousStatus: "matched",
+            },
+          },
+        },
+      ],
+    };
+    const { actions } = match(state);
+    expect(actions).toHaveLength(2);
+    // Holder confirmation to the holder, NOT the group
+    expect(actions[0]).toMatchObject({
+      kind: "send-direct-message",
+      chatId: 100,
+    });
+    const holderText = (actions[0] as Extract<Action, { kind: "send-direct-message" }>).text;
+    expect(holderText).toContain("Paket für Marlene erkannt");
+    // No call to the group chat id
+    for (const action of actions) {
+      if (action.kind === "send-direct-message") {
+        expect(action.chatId).not.toBe(-100);
+      }
+    }
+  });
+
+  it("unknown outcome → posts the deterministic group question, no recipient DM", () => {
+    const state: State = {
+      kind: "group-text-registered",
+      inbound: makeGroupInbound({ chatId: -100 }),
+      holderLanguage: "de",
+      outcomes: [
+        {
+          kind: "unknown",
+          recipientName: "Stranger",
+          result: {
+            package: { ...makePackage(), recipientResidentId: null, recipientName: "Stranger" },
+            holder: makeHolder(),
+            recipientResolution: { kind: "unknown" },
+            receptionRequestFulfilled: null,
+          },
+        },
+      ],
+    };
+    const { actions } = match(state);
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({
+      kind: "send-direct-message",
+      chatId: -100,
+      text: "📦 Paket für Stranger – kennt jemand Stranger?",
+    });
+  });
+
+  it("known-telegram outcome → no actions (silent for the cron sweep)", () => {
+    const state: State = {
+      kind: "group-text-registered",
+      inbound: makeGroupInbound({}),
+      holderLanguage: "de",
+      outcomes: [
+        {
+          kind: "known-telegram",
+          result: {
+            package: makePackage(),
+            holder: makeHolder(),
+            recipientResolution: {
+              kind: "known_telegram",
+              telegram: { userId: 200, firstName: "Anna", lastName: null, username: null },
+            },
+            receptionRequestFulfilled: null,
+          },
+        },
+      ],
+    };
+    const { actions } = match(state);
+    expect(actions).toEqual([]);
+  });
+
+  it("register-error outcome → no actions (already logged at buildState time)", () => {
+    const state: State = {
+      kind: "group-text-registered",
+      inbound: makeGroupInbound({}),
+      holderLanguage: "de",
+      outcomes: [{ kind: "register-error", recipientName: "Foo" }],
+    };
+    const { actions } = match(state);
+    expect(actions).toEqual([]);
+  });
+
+  it("multi-recipient: emits actions per outcome in order", () => {
+    const state: State = {
+      kind: "group-text-registered",
+      inbound: makeGroupInbound({ chatId: -100 }),
+      holderLanguage: "de",
+      outcomes: [
+        {
+          kind: "resident",
+          result: {
+            package: makePackage(),
+            holder: makeHolder(),
+            recipientResolution: { kind: "resident", resident: makeRecipient() },
+            receptionRequestFulfilled: null,
+          },
+        },
+        {
+          kind: "unknown",
+          recipientName: "Stranger",
+          result: {
+            package: { ...makePackage(), id: "pkg_2", recipientResidentId: null, recipientName: "Stranger" },
+            holder: makeHolder(),
+            recipientResolution: { kind: "unknown" },
+            receptionRequestFulfilled: null,
+          },
+        },
+      ],
+    };
+    const { actions } = match(state);
+    // First outcome: group ack + recipient DM. Second outcome: unknown-recipient question.
+    expect(actions).toHaveLength(3);
   });
 });
 

@@ -353,15 +353,74 @@ export type State =
       readonly inbound: TelegramInboundCallback;
       readonly synthetic: string;
     }
+  // Group inbound that the channel deliberately drops without side
+  // effects — anonymous post (no `from`), classifier outage, classifier
+  // verdict `isPackageRegistration: false`, vision/getFileUrl failure on
+  // a group photo, or `tracking_page` / `unknown` vision verdict.
+  // Carries the inbound for trace context only; match emits no actions.
   | {
-      readonly kind: "group-photo";
+      readonly kind: "group-silent";
       readonly inbound: TelegramInboundMessage;
-      readonly resident: Resident | null;
-      readonly vision: VisionVerdict;
     }
+  // Group photo with `vision.kind === "shipping_label"` — the privacy
+  // nudge case (#128). `match` emits a single DM to the sender. The
+  // tracking_page / unknown / failure branches collapse to `group-silent`
+  // before this variant is built.
   | {
-      readonly kind: "group-text";
+      readonly kind: "group-photo-nudge";
       readonly inbound: TelegramInboundMessage;
-      readonly resident: Resident | null;
-      readonly classifier: GroupClassifierVerdict;
+      readonly senderUserId: number;
+      readonly senderLanguageCode: string | null;
+    }
+  // Group text fallthrough — the only group surface where the agent
+  // sees a free-text inbound. The synthetic is constrained (one
+  // clarifying question, no tool calls) so the welcome-wall class of
+  // failure cannot recur. `match` emits setTriggerAttribute +
+  // agent.start trace + sendToAsh.
+  | {
+      readonly kind: "group-text-clarification";
+      readonly inbound: TelegramInboundMessage;
+      readonly synthetic: string;
+    }
+  // Group text registration short-circuit: `registerPackage` threw
+  // `REGISTER_PACKAGE_HOLDER_NOT_REGISTERED` for an unregistered holder.
+  // `match` emits a localised /register nudge DM to the holder, no
+  // group post.
+  | {
+      readonly kind: "group-text-holder-not-registered";
+      readonly inbound: TelegramInboundMessage;
+      readonly holderUserId: number;
+    }
+  // Group text registration succeeded for at least one recipient (or
+  // failed mid-loop with non-fatal errors). Each outcome encodes the
+  // recipient-resolution branch the legacy loop used to dispatch on:
+  // `resident` (group ack + recipient DM, or holder confirmation +
+  // recipient DM when a Flow 2 RR was fulfilled), `unknown` (group
+  // question), `known-telegram` (silent for this recipient), or
+  // `register-error` (logged, no DM). `holderLanguage` is the
+  // normalised fallback for unknown-recipient questions and other
+  // copy that needs a language hint when the holder has no
+  // `Resident.language`.
+  | {
+      readonly kind: "group-text-registered";
+      readonly inbound: TelegramInboundMessage;
+      readonly holderLanguage: string;
+      readonly outcomes: ReadonlyArray<GroupTextOutcome>;
     };
+
+/**
+ * Per-recipient outcome of the high-conf (or medium-resolved) group
+ * text registration loop. `buildState` pre-calls `registerPackage` for
+ * each recipient in the classifier's verdict and encodes the result —
+ * `match` is pure and dispatches on `kind`. See `group-text-registered`
+ * variant above for the parent state.
+ */
+export type GroupTextOutcome =
+  | { readonly kind: "resident"; readonly result: RegisterPackageResult }
+  | {
+      readonly kind: "unknown";
+      readonly recipientName: string;
+      readonly result: RegisterPackageResult;
+    }
+  | { readonly kind: "known-telegram"; readonly result: RegisterPackageResult }
+  | { readonly kind: "register-error"; readonly recipientName: string };

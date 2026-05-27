@@ -14,6 +14,7 @@ import {
   buildDmTextPickupRetryText,
   buildDmTextPickupWaitingOnVolunteerText,
   buildGroupAckText,
+  buildGroupLabelPrivacyNudge,
   buildHolderConfirmationDmText,
   buildHolderNotRegisteredNudge,
   buildPickupKeyboard,
@@ -39,7 +40,7 @@ import {
   selfAcceptToastForLanguage,
 } from "../volunteer-accept-dms.js";
 import { Action } from "./action.js";
-import type { State } from "./state.js";
+import type { GroupTextOutcome, State } from "./state.js";
 import type { TelegramSessionAuth } from "../types.js";
 
 const REGISTER_USAGE_HINTS: Readonly<Record<string, string>> = {
@@ -217,11 +218,20 @@ export function match(state: State): { state: State; actions: Action[] } {
     case "dm-receive-cmd-agent":
       return { state, actions: dmReceiveCmdAgentActions(state) };
 
-    case "group-photo":
-      throw new Error("group-photo: not yet migrated — see Slice 6 (#137)");
+    case "group-silent":
+      return { state, actions: [] };
 
-    case "group-text":
-      throw new Error("group-text: not yet migrated — see Slice 6 (#137)");
+    case "group-photo-nudge":
+      return { state, actions: groupPhotoNudgeActions(state) };
+
+    case "group-text-clarification":
+      return { state, actions: groupTextClarificationActions(state) };
+
+    case "group-text-holder-not-registered":
+      return { state, actions: groupTextHolderNotRegisteredActions(state) };
+
+    case "group-text-registered":
+      return { state, actions: groupTextRegisteredActions(state) };
 
     default: {
       const _exhaustive: never = state;
@@ -974,4 +984,205 @@ function dmReceiveCmdAgentActions(
       },
     ),
   ];
+}
+
+// ---------------------------------------------------------------------------
+// group-photo-nudge — shipping_label in a group (v2.1 #128)
+// ---------------------------------------------------------------------------
+
+function groupPhotoNudgeActions(
+  state: Extract<State, { kind: "group-photo-nudge" }>,
+): Action[] {
+  const language = state.senderLanguageCode
+    ? (normaliseLanguageCode(state.senderLanguageCode) ?? "de")
+    : "de";
+  const nudge = buildGroupLabelPrivacyNudge(language);
+  return [
+    Action.sendDirectMessage(state.senderUserId, nudge, {
+      traceStage: "dm",
+      traceExtras: { kind: "flow1-group-label-privacy-nudge" },
+    }),
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// group-text-clarification — the only group surface that reaches the agent
+// ---------------------------------------------------------------------------
+
+function groupTextClarificationActions(
+  state: Extract<State, { kind: "group-text-clarification" }>,
+): Action[] {
+  const { inbound, synthetic } = state;
+  const attributes: Record<string, string> = {};
+  if (inbound.fromLanguageCode) attributes["languageCode"] = inbound.fromLanguageCode;
+  const auth =
+    inbound.fromUserId !== null
+      ? {
+          principalId: String(inbound.fromUserId),
+          principalType: "user" as const,
+          authenticator: "telegram" as const,
+          attributes,
+        }
+      : null;
+  return [
+    Action.setTriggerAttribute("telegram.group"),
+    Action.emitTrace("agent", "start", { trigger: "telegram.group" }),
+    Action.sendToAsh(synthetic, auth, `tg:${inbound.chatId}`, {
+      chatId: inbound.chatId,
+      isGroup: inbound.isGroup,
+      fromUserId: inbound.fromUserId,
+      fromLanguageCode: inbound.fromLanguageCode,
+    }),
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// group-text-holder-not-registered — unregistered holder /register nudge
+// ---------------------------------------------------------------------------
+
+function groupTextHolderNotRegisteredActions(
+  state: Extract<State, { kind: "group-text-holder-not-registered" }>,
+): Action[] {
+  const language = state.inbound.fromLanguageCode
+    ? normaliseLanguageCode(state.inbound.fromLanguageCode)
+    : null;
+  const nudge = buildHolderNotRegisteredNudge(language);
+  return [
+    Action.sendDirectMessage(state.holderUserId, nudge, {
+      traceStage: "dm",
+      traceExtras: { kind: "flow1-holder-not-registered-nudge" },
+    }),
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// group-text-registered — iterate per-recipient outcomes
+// ---------------------------------------------------------------------------
+
+function groupTextRegisteredActions(
+  state: Extract<State, { kind: "group-text-registered" }>,
+): Action[] {
+  const actions: Action[] = [];
+  for (const outcome of state.outcomes) {
+    actions.push(...outcomeActions(outcome, state));
+  }
+  return actions;
+}
+
+function outcomeActions(
+  outcome: GroupTextOutcome,
+  state: Extract<State, { kind: "group-text-registered" }>,
+): Action[] {
+  switch (outcome.kind) {
+    case "register-error":
+      // Logged at buildState time; runner does nothing here. Defensive
+      // entry in the outcomes array so the dispatch table stays
+      // exhaustive on `GroupTextOutcome.kind`.
+      return [];
+    case "known-telegram":
+      // No DM channel to a non-Resident — the Package row is in Redis
+      // for the cron sweep. Same shape as the legacy silent branch.
+      return [];
+    case "unknown":
+      return unknownRecipientActions(outcome, state);
+    case "resident":
+      return residentRecipientActions(outcome, state);
+    default: {
+      const _exhaustive: never = outcome;
+      throw new Error(
+        `outcomeActions: unhandled GroupTextOutcome kind: ${JSON.stringify(_exhaustive)}`,
+      );
+    }
+  }
+}
+
+function unknownRecipientActions(
+  outcome: Extract<GroupTextOutcome, { kind: "unknown" }>,
+  state: Extract<State, { kind: "group-text-registered" }>,
+): Action[] {
+  const language = outcome.result.holder.language ?? state.holderLanguage;
+  const question = buildUnknownRecipientGroupQuestion(
+    outcome.recipientName,
+    language,
+  );
+  return [
+    Action.sendDirectMessage(state.inbound.chatId, question, {
+      traceStage: "dm",
+      traceExtras: { kind: "flow1-unknown-recipient" },
+    }),
+  ];
+}
+
+function residentRecipientActions(
+  outcome: Extract<GroupTextOutcome, { kind: "resident" }>,
+  state: Extract<State, { kind: "group-text-registered" }>,
+): Action[] {
+  const { result } = outcome;
+  if (result.recipientResolution.kind !== "resident") {
+    // Defensive: the buildState dispatch only emits this outcome on
+    // `kind === "resident"`. Keep the narrowing happy without a cast.
+    return [];
+  }
+  const recipient = result.recipientResolution.resident;
+  const actions: Action[] = [];
+
+  // v2.1 #116: Flow 2 fulfillment → suppress the group ack, DM the
+  // holder a private confirmation instead.
+  if (result.receptionRequestFulfilled !== null) {
+    const holderChatId = Number(result.holder.platformId);
+    if (Number.isFinite(holderChatId)) {
+      const text = buildHolderConfirmationDmText({
+        recipientName: recipient.name,
+        language: result.holder.language,
+      });
+      actions.push(
+        Action.sendDirectMessage(holderChatId, text, {
+          traceStage: "dm",
+          traceExtras: { kind: "flow1-holder-confirmation" },
+        }),
+      );
+    } else {
+      actions.push(
+        Action.logError(
+          "[flow1] holder.platformId is not a finite number — skipping holder confirmation DM",
+          { platformId: result.holder.platformId, source: "text" },
+        ),
+      );
+    }
+  } else {
+    const groupAck = buildGroupAckText({
+      holder: result.holder,
+      recipient,
+    });
+    actions.push(
+      Action.sendDirectMessage(state.inbound.chatId, groupAck, {
+        traceStage: "dm",
+        traceExtras: { kind: "flow1-group-ack" },
+      }),
+    );
+  }
+
+  const recipientChatId = Number(recipient.id);
+  if (Number.isFinite(recipientChatId)) {
+    const dmText = buildRecipientDmText({
+      holder: result.holder,
+      recipient,
+    });
+    actions.push(
+      Action.sendDirectMessage(recipientChatId, dmText, {
+        traceStage: "dm",
+        traceExtras: { kind: "flow1-recipient" },
+        keyboard: buildPickupKeyboard(result.package.id),
+      }),
+    );
+  } else {
+    actions.push(
+      Action.logError(
+        "[flow1] recipient.id is not a finite number — skipping DM",
+        { recipientId: recipient.id },
+      ),
+    );
+  }
+
+  return actions;
 }
