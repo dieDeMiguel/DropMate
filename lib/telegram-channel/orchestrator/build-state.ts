@@ -26,11 +26,18 @@ import {
   isReceiveCommand,
   parseReceiveCommand,
 } from "../../slash-command.js";
+import { normaliseLanguageCode } from "../../language.js";
 import { emitTrace } from "../../trace.js";
+import {
+  buildFlow1ClarificationSynthetic,
+  captionLooksLikeMultiRecipient,
+  type Flow1ClarificationReason,
+} from "../flow-1-dms.js";
 import type { TelegramInboundMessage } from "../inbound.js";
 import type {
   ClassifierVerdict,
   GroupClassifierVerdict,
+  GroupTextOutcome,
   State,
   VisionVerdict,
 } from "./state.js";
@@ -68,6 +75,12 @@ export interface BuildStateDeps {
     text: string;
     languageHint?: string;
   }) => Promise<GroupClassifierVerdict>;
+  // v2.1 #106 Slice 1: channel-side handle for the lib-level
+  // `registerPackage`. Per ADR D3 amendment, `buildState` calls this for
+  // each high-conf (or medium-resolved) recipient so the per-recipient
+  // outcome (resident / unknown / known_telegram / holder-not-registered
+  // / other error) is encoded as a `GroupTextOutcome` for `match` to
+  // dispatch on without re-reading the registration result.
   readonly registerPackage: (
     holder: Resident | null,
     input: RegisterPackageInput,
@@ -76,6 +89,10 @@ export interface BuildStateDeps {
     caller: Resident,
     input: CreateReceptionRequestInput,
   ) => Promise<CreateReceptionRequestResult>;
+  // v2.1 #109: pure recipient-resolution lookup, no Package write. Used
+  // by `buildGroupTextState` at medium-conf single-recipient verdicts to
+  // decide whether to register (resolution → resident) or fall through
+  // to the agent (resolution → unknown / known_telegram).
   readonly resolveRecipient: (
     recipientName: string,
     recipientHouseNumber: string,
@@ -976,13 +993,304 @@ async function buildDmReceiveCmdState(
 }
 
 /**
+ * Build a `group-photo` State variant for a group inbound carrying a
+ * photo. Anonymous group photos are filtered out by the dispatch above;
+ * here we know `inbound.fromUserId !== null`. Fans out
+ * `getRegisteredResident` + `getFileUrl` → `parsePackagePhoto`, then
+ * encodes the outcome:
+ *
+ *   - vision threw / getFileUrl threw  → `group-silent` (no nudge, no
+ *     register; legacy `routeGroupPhoto` stayed silent on both failure
+ *     modes).
+ *   - vision.kind !== "shipping_label" → `group-silent` (#128: tracking_page
+ *     / unknown in a group never trigger the agent).
+ *   - vision.kind === "shipping_label" → `group-photo-nudge` (the
+ *     privacy nudge case; `match` emits the DM).
+ *
+ * `flow1.silent` traces fire here for the tracking_page / unknown
+ * branches to mirror the legacy `routeGroupPhoto` shape.
+ */
+async function buildGroupPhotoState(
+  msg: TelegramInboundMessage,
+  photoFileId: string,
+  deps: BuildStateDeps,
+): Promise<State> {
+  const fromUserId = msg.fromUserId!;
+  const captionText = msg.text.length > 0 ? msg.text : undefined;
+
+  let imageUrl: string;
+  try {
+    imageUrl = await deps.getFileUrl(photoFileId);
+  } catch (err) {
+    console.error(
+      "[parse_photo] getFileUrl failed (group) for chatId",
+      msg.chatId,
+      "error:",
+      err instanceof Error
+        ? { name: err.name, message: err.message, stack: err.stack }
+        : err,
+    );
+    return { kind: "group-silent", inbound: msg };
+  }
+
+  let vision: VisionVerdict;
+  emitTrace("vision", "start", { tool: "parse_package_photo" });
+  try {
+    vision = await deps.parsePackagePhoto({ imageUrl, caption: captionText });
+    emitTrace("vision", "end", {
+      tool: "parse_package_photo",
+      kind: vision.kind,
+      confidence: vision.confidence,
+    });
+  } catch (err) {
+    console.error(
+      "[parse_package_photo] failed (group) for chatId",
+      msg.chatId,
+      "error:",
+      err instanceof Error
+        ? { name: err.name, message: err.message, stack: err.stack }
+        : err,
+    );
+    emitTrace("vision", "error", { tool: "parse_package_photo" });
+    return { kind: "group-silent", inbound: msg };
+  }
+
+  if (vision.kind !== "shipping_label") {
+    emitTrace("flow1", "silent", {
+      reason: vision.kind === "tracking_page" ? "group-tracking-page" : "group-unknown",
+      source: "photo",
+    });
+    return { kind: "group-silent", inbound: msg };
+  }
+
+  return {
+    kind: "group-photo-nudge",
+    inbound: msg,
+    senderUserId: fromUserId,
+    senderLanguageCode: msg.fromLanguageCode,
+  };
+}
+
+/**
+ * Build a group-text State variant. Mirrors the legacy
+ * `routeGroupTextThroughClassifier` dispatch table (#106 Slice 1 +
+ * #109 Slice 3):
+ *
+ *   - classifier outage              → `group-silent`
+ *   - !isPackageRegistration         → `group-silent`
+ *   - 0 recipients                   → `group-text-clarification` (missing-recipient)
+ *   - low-conf                       → `group-text-clarification` (low-conf or ambiguous-multi)
+ *   - medium-conf + 2+ recipients    → `group-text-clarification` (ambiguous-multi)
+ *   - medium-conf + missing house    → `group-text-clarification` (missing-recipient)
+ *   - medium-conf + non-resident res → `group-text-clarification` (low-conf)
+ *   - high-conf / medium-resolved:
+ *       - registerPackage loop:
+ *           - holder-not-registered  → `group-text-holder-not-registered`
+ *           - other error            → outcome `register-error`
+ *           - success                → outcome `resident` / `unknown` / `known-telegram`
+ *       → `group-text-registered`
+ *
+ * `flow1.register.start/end/error` + `flow1.reject.*` + `flow1.silent`
+ * traces fire here in lockstep with the lib calls — stage names are
+ * identical to what the runner's auto-trace would have emitted for an
+ * `Action.registerPackage`, per ADR D4 amendment.
+ */
+async function buildGroupTextState(
+  msg: TelegramInboundMessage,
+  deps: BuildStateDeps,
+): Promise<State> {
+  const fromUserId = msg.fromUserId!;
+
+  const holderLanguage = msg.fromLanguageCode
+    ? (normaliseLanguageCode(msg.fromLanguageCode) ?? "de")
+    : "de";
+
+  let classification: GroupClassifierVerdict;
+  emitTrace("classifier", "start", { flow: "flow1" });
+  try {
+    classification = await deps.classifyGroupMessage({
+      text: msg.text,
+      languageHint: msg.fromLanguageCode ?? undefined,
+    });
+    emitTrace("classifier", "end", {
+      flow: "flow1",
+      isPackageRegistration: classification.isPackageRegistration,
+      confidence: classification.confidence,
+    });
+  } catch (err) {
+    console.error(
+      "[classify_group_message] failed for chatId",
+      msg.chatId,
+      "error:",
+      err instanceof Error
+        ? { name: err.name, message: err.message, stack: err.stack }
+        : err,
+    );
+    emitTrace("classifier", "error", { flow: "flow1" });
+    return { kind: "group-silent", inbound: msg };
+  }
+
+  if (!classification.isPackageRegistration) {
+    return { kind: "group-silent", inbound: msg };
+  }
+
+  const holder = await deps
+    .getRegisteredResident(fromUserId)
+    .catch(() => null);
+
+  function clarification(reason: Flow1ClarificationReason): State {
+    emitTrace("flow1", "fallthrough", { reason, source: "text" });
+    return {
+      kind: "group-text-clarification",
+      inbound: msg,
+      synthetic: buildFlow1ClarificationSynthetic({
+        language: holder?.language ?? holderLanguage,
+        reason,
+        source: "text",
+        carrier: classification.carrier,
+        recipientName: classification.recipients[0]?.name,
+        confidence: classification.confidence,
+        caption: msg.text,
+        holderName: holder?.name,
+        holderHouseNumber: holder?.houseNumber,
+      }),
+    };
+  }
+
+  if (classification.recipients.length === 0) {
+    return clarification("missing-recipient");
+  }
+
+  if (classification.confidence === "low") {
+    return clarification(
+      classification.recipients.length >= 2 ||
+        captionLooksLikeMultiRecipient(msg.text)
+        ? "ambiguous-multi"
+        : "low-conf",
+    );
+  }
+
+  if (
+    classification.confidence === "medium" &&
+    classification.recipients.length > 1
+  ) {
+    return clarification("ambiguous-multi");
+  }
+
+  if (classification.confidence === "medium") {
+    // Medium-conf single recipient: resolve first WITHOUT writing.
+    const namedRecipient = classification.recipients[0]!;
+    const houseNumber = namedRecipient.houseNumber ?? holder?.houseNumber ?? "";
+    if (houseNumber === "") {
+      return clarification("missing-recipient");
+    }
+    let resolution: RecipientResolution;
+    try {
+      resolution = await deps.resolveRecipient(namedRecipient.name, houseNumber);
+    } catch (err) {
+      console.error(
+        "[resolveRecipient] (text, medium-conf) failed for recipient",
+        namedRecipient.name,
+        "error:",
+        err instanceof Error
+          ? { name: err.name, message: err.message, stack: err.stack }
+          : err,
+      );
+      return clarification("low-conf");
+    }
+    if (resolution.kind !== "resident") {
+      return clarification("low-conf");
+    }
+    // Resolution converges on a Resident — fall through to the
+    // registration loop with the loop treating this as high-conf.
+  }
+
+  // High-conf (or medium-converged-to-resident): registerPackage loop.
+  const outcomes: GroupTextOutcome[] = [];
+  for (const namedRecipient of classification.recipients) {
+    const recipientHouseNumber =
+      namedRecipient.houseNumber ?? holder?.houseNumber ?? "";
+    if (recipientHouseNumber === "") {
+      // Defensive: schema admits both absent. Single-recipient case
+      // was already caught above. In the multi-recipient loop, skip
+      // this entry — partial outcome beats abandoning the whole turn.
+      continue;
+    }
+
+    emitTrace("flow1", "register.start", { recipient: namedRecipient.name });
+    let registered: RegisterPackageResult;
+    try {
+      const input: RegisterPackageInput = {
+        recipientName: namedRecipient.name,
+        recipientHouseNumber,
+        ...(classification.carrier ? { carrier: classification.carrier } : {}),
+      };
+      registered = await deps.registerPackage(holder, input);
+      emitTrace("flow1", "register.end", {
+        recipient: namedRecipient.name,
+        resolution: registered.recipientResolution.kind,
+      });
+    } catch (err) {
+      const errorCode =
+        err && typeof err === "object" && "code" in err
+          ? (err as { code?: string }).code
+          : undefined;
+      if (errorCode === REGISTER_PACKAGE_HOLDER_NOT_REGISTERED_ERROR_CODE) {
+        emitTrace("flow1", "reject.holder-not-registered");
+        return {
+          kind: "group-text-holder-not-registered",
+          inbound: msg,
+          holderUserId: fromUserId,
+        };
+      }
+      console.error(
+        "[register_package] failed for holder",
+        fromUserId,
+        "recipient",
+        namedRecipient.name,
+        "error:",
+        err instanceof Error
+          ? { name: err.name, message: err.message, stack: err.stack }
+          : err,
+      );
+      emitTrace("flow1", "register.error");
+      outcomes.push({ kind: "register-error", recipientName: namedRecipient.name });
+      continue;
+    }
+
+    if (registered.recipientResolution.kind === "unknown") {
+      outcomes.push({
+        kind: "unknown",
+        recipientName: namedRecipient.name,
+        result: registered,
+      });
+      continue;
+    }
+    if (registered.recipientResolution.kind === "known_telegram") {
+      emitTrace("flow1", "silent", { reason: "known_telegram" });
+      outcomes.push({ kind: "known-telegram", result: registered });
+      continue;
+    }
+    outcomes.push({ kind: "resident", result: registered });
+  }
+
+  return {
+    kind: "group-text-registered",
+    inbound: msg,
+    holderLanguage,
+    outcomes,
+  };
+}
+
+/**
  * Pre-computes the full context for an inbound update and returns the
  * appropriate `State` variant (ADR D3). `match` is pure-synchronous;
  * all async I/O happens here before `match` is called.
  *
  * The builder is a mechanical dispatch on inbound kind only — no
  * business logic. Slices 3–6 fill in `dm` and `group` arms; Slice 4
- * (#135) implements the `callback` arm.
+ * (#135) implements the `callback` arm; Slice 6 (#137) implements the
+ * `group` arm.
  *
  * Orchestration entry point:
  *
@@ -1019,10 +1327,18 @@ export async function buildState(
       return buildDmTextState(msg, deps);
     }
 
-    case "group":
-      throw new Error(
-        "buildState group: not yet migrated — see Slice 6 (#137)",
-      );
+    case "group": {
+      const msg = inbound.message;
+      // Anonymous group post (no `from`): silent. We can't DM the sender
+      // and there's no actionable identity for any other path.
+      if (msg.fromUserId === null) {
+        return { kind: "group-silent", inbound: msg };
+      }
+      if (msg.photoFileId !== null) {
+        return buildGroupPhotoState(msg, msg.photoFileId, deps);
+      }
+      return buildGroupTextState(msg, deps);
+    }
 
     case "callback": {
       const parsed = parseCallbackData(inbound.callback.data);
