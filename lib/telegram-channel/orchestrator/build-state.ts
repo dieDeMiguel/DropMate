@@ -9,6 +9,11 @@ import {
   type ConfirmPickupResult,
 } from "../../pickup.js";
 import type { Resident } from "../../redis.js";
+import {
+  isStartCommand,
+  isRegisterCommand,
+  parseFreeTextRegistration,
+} from "../../registration.js";
 import { emitTrace } from "../../trace.js";
 import type {
   ClassifierVerdict,
@@ -339,10 +344,23 @@ export async function buildState(
   deps: BuildStateDeps,
 ): Promise<State> {
   switch (inbound.kind) {
-    case "dm":
+    case "dm": {
+      const msg = inbound.message;
+      // Registration detection is synchronous — no async I/O for this variant.
+      // Guard: fromUserId must be present (anonymous DMs fall through to legacy).
+      if (
+        msg.fromUserId !== null &&
+        msg.photoFileId === null &&
+        (isStartCommand(msg.text) ||
+          isRegisterCommand(msg.text) ||
+          parseFreeTextRegistration(msg.text) !== null)
+      ) {
+        return { kind: "dm-registration", inbound: msg };
+      }
       throw new Error(
-        "buildState dm: not yet migrated — see Slices 3–5 (#134–#136)",
+        "buildState dm: not yet migrated for non-registration DMs — see Slice 5 (#136)",
       );
+    }
 
     case "group":
       throw new Error(

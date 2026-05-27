@@ -1,3 +1,10 @@
+import {
+  isStartCommand,
+  isRegisterCommand,
+  parseRegisterCommand,
+  parseFreeTextRegistration,
+  type ParsedRegistration,
+} from "../../registration.js";
 import { normaliseLanguageCode } from "../../language.js";
 import { buildDmTextPickupConfirmedText } from "../flow-1-dms.js";
 import {
@@ -15,6 +22,21 @@ import {
 import { Action } from "./action.js";
 import type { State } from "./state.js";
 
+const REGISTER_USAGE_HINTS: Readonly<Record<string, string>> = {
+  de: "Bitte schreibe: /register <Name>, <Straße> <Hausnummer> [Etage] [Klingelname]. Beispiel: /register Diego de Miguel, Lutterothstrasse 69 Erdgeschoss Links.",
+  en: "Please write: /register <Name>, <Street> <House number> [Floor] [Buzzer]. Example: /register Diego de Miguel, Lutterothstrasse 69 Erdgeschoss Links.",
+  es: "Por favor escribe: /register <Nombre>, <Calle> <Número> [Piso] [Timbre]. Ejemplo: /register Diego de Miguel, Lutterothstrasse 69 Erdgeschoss Links.",
+  tr: "Lütfen şöyle yaz: /register <Ad>, <Sokak> <Numara> [Kat] [Zil]. Örnek: /register Diego de Miguel, Lutterothstrasse 69 Erdgeschoss Links.",
+};
+
+function buildRegisterUsageHint(raw: string | null | undefined): string {
+  const normalised = normaliseLanguageCode(raw);
+  if (normalised && REGISTER_USAGE_HINTS[normalised]) {
+    return REGISTER_USAGE_HINTS[normalised]!;
+  }
+  return REGISTER_USAGE_HINTS["de"]!;
+}
+
 /**
  * Pure synchronous dispatcher (ADR D1).
  *
@@ -24,13 +46,66 @@ import type { State } from "./state.js";
  * compile time. Adding a new inbound shape to `State` without a
  * corresponding arm here is a TypeScript error.
  *
- * Slice 4 (#135) lands the callback arms. Slices 3, 5, 6 still throw
- * "not yet migrated" for their state kinds.
+ * Slice 3 (#134) lands the dm-registration arm. Slice 4 (#135) lands
+ * the callback-* arms. Slices 5, 6 still throw "not yet migrated".
  */
 export function match(state: State): { state: State; actions: Action[] } {
   switch (state.kind) {
-    case "dm-registration":
-      throw new Error("dm-registration: not yet migrated — see Slice 3 (#134)");
+    case "dm-registration": {
+      const { inbound } = state;
+      const chatId = inbound.chatId;
+      const language = inbound.fromLanguageCode;
+
+      if (isStartCommand(inbound.text)) {
+        const usageHint = buildRegisterUsageHint(language);
+        return {
+          state,
+          actions: [
+            Action.emitTrace("registration", "start", { phase: "start-command" }),
+            Action.sendDirectMessage(chatId, usageHint, { traceStage: "dm" }),
+            Action.emitTrace("registration", "end"),
+          ],
+        };
+      }
+
+      const isSlash = isRegisterCommand(inbound.text);
+      const parsed: ParsedRegistration | null = isSlash
+        ? parseRegisterCommand(inbound.text)
+        : parseFreeTextRegistration(inbound.text);
+
+      if (isSlash && parsed === null) {
+        const usageHint = buildRegisterUsageHint(language);
+        return {
+          state,
+          actions: [
+            Action.emitTrace("registration", "start", { phase: "usage-hint" }),
+            Action.sendDirectMessage(chatId, usageHint, { traceStage: "dm" }),
+            Action.emitTrace("registration", "end"),
+          ],
+        };
+      }
+
+      // parsed is non-null (slash with args or free-text match).
+      // fromUserId is guaranteed non-null by buildState's detection guard.
+      return {
+        state,
+        actions: [
+          Action.registerAndConfirmResident(
+            chatId,
+            {
+              name: parsed!.name,
+              street: parsed!.street,
+              houseNumber: parsed!.houseNumber,
+              floor: parsed!.floor,
+              buzzerName: parsed!.buzzerName,
+              platformId: String(inbound.fromUserId!),
+              telegramLanguageCode: language,
+            },
+            language,
+          ),
+        ],
+      };
+    }
 
     case "callback-pickup":
       return { state, actions: callbackPickupActions(state) };

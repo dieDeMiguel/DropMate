@@ -9,6 +9,29 @@ import { runActions } from "./run-actions.js";
 import type { RunActionsDeps } from "./run-actions.js";
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function makeDmRegistrationInbound(overrides: {
+  text: string;
+  fromUserId?: number | null;
+  chatId?: number;
+  fromLanguageCode?: string | null;
+}) {
+  return {
+    chatId: overrides.chatId ?? 99,
+    text: overrides.text,
+    isGroup: false,
+    fromUserId: overrides.fromUserId ?? 99,
+    fromLanguageCode: overrides.fromLanguageCode ?? "de",
+    fromFirstName: "Test",
+    fromLastName: null,
+    fromUsername: null,
+    photoFileId: null,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
 
@@ -51,11 +74,6 @@ function makeDeps(overrides: Partial<RunActionsDeps> = {}): RunActionsDeps {
 describe("match", () => {
   const states: Array<{ label: string; state: State; sliceRef: string }> = [
     {
-      label: "dm-registration",
-      state: { kind: "dm-registration", inbound: { chatId: 1, text: "/register", isGroup: false, fromUserId: 1, fromLanguageCode: null, fromFirstName: null, fromLastName: null, fromUsername: null, photoFileId: null } },
-      sliceRef: "Slice 3 (#134)",
-    },
-    {
       label: "dm-photo",
       state: { kind: "dm-photo", inbound: { chatId: 3, text: "", isGroup: false, fromUserId: 1, fromLanguageCode: null, fromFirstName: null, fromLastName: null, fromUsername: null, photoFileId: "file_1" }, resident, vision: { kind: "unknown", confidence: "low", reason: "test" } },
       sliceRef: "Slice 5 (#136)",
@@ -89,16 +107,234 @@ describe("match", () => {
     });
   }
 
-  it("covers all 6 unmigrated state variants (exhaustiveness regression)", () => {
-    // Slice 4 (#135) migrated callback-pickup and callback-accept families
-    // (success + 4 error variants each + callback-agent) so they were
-    // removed from this list. Slices 3, 5, 6 still have unmigrated kinds.
-    expect(states).toHaveLength(6);
+  it("covers all 5 unmigrated state variants (exhaustiveness regression)", () => {
+    // Slices 3 (#134) and 4 (#135) migrated dm-registration + callback-*
+    // arms; only Slices 5 (#136) and 6 (#137) still have unmigrated kinds:
+    // dm-photo, dm-text, dm-receive-cmd, group-photo, group-text.
+    expect(states).toHaveLength(5);
   });
 
   it("throws on unknown state kind (never branch)", () => {
     // Cast through unknown to bypass TS checks — we're testing the runtime guard.
     expect(() => match({ kind: "non-existent" } as unknown as State)).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// match — dm-registration (Slice 3 / #134)
+// ---------------------------------------------------------------------------
+
+describe("match — dm-registration", () => {
+  it("/start → usage-hint DM actions, no registerResident action", () => {
+    const state: State = {
+      kind: "dm-registration",
+      inbound: makeDmRegistrationInbound({ text: "/start", fromLanguageCode: "de" }),
+    };
+    const { actions } = match(state);
+    // Three actions: emitTrace registration.start, sendDirectMessage, emitTrace registration.end
+    expect(actions).toHaveLength(3);
+    expect(actions[0]).toMatchObject({ kind: "emit-trace", stage: "registration", phase: "start" });
+    expect(actions[1]).toMatchObject({ kind: "send-direct-message", chatId: 99 });
+    const dmText = (actions[1] as Extract<typeof actions[1], { kind: "send-direct-message" }>).text;
+    expect(dmText).toContain("/register");
+    expect(dmText).toContain("<Name>");
+    expect(actions[2]).toMatchObject({ kind: "emit-trace", stage: "registration", phase: "end" });
+  });
+
+  it("/start with deeplink token → same usage-hint", () => {
+    const state: State = {
+      kind: "dm-registration",
+      inbound: makeDmRegistrationInbound({ text: "/start ref_abc123", fromLanguageCode: "en" }),
+    };
+    const { actions } = match(state);
+    expect(actions[1]).toMatchObject({ kind: "send-direct-message" });
+    const dmText = (actions[1] as Extract<typeof actions[1], { kind: "send-direct-message" }>).text;
+    expect(dmText).toContain("Please write: /register");
+  });
+
+  it("bare /register → usage-hint DM, no registerResident action", () => {
+    const state: State = {
+      kind: "dm-registration",
+      inbound: makeDmRegistrationInbound({ text: "/register", fromLanguageCode: "de" }),
+    };
+    const { actions } = match(state);
+    expect(actions).toHaveLength(3);
+    expect(actions[1]).toMatchObject({ kind: "send-direct-message" });
+    const dmText = (actions[1] as Extract<typeof actions[1], { kind: "send-direct-message" }>).text;
+    expect(dmText).toContain("/register");
+  });
+
+  it("/register with full args → register-and-confirm-resident action", () => {
+    const state: State = {
+      kind: "dm-registration",
+      inbound: makeDmRegistrationInbound({
+        text: "/register Diego de Miguel Lutterothstrasse 69 Erdgeschoss Links",
+        fromUserId: 42,
+        fromLanguageCode: "de",
+      }),
+    };
+    const { actions } = match(state);
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({
+      kind: "register-and-confirm-resident",
+      chatId: 99,
+      fallbackLanguageCode: "de",
+      input: {
+        name: "Diego de Miguel",
+        street: "Lutterothstrasse",
+        houseNumber: "69",
+        floor: "Erdgeschoss",
+        buzzerName: "Links",
+        platformId: "42",
+        telegramLanguageCode: "de",
+      },
+    });
+  });
+
+  it("free-text registration → register-and-confirm-resident action", () => {
+    const state: State = {
+      kind: "dm-registration",
+      inbound: makeDmRegistrationInbound({
+        text: "Diego de Miguel, Lutterothstrasse 69",
+        fromUserId: 7,
+        fromLanguageCode: null,
+      }),
+    };
+    const { actions } = match(state);
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({
+      kind: "register-and-confirm-resident",
+      input: expect.objectContaining({ name: "Diego de Miguel", platformId: "7" }),
+    });
+  });
+
+  it("usage hint uses English for en language code", () => {
+    const state: State = {
+      kind: "dm-registration",
+      inbound: makeDmRegistrationInbound({ text: "/start", fromLanguageCode: "en" }),
+    };
+    const { actions } = match(state);
+    const dmText = (actions[1] as Extract<typeof actions[1], { kind: "send-direct-message" }>).text;
+    expect(dmText).toContain("Please write: /register");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runActions — register-and-confirm-resident
+// ---------------------------------------------------------------------------
+
+describe("runActions — register-and-confirm-resident", () => {
+  const mockResident: Resident = {
+    id: "99",
+    name: "Diego de Miguel",
+    street: "Lutterothstrasse",
+    houseNumber: "69",
+    floor: "Erdgeschoss",
+    platformId: "99",
+    platform: "telegram",
+    language: "de",
+    availabilityPatterns: [],
+    registeredAt: 1716000000000,
+    source: "explicit",
+    confirmed: true,
+  };
+
+  it("calls registerResident then sendDirectMessage with confirmation, emits traces", async () => {
+    const deps = makeDeps({
+      registerResident: vi.fn().mockResolvedValue({ resident: mockResident, updated: false }),
+    });
+    const events: string[] = [];
+    const unsub = subscribe((e) => events.push(`${e.stage}.${e.phase}`));
+
+    await runWithTrace({ traceId: "t1", kind: "text" }, () =>
+      runActions(
+        [Action.registerAndConfirmResident(99, {
+          name: "Diego de Miguel",
+          street: "Lutterothstrasse",
+          houseNumber: "69",
+          platformId: "99",
+          telegramLanguageCode: "de",
+        }, "de")],
+        deps,
+      ),
+    );
+
+    unsub();
+    expect(deps.registerResident).toHaveBeenCalledTimes(1);
+    expect(deps.sendDirectMessage).toHaveBeenCalledTimes(1);
+    const [chatId, text] = (deps.sendDirectMessage as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    expect(chatId).toBe(99);
+    expect(text).toContain("Vielen Dank");
+    expect(text).toContain("Diego de Miguel");
+    expect(events).toEqual([
+      "registration.start",
+      "dm.start",
+      "dm.end",
+      "registration.end",
+    ]);
+  });
+
+  it("uses resident.language for confirmation DM, not fallbackLanguageCode", async () => {
+    const englishResident: Resident = { ...mockResident, language: "en" };
+    const deps = makeDeps({
+      registerResident: vi.fn().mockResolvedValue({ resident: englishResident, updated: true }),
+    });
+
+    await runActions(
+      [Action.registerAndConfirmResident(99, {
+        name: "Diego de Miguel",
+        street: "Lutterothstrasse",
+        houseNumber: "69",
+        platformId: "99",
+        telegramLanguageCode: "de",
+      }, "de")],
+      deps,
+    );
+
+    const [, text] = (deps.sendDirectMessage as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    expect(text).toContain("Thanks");
+    expect(text).not.toContain("Vielen Dank");
+  });
+
+  it("rethrows when registerResident fails (caller falls through to agent)", async () => {
+    const deps = makeDeps({
+      registerResident: vi.fn().mockRejectedValue(new Error("redis down")),
+    });
+
+    await expect(
+      runActions(
+        [Action.registerAndConfirmResident(99, {
+          name: "Diego de Miguel",
+          street: "Lutterothstrasse",
+          houseNumber: "69",
+          platformId: "99",
+          telegramLanguageCode: "de",
+        }, "de")],
+        deps,
+      ),
+    ).rejects.toThrow("redis down");
+
+    expect(deps.sendDirectMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not rethrow when sendDirectMessage fails (registration already landed)", async () => {
+    const deps = makeDeps({
+      registerResident: vi.fn().mockResolvedValue({ resident: mockResident, updated: false }),
+      sendDirectMessage: vi.fn().mockRejectedValue(new Error("Telegram down")),
+    });
+
+    await expect(
+      runActions(
+        [Action.registerAndConfirmResident(99, {
+          name: "Diego de Miguel",
+          street: "Lutterothstrasse",
+          houseNumber: "69",
+          platformId: "99",
+          telegramLanguageCode: "de",
+        }, "de")],
+        deps,
+      ),
+    ).resolves.toBeUndefined();
   });
 });
 

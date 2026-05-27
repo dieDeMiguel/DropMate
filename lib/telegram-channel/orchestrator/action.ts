@@ -112,6 +112,12 @@ export type Action =
       readonly meta?: unknown;
     }
   | {
+      readonly kind: "register-and-confirm-resident";
+      readonly chatId: number;
+      readonly input: RegisterResidentInput;
+      readonly fallbackLanguageCode: string | null;
+    }
+  | {
       readonly kind: "parallel";
       readonly actions: ReadonlyArray<Action>;
     };
@@ -266,6 +272,14 @@ export namespace Action {
 
   export function logError(message: string, meta?: unknown): Action {
     return { kind: "log-error", message, ...(meta !== undefined ? { meta } : {}) };
+  }
+
+  export function registerAndConfirmResident(
+    chatId: number,
+    input: RegisterResidentInput,
+    fallbackLanguageCode: string | null,
+  ): Action {
+    return { kind: "register-and-confirm-resident", chatId, input, fallbackLanguageCode };
   }
 
   export function parallel(actions: ReadonlyArray<Action>): Action {
