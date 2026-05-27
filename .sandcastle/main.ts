@@ -25,7 +25,7 @@ const branch =
 
 await run({
   sandbox: docker(),
-  agent: claudeCode("claude-sonnet-4-6"),
+  agent: claudeCode("claude-opus-4-7"),
   promptFile: `.sandcastle/sandcastle-prompt.md`,
   branchStrategy: { type: "branch", branch },
   maxIterations: Number(maxIterations) ?? 3,
