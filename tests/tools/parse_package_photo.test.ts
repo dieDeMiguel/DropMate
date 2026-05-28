@@ -290,4 +290,52 @@ describe("parse_package_photo", () => {
     expect(call.system).toMatch(/physical/i);
     expect(call.system).toMatch(/screenshot/i);
   });
+
+  it("system prompt carries today's date (YYYY-MM-DD) plus an anti-training-data-year rule so the model anchors 2-digit years to the current year", async () => {
+    // Hardening rule (#159 rule 3): the constructed prompt must embed
+    // today's date and explicitly warn the model not to default to a
+    // year from its training data. Two-digit years on a tracking page
+    // are common; without the anchor the model can drift to 2024 or
+    // earlier and we mis-route the request.
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        kind: "unknown",
+        confidence: "low",
+        reason: "ok",
+      },
+    });
+    await runExecute({ imageUrl: sampleUrl });
+
+    const call = generateObjectMock.mock.calls[0]![0];
+    // YYYY-MM-DD pattern explicitly named alongside "today" or
+    // "today's date" so future refactors can't accidentally drop it.
+    expect(call.system).toMatch(/Today.{0,15}\d{4}-\d{2}-\d{2}/);
+    // Anti-training-data-year rule.
+    expect(call.system).toMatch(/training data/i);
+  });
+
+  it("system prompt forbids invention AND translation so the model omits illegible fields and preserves the source language", async () => {
+    // Hardening rules (#159 rules 1 + 2): hallucinated recipient names
+    // or house numbers would feed bad inputs into registerPackage;
+    // translating German free-text to English would break the v2.1
+    // localisation contract. Both rules belong in the system prompt as
+    // imperatives, not "be honest about confidence" hints.
+    generateObjectMock.mockResolvedValueOnce({
+      object: {
+        kind: "unknown",
+        confidence: "low",
+        reason: "ok",
+      },
+    });
+    await runExecute({ imageUrl: sampleUrl });
+
+    const call = generateObjectMock.mock.calls[0]![0];
+    // "Never invent" / "Do not invent" / "Never fabricate" — any
+    // imperative formulation pinned by the regex.
+    expect(call.system).toMatch(/(never|do not|don't)\s+(invent|fabricate|guess)/i);
+    // Translation rule explicitly named.
+    expect(call.system).toMatch(/(never|do not|don't)\s+translate/i);
+    // Source-language preservation cue.
+    expect(call.system).toMatch(/source\s+language/i);
+  });
 });
