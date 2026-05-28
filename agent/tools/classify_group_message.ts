@@ -49,6 +49,7 @@ import { generateObject } from "ai";
 import { z } from "zod";
 
 import { packageCarrierSchema, type PackageCarrier } from "../../lib/redis.js";
+import { repairFencedJson } from "../../lib/structured-output.js";
 
 export const PRIMARY_MODEL = "google/gemini-2.5-flash";
 export const FALLBACK_MODEL = "anthropic/claude-sonnet-4.6";
@@ -230,6 +231,7 @@ async function runClassifierModel(
     schema: modelOutputSchema,
     system: groupClassifierSystemPrompt,
     prompt: userPrompt,
+    experimental_repairText: repairFencedJson,
     providerOptions: {
       gateway: {
         sort: "cost",
