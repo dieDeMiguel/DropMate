@@ -148,34 +148,159 @@ DropMate/
 
 ---
 
-## Running locally
+## Setup
 
-Prerequisites: Node 24, pnpm, a Telegram bot token, an Upstash Redis (EU),
-and a Vercel project linked for AI Gateway auth.
+Six steps, in order. Each one populates one or two env vars; by the end
+your `.env.local` is complete and the bot is reachable.
+
+### 1. Prerequisites
+
+- Node 24 (`nvm install 24 && nvm use 24`)
+- pnpm via Corepack (`corepack enable`)
+- A Telegram account
+- A Vercel account
 
 ```bash
+git clone <this-repo> && cd DropMate
 pnpm install
-vercel link
-vercel env pull .env.local
-# .env.local must contain:
-#   TELEGRAM_BOT_TOKEN
-#   TELEGRAM_WEBHOOK_SECRET_TOKEN
-#   KV_REST_API_URL · KV_REST_API_TOKEN
-#   VERCEL_OIDC_TOKEN   (auto-detected by @ai-sdk/gateway)
+```
 
-pnpm dev          # ash dev — local Ash server + channel
+### 2. Create the Telegram bot
+
+Open Telegram and DM [`@BotFather`](https://t.me/BotFather):
+
+```
+/newbot
+<choose a display name>
+<choose a username ending in "bot">
+```
+
+BotFather replies with an HTTP token. That's `TELEGRAM_BOT_TOKEN`.
+
+While you're there, also set:
+
+```
+/setprivacy   → Disable    (so the bot can read group messages, not only
+                            messages that mention it)
+/setjoingroups → Enable
+```
+
+### 3. Generate the webhook secret
+
+Telegram echoes a secret back on every inbound webhook so you can verify
+the request came from Telegram and not a random attacker. Generate one
+yourself:
+
+```bash
+openssl rand -hex 32
+```
+
+That's `TELEGRAM_WEBHOOK_SECRET_TOKEN`. Keep it — you'll register it with
+Telegram in step 6.
+
+### 4. Link the Vercel project + provision Redis
+
+```bash
+pnpm dlx vercel@latest login
+pnpm dlx vercel@latest link        # create or pick a project
+```
+
+In the Vercel dashboard for the linked project:
+
+- **Storage → Add** → pick **Upstash Redis**, region **EU** (Frankfurt).
+  Vercel provisions it via Marketplace and auto-sets `KV_REST_API_URL`,
+  `KV_REST_API_TOKEN`, `KV_REST_API_READ_ONLY_TOKEN`, `KV_URL`, `REDIS_URL`
+  on the project.
+- **AI → Create Gateway** (optional). The default works without this: AI
+  SDK auto-detects `VERCEL_OIDC_TOKEN` from `vercel env pull`. Create an
+  `AI_GATEWAY_API_KEY` only if you want a long-lived token (OIDC expires
+  ~12h) or are running outside Vercel infrastructure.
+
+### 5. Add the Telegram vars to Vercel + pull them down
+
+```bash
+pnpm dlx vercel@latest env add TELEGRAM_BOT_TOKEN
+pnpm dlx vercel@latest env add TELEGRAM_WEBHOOK_SECRET_TOKEN
+
+pnpm dlx vercel@latest env pull .env.local
+```
+
+`.env.local` should now contain:
+
+```
+TELEGRAM_BOT_TOKEN=…
+TELEGRAM_WEBHOOK_SECRET_TOKEN=…
+KV_REST_API_URL=…
+KV_REST_API_TOKEN=…
+VERCEL_OIDC_TOKEN=…
+```
+
+### 6. Register the webhook with Telegram
+
+Deploy first so you have a public URL:
+
+```bash
+pnpm dlx vercel@latest deploy --prod
+# → https://<your-project>.vercel.app
+```
+
+Then point Telegram at `/api/telegram` on that deployment. **The
+`allowed_updates` list must include `callback_query`**, or every
+inline-button tap (pickup confirmations, volunteer accepts) is silently
+dropped:
+
+```bash
+curl -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+  -H 'content-type: application/json' \
+  -d '{
+    "url": "https://<your-project>.vercel.app/api/telegram",
+    "secret_token": "<TELEGRAM_WEBHOOK_SECRET_TOKEN>",
+    "allowed_updates": ["message", "edited_message", "callback_query"]
+  }'
+```
+
+Verify:
+
+```bash
+curl "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo"
+# → expect "url" matches your deployment + "pending_update_count": 0
+```
+
+### 7. Add the bot to your group
+
+In Telegram: open the group → group settings → **Add member** → search
+the bot's username → **Add as admin** with permissions to read messages
+and send messages. (Admin role is needed only because Telegram's privacy
+rules restrict non-admin bots from seeing every message even with
+privacy disabled.)
+
+DM the bot once from your own account so it has a 1:1 chat open with you,
+then register:
+
+```
+/register Diego, Methfesselstraße 88, III. Etage
+```
+
+You're live.
+
+---
+
+## Running locally
+
+For iteration without redeploying on every change, use Ash's dev server +
+an ngrok-style tunnel pointed at the Telegram webhook:
+
+```bash
+pnpm dev          # ash dev — local Ash server, channel mounted at /api/telegram
 pnpm test         # vitest run
 pnpm typecheck    # tsgo
 pnpm build        # ash build
 ```
 
-The Telegram webhook is at `/api/telegram`. Point `@BotFather`'s webhook
-URL at your deployment (or an ngrok tunnel during dev) with the
-`X-Telegram-Bot-Api-Secret-Token` set to `TELEGRAM_WEBHOOK_SECRET_TOKEN`.
-
-> ⚠️ `setWebhook` must include `allowed_updates: ["message", "callback_query",
-> "edited_message"]`. Without `callback_query`, every inline-button tap is
-> silently dropped.
+Then in another terminal expose `localhost:3000` publicly (`ngrok http
+3000`, `cloudflared tunnel`, or `vercel dev` with a tunnel) and re-run
+the `setWebhook` call from step 6 with the tunnel URL instead of the
+production URL. Switch back to the production URL when you're done.
 
 ---
 
