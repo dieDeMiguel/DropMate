@@ -2,7 +2,7 @@
  * Channel-deterministic registration (v2.1 #97).
  *
  * Live trace 2026-05-22 (prod `dpl_8A1T6ECT4ttiWRnBHot7Sa3vEUC9`): a new
- * user DM'd `/register Diego de Miguel Lutterothstrasse 69 Erdgeschoss
+ * user DM'd `/register Anna Müller Hauptstrasse 12 Erdgeschoss
  * Links` and received TEN bot messages — a freely-generated English +
  * German welcome wall, a trilingual `/language` brochure, a confirmation,
  * two duplicate `Habe in der Gruppe gefragt …` Flow-2 misfires, and more
@@ -18,7 +18,7 @@
  *      classifier call (the user typing the slash is already a
  *      high-confidence signal, identical to how `/receive` skips the
  *      Flow-2 classifier in Slice 2 / #87).
- *   2. Free-text registration (e.g. `Diego de Miguel, Lutterothstrasse
+ *   2. Free-text registration (e.g. `Anna Müller, Hauptstrasse
  *      69 Erdgeschoss Links`) — same regex (without the slash prefix
  *      requirement). Free-text is more conservative than the slash:
  *      we require both a comma between name + address AND a
@@ -51,11 +51,11 @@ import { getResident, setResident, type Resident } from "./redis.js";
  *
  * Capture groups:
  *   1. name      — one or more words; case checked later (single-word
- *                  names are rejected so "Diego" alone never registers —
+ *                  names are rejected so "Anna" alone never registers —
  *                  first name + family name only)
  *   2. street    — single non-whitespace token ending in
  *                  `strasse`/`straße`/`str` (case-insensitive). German
- *                  streets are compound words (`Lutterothstrasse`,
+ *                  streets are compound words (`Hauptstrasse`,
  *                  `Methfesselstraße`), so a single \S+ token is the
  *                  right shape; abbreviated `Str.` works the same way.
  *   3. house     — number with optional letter suffix (`12a`, `12-14`)
@@ -63,14 +63,14 @@ import { getResident, setResident, type Resident } from "./redis.js";
  *                  free-form remainder we then sub-parse for floor +
  *                  buzzer. Optional.
  *
- * "Methfesselstraße" / "Lutterothstrasse" / "Eppendorfer Str." all match.
+ * "Methfesselstraße" / "Hauptstrasse" / "Eppendorfer Str." all match.
  * "Patricia (Hs.90)" / "Hallo!" / "Wo ist mein Paket?" do NOT match (no
  * street-suffix token).
  *
  * `.+?` for name is non-greedy so the engine prefers the shortest name
  * that still leaves a valid street-token + house-number on the right.
- * For "Diego de Miguel Lutterothstrasse 69" the only valid right-side
- * is "Lutterothstrasse 69", so name resolves to "Diego de Miguel".
+ * For "Anna Müller Hauptstrasse 12" the only valid right-side
+ * is "Hauptstrasse 12", so name resolves to "Anna Müller".
  */
 const REGISTRATION_BODY_REGEX =
   /^\s*(.+?),?\s+(\S*(?:stra(?:ss|ß)e|str\.?))\s+(\d+[A-Za-z\-]*)\b\s*(.*?)\s*$/iu;
@@ -146,7 +146,7 @@ function matchRegistrationBody(body: string): ParsedRegistration | null {
   if (!match) return null;
   const [, nameRaw, streetRaw, houseRaw, restRaw] = match;
   const name = collapseWhitespace(nameRaw!.trim());
-  // Reject single-word names ("Diego" alone). A registered resident
+  // Reject single-word names ("Anna" alone). A registered resident
   // needs a first name + family name so other neighbours can text-mention
   // them in a group post; a bare first name is too ambiguous.
   if (!/\s/.test(name)) return null;

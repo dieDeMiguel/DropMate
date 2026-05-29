@@ -155,10 +155,10 @@ export function pickupRetryToast(raw: string | null | undefined): string {
  * `[Abgeholt]` inline keyboard (built by `buildPickupKeyboard`) so the
  * requester can close the loop with a tap from their own thread.
  *
- *   en: Melanie Torena has picked up the package — you can now pick it up.
- *   de: Melanie Torena hat das Paket abgeholt – du kannst es jetzt abholen.
- *   es: Melanie Torena ha recogido el paquete — ya puedes recogerlo.
- *   tr: Melanie Torena paketi aldı — şimdi alabilirsin.
+ *   en: Lukas Schmidt has picked up the package — you can now pick it up.
+ *   de: Lukas Schmidt hat das Paket abgeholt – du kannst es jetzt abholen.
+ *   es: Lukas Schmidt ha recogido el paquete — ya puedes recogerlo.
+ *   tr: Lukas Schmidt paketi aldı — şimdi alabilirsin.
  *
  * Localised de/en/es/tr, same set as the rest of the channel; falls
  * back to German.
@@ -190,10 +190,10 @@ export function buildRecipientReadyToPickUpDmText(args: {
  * the ReceptionRequest. Names the requester so the volunteer knows the
  * loop closed; no inline keyboard, no procedural follow-up.
  *
- *   en: Got it — Diego de Miguel has been notified.
- *   de: Alles klar — Diego de Miguel wurde benachrichtigt.
- *   es: Listo — Diego de Miguel ha sido notificado.
- *   tr: Tamam — Diego de Miguel'e bildirildi.
+ *   en: Got it — Anna Müller has been notified.
+ *   de: Alles klar — Anna Müller wurde benachrichtigt.
+ *   es: Listo — Anna Müller ha sido notificado.
+ *   tr: Tamam — Anna Müller'e bildirildi.
  *
  * Localised de/en/es/tr; falls back to German.
  */

@@ -16,8 +16,8 @@ import type {
 const holder: PickupHolderSummary = {
   id: "100",
   platformId: "100",
-  name: "Diego de Miguel",
-  houseNumber: "69",
+  name: "Anna Müller",
+  houseNumber: "12",
   language: "de",
 };
 
@@ -148,60 +148,60 @@ describe("pickup-dms (v2.1 #108)", () => {
   describe("buildRecipientReadyToPickUpDmText (v2.1 #121)", () => {
     it("renders the German variant for the volunteer's stored language", () => {
       const text = buildRecipientReadyToPickUpDmText({
-        volunteerName: "Melanie Torena",
+        volunteerName: "Lukas Schmidt",
         language: "de",
       });
       expect(text).toBe(
-        "Melanie Torena hat das Paket abgeholt – du kannst es jetzt abholen.",
+        "Lukas Schmidt hat das Paket abgeholt – du kannst es jetzt abholen.",
       );
     });
 
     it("renders the English variant", () => {
       const text = buildRecipientReadyToPickUpDmText({
-        volunteerName: "Melanie Torena",
+        volunteerName: "Lukas Schmidt",
         language: "en",
       });
       expect(text).toBe(
-        "Melanie Torena has picked up the package — you can now pick it up.",
+        "Lukas Schmidt has picked up the package — you can now pick it up.",
       );
     });
 
     it("renders the Spanish variant", () => {
       const text = buildRecipientReadyToPickUpDmText({
-        volunteerName: "Melanie Torena",
+        volunteerName: "Lukas Schmidt",
         language: "es",
       });
       expect(text).toBe(
-        "Melanie Torena ha recogido el paquete — ya puedes recogerlo.",
+        "Lukas Schmidt ha recogido el paquete — ya puedes recogerlo.",
       );
     });
 
     it("renders the Turkish variant", () => {
       const text = buildRecipientReadyToPickUpDmText({
-        volunteerName: "Melanie Torena",
+        volunteerName: "Lukas Schmidt",
         language: "tr",
       });
       expect(text).toBe(
-        "Melanie Torena paketi aldı — şimdi alabilirsin.",
+        "Lukas Schmidt paketi aldı — şimdi alabilirsin.",
       );
     });
 
     it("falls back to German for unknown/null language", () => {
       expect(
         buildRecipientReadyToPickUpDmText({
-          volunteerName: "Melanie Torena",
+          volunteerName: "Lukas Schmidt",
           language: null,
         }),
       ).toBe(
-        "Melanie Torena hat das Paket abgeholt – du kannst es jetzt abholen.",
+        "Lukas Schmidt hat das Paket abgeholt – du kannst es jetzt abholen.",
       );
       expect(
         buildRecipientReadyToPickUpDmText({
-          volunteerName: "Melanie Torena",
+          volunteerName: "Lukas Schmidt",
           language: "ja",
         }),
       ).toBe(
-        "Melanie Torena hat das Paket abgeholt – du kannst es jetzt abholen.",
+        "Lukas Schmidt hat das Paket abgeholt – du kannst es jetzt abholen.",
       );
     });
   });
@@ -209,57 +209,57 @@ describe("pickup-dms (v2.1 #108)", () => {
   describe("buildVolunteerEarlyArrivalAckDmText (v2.1 #121)", () => {
     it("renders the German variant", () => {
       const text = buildVolunteerEarlyArrivalAckDmText({
-        requesterName: "Diego de Miguel",
+        requesterName: "Anna Müller",
         language: "de",
       });
       expect(text).toBe(
-        "Alles klar — Diego de Miguel wurde benachrichtigt.",
+        "Alles klar — Anna Müller wurde benachrichtigt.",
       );
     });
 
     it("renders the English variant", () => {
       const text = buildVolunteerEarlyArrivalAckDmText({
-        requesterName: "Diego de Miguel",
+        requesterName: "Anna Müller",
         language: "en",
       });
       expect(text).toBe(
-        "Got it — Diego de Miguel has been notified.",
+        "Got it — Anna Müller has been notified.",
       );
     });
 
     it("renders the Spanish variant", () => {
       const text = buildVolunteerEarlyArrivalAckDmText({
-        requesterName: "Diego de Miguel",
+        requesterName: "Anna Müller",
         language: "es",
       });
       expect(text).toBe(
-        "Listo — Diego de Miguel ha sido notificado.",
+        "Listo — Anna Müller ha sido notificado.",
       );
     });
 
     it("renders the Turkish variant", () => {
       const text = buildVolunteerEarlyArrivalAckDmText({
-        requesterName: "Diego de Miguel",
+        requesterName: "Anna Müller",
         language: "tr",
       });
       expect(text).toBe(
-        "Tamam — Diego de Miguel'e bildirildi.",
+        "Tamam — Anna Müller'e bildirildi.",
       );
     });
 
     it("falls back to German for unknown/null language", () => {
       expect(
         buildVolunteerEarlyArrivalAckDmText({
-          requesterName: "Diego de Miguel",
+          requesterName: "Anna Müller",
           language: null,
         }),
-      ).toBe("Alles klar — Diego de Miguel wurde benachrichtigt.");
+      ).toBe("Alles klar — Anna Müller wurde benachrichtigt.");
       expect(
         buildVolunteerEarlyArrivalAckDmText({
-          requesterName: "Diego de Miguel",
+          requesterName: "Anna Müller",
           language: undefined,
         }),
-      ).toBe("Alles klar — Diego de Miguel wurde benachrichtigt.");
+      ).toBe("Alles klar — Anna Müller wurde benachrichtigt.");
     });
   });
 });

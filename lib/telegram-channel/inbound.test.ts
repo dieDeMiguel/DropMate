@@ -99,16 +99,16 @@ describe("extractInboundMessage", () => {
         from: {
           id: 4242,
           language_code: "de",
-          first_name: "Diego",
-          last_name: "de Miguel",
+          first_name: "Anna",
+          last_name: "Müller",
           username: "diego_demiguel",
         },
       },
     };
     expect(extractInboundMessage(update)).toMatchObject({
       fromUserId: 4242,
-      fromFirstName: "Diego",
-      fromLastName: "de Miguel",
+      fromFirstName: "Anna",
+      fromLastName: "Müller",
       fromUsername: "diego_demiguel",
     });
   });

@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-05-27
-- **Decision maker**: Diego (HITL via `/grill-me` session)
+- **Decision maker**: Anna (HITL via `/grill-me` session)
 - **Slice**: This ADR is the deliverable of **Slice 1** of the state-machine refactor umbrella. Slices 2–7 implement what's locked here.
 
 ## Context
@@ -142,7 +142,7 @@ Actions in the returned array execute in array order, awaiting each before the n
 ```ts
 const actions: Action[] = [
   Action.sendDirectMessage(recipientChatId, "Hab notiert — danke!",  { traceStage: "dm" }),
-  Action.sendDirectMessage(holderChatId,    "Melanie picked up...",  { traceStage: "dm" }),
+  Action.sendDirectMessage(holderChatId,    "Lukas picked up...",  { traceStage: "dm" }),
   Action.parallel([
     Action.recordObservation(...),
     Action.emitTrace("flow1", "pickup.end"),

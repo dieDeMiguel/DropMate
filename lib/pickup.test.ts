@@ -93,8 +93,8 @@ describe("confirmPickup (v2.1 #108 — channel-deterministic Flow 1 pickup)", ()
   it("flips a held package to picked_up when the caller is the recipient", async () => {
     const holder = seedResident({
       id: "100",
-      name: "Diego de Miguel",
-      houseNumber: "69",
+      name: "Anna Müller",
+      houseNumber: "12",
       platformId: "100",
     });
     const recipient = seedResident({
@@ -119,8 +119,8 @@ describe("confirmPickup (v2.1 #108 — channel-deterministic Flow 1 pickup)", ()
     expect(packageStore.get("pkg_42")!.status).toBe("picked_up");
 
     expect(result.holder).not.toBeNull();
-    expect(result.holder?.name).toBe("Diego de Miguel");
-    expect(result.holder?.houseNumber).toBe("69");
+    expect(result.holder?.name).toBe("Anna Müller");
+    expect(result.holder?.houseNumber).toBe("12");
     expect(result.holder?.platformId).toBe("100");
     expect(result.holder?.language).toBe("de");
 

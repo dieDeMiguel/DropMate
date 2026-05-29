@@ -31,7 +31,7 @@ describe("isRegisterCommand", () => {
   it("matches `/register` with args", async () => {
     const { isRegisterCommand } = await loadLib();
     expect(
-      isRegisterCommand("/register Diego de Miguel Lutterothstrasse 69"),
+      isRegisterCommand("/register Anna Müller Hauptstrasse 12"),
     ).toBe(true);
   });
   it("matches `/register@DropMate_bot`", async () => {
@@ -40,7 +40,7 @@ describe("isRegisterCommand", () => {
   });
   it("rejects `/registerx`", async () => {
     const { isRegisterCommand } = await loadLib();
-    expect(isRegisterCommand("/registerx Diego")).toBe(false);
+    expect(isRegisterCommand("/registerx Anna")).toBe(false);
   });
   it("rejects `/receive` (a different slash command)", async () => {
     const { isRegisterCommand } = await loadLib();
@@ -67,7 +67,7 @@ describe("isStartCommand", () => {
   });
   it("rejects `/register` (a different slash command)", async () => {
     const { isStartCommand } = await loadLib();
-    expect(isStartCommand("/register Diego")).toBe(false);
+    expect(isStartCommand("/register Anna")).toBe(false);
   });
 });
 
@@ -77,28 +77,28 @@ describe("parseRegisterCommand", () => {
     expect(parseRegisterCommand("/register")).toBeNull();
   });
 
-  it("parses the canonical live-trace input — name + Lutterothstrasse + house + Erdgeschoss + Links", async () => {
+  it("parses the canonical live-trace input — name + Hauptstrasse + house + Erdgeschoss + Links", async () => {
     const { parseRegisterCommand } = await loadLib();
     expect(
       parseRegisterCommand(
-        "/register Diego de Miguel Lutterothstrasse 69 Erdgeschoss Links",
+        "/register Anna Müller Hauptstrasse 12 Erdgeschoss Links",
       ),
     ).toEqual({
-      name: "Diego de Miguel",
-      street: "Lutterothstrasse",
-      houseNumber: "69",
+      name: "Anna Müller",
+      street: "Hauptstrasse",
+      houseNumber: "12",
       floor: "Erdgeschoss",
       buzzerName: "Links",
     });
   });
 
-  it("parses the canonical ß variant — Lutterothstraße", async () => {
+  it("parses the canonical ß variant — Hauptstraße", async () => {
     const { parseRegisterCommand } = await loadLib();
     const parsed = parseRegisterCommand(
-      "/register Diego de Miguel Lutterothstraße 69 Erdgeschoss Links",
+      "/register Anna Müller Hauptstraße 12 Erdgeschoss Links",
     );
-    expect(parsed?.street).toBe("Lutterothstraße");
-    expect(parsed?.houseNumber).toBe("69");
+    expect(parsed?.street).toBe("Hauptstraße");
+    expect(parsed?.houseNumber).toBe("12");
   });
 
   it("tolerates a comma between name and address", async () => {
@@ -130,20 +130,20 @@ describe("parseRegisterCommand", () => {
 
   it("treats a single-word name as unparseable (needs first + family)", async () => {
     const { parseRegisterCommand } = await loadLib();
-    expect(parseRegisterCommand("/register Diego Lutterothstrasse 69")).toBeNull();
+    expect(parseRegisterCommand("/register Anna Hauptstrasse 12")).toBeNull();
   });
 
   it("treats input missing a street as unparseable", async () => {
     const { parseRegisterCommand } = await loadLib();
     expect(
-      parseRegisterCommand("/register Diego de Miguel 69 Erdgeschoss"),
+      parseRegisterCommand("/register Anna Müller 69 Erdgeschoss"),
     ).toBeNull();
   });
 
   it("omits buzzer when only a floor is given", async () => {
     const { parseRegisterCommand } = await loadLib();
     const parsed = parseRegisterCommand(
-      "/register Diego de Miguel Lutterothstrasse 69 Erdgeschoss",
+      "/register Anna Müller Hauptstrasse 12 Erdgeschoss",
     );
     expect(parsed?.floor).toBe("Erdgeschoss");
     expect(parsed?.buzzerName).toBeUndefined();
@@ -152,7 +152,7 @@ describe("parseRegisterCommand", () => {
   it("omits floor and buzzer when neither is given", async () => {
     const { parseRegisterCommand } = await loadLib();
     const parsed = parseRegisterCommand(
-      "/register Diego de Miguel Lutterothstrasse 69",
+      "/register Anna Müller Hauptstrasse 12",
     );
     expect(parsed?.floor).toBeUndefined();
     expect(parsed?.buzzerName).toBeUndefined();
@@ -160,16 +160,16 @@ describe("parseRegisterCommand", () => {
 });
 
 describe("parseFreeTextRegistration", () => {
-  it("parses `Diego de Miguel, Lutterothstrasse 69 Erdgeschoss Links`", async () => {
+  it("parses `Anna Müller, Hauptstrasse 12 Erdgeschoss Links`", async () => {
     const { parseFreeTextRegistration } = await loadLib();
     expect(
       parseFreeTextRegistration(
-        "Diego de Miguel, Lutterothstrasse 69 Erdgeschoss Links",
+        "Anna Müller, Hauptstrasse 12 Erdgeschoss Links",
       ),
     ).toEqual({
-      name: "Diego de Miguel",
-      street: "Lutterothstrasse",
-      houseNumber: "69",
+      name: "Anna Müller",
+      street: "Hauptstrasse",
+      houseNumber: "12",
       floor: "Erdgeschoss",
       buzzerName: "Links",
     });
@@ -179,7 +179,7 @@ describe("parseFreeTextRegistration", () => {
     const { parseFreeTextRegistration } = await loadLib();
     expect(
       parseFreeTextRegistration(
-        "/register Diego de Miguel, Lutterothstrasse 69",
+        "/register Anna Müller, Hauptstrasse 12",
       ),
     ).toBeNull();
   });
@@ -203,7 +203,7 @@ describe("parseFreeTextRegistration", () => {
   it("returns null for a name + street with no house number", async () => {
     const { parseFreeTextRegistration } = await loadLib();
     expect(
-      parseFreeTextRegistration("Diego de Miguel, Lutterothstrasse"),
+      parseFreeTextRegistration("Anna Müller, Hauptstrasse"),
     ).toBeNull();
   });
 });
@@ -217,9 +217,9 @@ describe("registerResident", () => {
   it("writes a fresh Resident record on first registration", async () => {
     const { registerResident } = await loadLib();
     const { resident, updated } = await registerResident({
-      name: "Diego de Miguel",
-      street: "Lutterothstrasse",
-      houseNumber: "69",
+      name: "Anna Müller",
+      street: "Hauptstrasse",
+      houseNumber: "12",
       floor: "Erdgeschoss",
       buzzerName: "Links",
       platformId: "12345",
@@ -228,9 +228,9 @@ describe("registerResident", () => {
     expect(updated).toBe(false);
     expect(resident.platformId).toBe("12345");
     expect(resident.id).toBe("12345");
-    expect(resident.name).toBe("Diego de Miguel");
-    expect(resident.street).toBe("Lutterothstrasse");
-    expect(resident.houseNumber).toBe("69");
+    expect(resident.name).toBe("Anna Müller");
+    expect(resident.street).toBe("Hauptstrasse");
+    expect(resident.houseNumber).toBe("12");
     expect(resident.floor).toBe("Erdgeschoss");
     expect(resident.buzzerName).toBe("Links");
     expect(resident.language).toBe("de");
@@ -255,9 +255,9 @@ describe("registerResident", () => {
     });
     const { registerResident } = await loadLib();
     const { resident, updated } = await registerResident({
-      name: "Diego de Miguel",
-      street: "Lutterothstrasse",
-      houseNumber: "69",
+      name: "Anna Müller",
+      street: "Hauptstrasse",
+      houseNumber: "12",
       floor: "Erdgeschoss",
       platformId: "12345",
       telegramLanguageCode: "de", // ignored — existing.language wins
@@ -267,8 +267,8 @@ describe("registerResident", () => {
     expect(resident.registeredAt).toBe(1700000000000);
     expect(resident.language).toBe("tr"); // preserved
     expect(resident.availabilityPatterns).toEqual(["mornings"]);
-    expect(resident.name).toBe("Diego de Miguel"); // updated
-    expect(resident.street).toBe("Lutterothstrasse"); // updated
+    expect(resident.name).toBe("Anna Müller"); // updated
+    expect(resident.street).toBe("Hauptstrasse"); // updated
     expect(resident.source).toBe("explicit"); // re-registration always upgrades
     expect(resident.confirmed).toBe(true);
   });
@@ -276,9 +276,9 @@ describe("registerResident", () => {
   it("normalises a BCP-47 language code (de-AT → de)", async () => {
     const { registerResident } = await loadLib();
     const { resident } = await registerResident({
-      name: "Diego de Miguel",
-      street: "Lutterothstrasse",
-      houseNumber: "69",
+      name: "Anna Müller",
+      street: "Hauptstrasse",
+      houseNumber: "12",
       platformId: "12345",
       telegramLanguageCode: "de-AT",
     });
@@ -288,9 +288,9 @@ describe("registerResident", () => {
   it("leaves language undefined when no telegramLanguageCode and no existing record", async () => {
     const { registerResident } = await loadLib();
     const { resident } = await registerResident({
-      name: "Diego de Miguel",
-      street: "Lutterothstrasse",
-      houseNumber: "69",
+      name: "Anna Müller",
+      street: "Hauptstrasse",
+      houseNumber: "12",
       platformId: "12345",
     });
     expect(resident.language).toBeUndefined();
@@ -300,9 +300,9 @@ describe("registerResident", () => {
 describe("buildRegistrationConfirmationDm", () => {
   const baseResident: Resident = {
     id: "12345",
-    name: "Diego de Miguel",
-    street: "Lutterothstrasse",
-    houseNumber: "69",
+    name: "Anna Müller",
+    street: "Hauptstrasse",
+    houseNumber: "12",
     floor: "Erdgeschoss Links",
     platformId: "12345",
     platform: "telegram",
@@ -316,7 +316,7 @@ describe("buildRegistrationConfirmationDm", () => {
   it("renders the canonical German confirmation", async () => {
     const { buildRegistrationConfirmationDm } = await loadLib();
     expect(buildRegistrationConfirmationDm({ resident: baseResident })).toBe(
-      "Vielen Dank, Diego de Miguel! Du bist jetzt unter Lutterothstrasse 69, Erdgeschoss Links registriert.",
+      "Vielen Dank, Anna Müller! Du bist jetzt unter Hauptstrasse 12, Erdgeschoss Links registriert.",
     );
   });
 
@@ -327,7 +327,7 @@ describe("buildRegistrationConfirmationDm", () => {
         resident: { ...baseResident, language: "en" },
       }),
     ).toBe(
-      "Thanks, Diego de Miguel! You're registered at Lutterothstrasse 69, Erdgeschoss Links.",
+      "Thanks, Anna Müller! You're registered at Hauptstrasse 12, Erdgeschoss Links.",
     );
   });
 
@@ -337,7 +337,7 @@ describe("buildRegistrationConfirmationDm", () => {
       buildRegistrationConfirmationDm({
         resident: { ...baseResident, language: "es", floor: undefined },
       }),
-    ).toBe("Gracias, Diego de Miguel! Estás registrado en Lutterothstrasse 69.");
+    ).toBe("Gracias, Anna Müller! Estás registrado en Hauptstrasse 12.");
   });
 
   it("renders Turkish when resident.language is 'tr'", async () => {
@@ -347,7 +347,7 @@ describe("buildRegistrationConfirmationDm", () => {
         resident: { ...baseResident, language: "tr", floor: undefined },
       }),
     ).toBe(
-      "Teşekkürler, Diego de Miguel! Lutterothstrasse 69 adresine kaydedildin.",
+      "Teşekkürler, Anna Müller! Hauptstrasse 12 adresine kaydedildin.",
     );
   });
 
@@ -358,7 +358,7 @@ describe("buildRegistrationConfirmationDm", () => {
         resident: { ...baseResident, language: undefined, floor: undefined },
         fallbackLanguageCode: "en",
       }),
-    ).toBe("Thanks, Diego de Miguel! You're registered at Lutterothstrasse 69.");
+    ).toBe("Thanks, Anna Müller! You're registered at Hauptstrasse 12.");
   });
 
   it("falls back to German when neither resident.language nor fallback is set", async () => {
@@ -368,7 +368,7 @@ describe("buildRegistrationConfirmationDm", () => {
         resident: { ...baseResident, language: undefined, floor: undefined },
       }),
     ).toBe(
-      "Vielen Dank, Diego de Miguel! Du bist jetzt unter Lutterothstrasse 69 registriert.",
+      "Vielen Dank, Anna Müller! Du bist jetzt unter Hauptstrasse 12 registriert.",
     );
   });
 
@@ -379,7 +379,7 @@ describe("buildRegistrationConfirmationDm", () => {
     });
     expect(out).not.toContain(", ,");
     expect(out).toBe(
-      "Vielen Dank, Diego de Miguel! Du bist jetzt unter Lutterothstrasse 69 registriert.",
+      "Vielen Dank, Anna Müller! Du bist jetzt unter Hauptstrasse 12 registriert.",
     );
   });
 });

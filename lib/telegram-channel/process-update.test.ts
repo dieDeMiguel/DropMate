@@ -228,8 +228,8 @@ function buildDeps(overrides: {
     holder: {
       id: "100",
       platformId: "100",
-      name: "Diego de Miguel",
-      houseNumber: "69",
+      name: "Anna Müller",
+      houseNumber: "12",
       floor: "Erdgeschoss",
       buzzerName: null,
       language: "de",
@@ -291,8 +291,8 @@ function buildDeps(overrides: {
     holder: {
       id: "100",
       platformId: "100",
-      name: "Diego de Miguel",
-      houseNumber: "69",
+      name: "Anna Müller",
+      houseNumber: "12",
       language: "de",
     },
     recipient: {
@@ -426,9 +426,9 @@ function buildDeps(overrides: {
   const defaultRegisterResult = {
     resident: {
       id: "12345",
-      name: "Diego de Miguel",
-      street: "Lutterothstrasse",
-      houseNumber: "69",
+      name: "Anna Müller",
+      street: "Hauptstrasse",
+      houseNumber: "12",
       floor: "Erdgeschoss Links",
       platformId: "12345",
       platform: "telegram" as const,
@@ -1016,7 +1016,7 @@ describe("processInboundTelegramUpdate", () => {
         // Group ack lands on the STREET group chat, NOT the holder's
         // DM chat.
         expect(groupChatId).toBe(-100123);
-        expect(groupText).toContain("📦 Paket von Diego de Miguel");
+        expect(groupText).toContain("📦 Paket von Anna Müller");
         expect(groupText).toContain("Marlene Hartmann");
         // v2.1 #114 regression pin: NO inline keyboard on group ack.
         expect(groupKeyboard).toBeUndefined();
@@ -1638,8 +1638,8 @@ describe("processInboundTelegramUpdate", () => {
           from: {
             id: 999,
             is_bot: false,
-            first_name: "Diego",
-            last_name: "de Miguel",
+            first_name: "Anna",
+            last_name: "Müller",
             username: "diego_demiguel",
             language_code: "de",
           },
@@ -1651,8 +1651,8 @@ describe("processInboundTelegramUpdate", () => {
     expect(recordTelegramObservation).toHaveBeenCalledTimes(1);
     expect(recordTelegramObservation).toHaveBeenCalledWith({
       userId: 999,
-      firstName: "Diego",
-      lastName: "de Miguel",
+      firstName: "Anna",
+      lastName: "Müller",
       username: "diego_demiguel",
       languageCode: "de",
       chatId: 5,
@@ -3711,7 +3711,7 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
       200,
       "Hab notiert — danke!",
     ]);
-    // Holder thanks DM: chatId=100 (Diego), language "de".
+    // Holder thanks DM: chatId=100 (Anna), language "de".
     expect(sendDirectMessage.mock.calls[1]![0]).toBe(100);
     expect(sendDirectMessage.mock.calls[1]![1]).toBe(
       "Marlene Hartmann hat das Paket abgeholt – danke fürs Annehmen!",
@@ -3780,18 +3780,18 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
   // v2.1 #122: defensive copy for the 0-match branch when the caller
   // has a matched RR as requester but no held Package yet.
   describe("v2.1 #122: 0 open packages + matched RR as requester → waiting-on-volunteer DM", () => {
-    function matchedRequestForDiego(
+    function matchedRequestForAnna(
       overrides: Partial<ReceptionRequest> = {},
     ): ReceptionRequest {
       return {
         id: "req_mpmac3o7_sb0isv",
         streetId: "Methfesselstraße",
-        requesterResidentId: "200", // Diego (the caller in this scenario)
-        requesterName: "Diego de Miguel",
+        requesterResidentId: "200", // Anna (the caller in this scenario)
+        requesterName: "Anna Müller",
         requesterHouseNumber: "88",
         carrier: "DHL",
         expectedAt: null,
-        volunteerResidentId: "300", // Melanie
+        volunteerResidentId: "300", // Lukas
         volunteerAvailability: null,
         status: "matched",
         createdAt: Date.now() - 60_000,
@@ -3803,7 +3803,7 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
     function melanieResident(): Resident {
       return {
         id: "300",
-        name: "Melanie Torena",
+        name: "Lukas Schmidt",
         street: "Methfesselstraße",
         houseNumber: "44",
         platformId: "300",
@@ -3833,7 +3833,7 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
         },
         registeredResident: resident,
         openPackagesForRecipient: [],
-        matchedReceptionRequestsForRequester: [matchedRequestForDiego()],
+        matchedReceptionRequestsForRequester: [matchedRequestForAnna()],
         residentByPlatformId: melanieResident(),
       });
 
@@ -3858,7 +3858,7 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
       expect(sendToAsh).not.toHaveBeenCalled();
       expect(sendDirectMessage).toHaveBeenCalledTimes(1);
       expect(sendDirectMessage.mock.calls[0]![1]).toBe(
-        "Dein Paket ist noch nicht da – Melanie Torena nimmt es für dich an. Ich melde mich, sobald sie es übergibt.",
+        "Dein Paket ist noch nicht da – Lukas Schmidt nimmt es für dich an. Ich melde mich, sobald sie es übergibt.",
       );
     });
 
@@ -3872,7 +3872,7 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
         },
         registeredResident: resident,
         openPackagesForRecipient: [],
-        matchedReceptionRequestsForRequester: [matchedRequestForDiego()],
+        matchedReceptionRequestsForRequester: [matchedRequestForAnna()],
         residentByPlatformId: melanieResident(),
       });
 
@@ -3889,7 +3889,7 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
       );
 
       expect(sendDirectMessage.mock.calls[0]![1]).toBe(
-        "Your package isn't here yet — Melanie Torena is collecting it for you. I'll DM you the moment they hand it over.",
+        "Your package isn't here yet — Lukas Schmidt is collecting it for you. I'll DM you the moment they hand it over.",
       );
     });
 
@@ -3898,12 +3898,12 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
       // listMatchedReceptionRequestsForRequester is contracted to return
       // most-recent-first; assert the channel does NOT re-sort or pick
       // by some other criterion (e.g. carrier preference).
-      const newest = matchedRequestForDiego({
+      const newest = matchedRequestForAnna({
         id: "req_newest",
-        volunteerResidentId: "300", // Melanie
+        volunteerResidentId: "300", // Lukas
         createdAt: Date.now() - 10_000,
       });
-      const older = matchedRequestForDiego({
+      const older = matchedRequestForAnna({
         id: "req_older",
         volunteerResidentId: "400", // someone else
         createdAt: Date.now() - 100_000,
@@ -3936,7 +3936,7 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
       // RR (volunteer id "400") must not be looked up.
       expect(getResidentByPlatformId).toHaveBeenCalledTimes(1);
       expect(getResidentByPlatformId).toHaveBeenCalledWith("300");
-      expect(sendDirectMessage.mock.calls[0]![1]).toContain("Melanie Torena");
+      expect(sendDirectMessage.mock.calls[0]![1]).toContain("Lukas Schmidt");
     });
 
     it("matched RR + getResidentByPlatformId returns null → falls back to volunteer-name-free phrasing", async () => {
@@ -3949,7 +3949,7 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
         },
         registeredResident: resident,
         openPackagesForRecipient: [],
-        matchedReceptionRequestsForRequester: [matchedRequestForDiego()],
+        matchedReceptionRequestsForRequester: [matchedRequestForAnna()],
         residentByPlatformId: null,
       });
 
@@ -3980,7 +3980,7 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
         },
         registeredResident: resident,
         openPackagesForRecipient: [],
-        matchedReceptionRequestsForRequester: [matchedRequestForDiego()],
+        matchedReceptionRequestsForRequester: [matchedRequestForAnna()],
         residentByPlatformIdError: new Error("redis hiccup"),
       });
 
@@ -4019,7 +4019,7 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
         registeredResident: resident,
         openPackagesForRecipient: [],
         matchedReceptionRequestsForRequester: [
-          matchedRequestForDiego({ volunteerResidentId: null }),
+          matchedRequestForAnna({ volunteerResidentId: null }),
         ],
       });
 
@@ -4431,15 +4431,15 @@ describe("processInboundTelegramUpdate — DM-text pickup confirmation (v2.1 #11
 });
 
 describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer early-arrival (v2.1 #121)", () => {
-  // The Diego ↔ Melanie scenario from the issue body. Diego posted a
-  // Flow 2 request; Melanie tapped [Ich kann helfen] and is now the
+  // The Anna ↔ Lukas scenario from the issue body. Anna posted a
+  // Flow 2 request; Lukas tapped [Ich kann helfen] and is now the
   // matched volunteer. The bot has a `matched` RR with
-  // requester=Diego (resident "100"), volunteer=Melanie (resident
-  // "300"). Melanie DMs "Hab das Paket schon" / "got it - thanks!".
+  // requester=Anna (resident "100"), volunteer=Lukas (resident
+  // "300"). Lukas DMs "Hab das Paket schon" / "got it - thanks!".
   function melanieVolunteer(language: string | undefined = "de"): Resident {
     return {
       id: "300",
-      name: "Melanie Torena",
+      name: "Lukas Schmidt",
       street: "Methfesselstraße",
       houseNumber: "44",
       platformId: "300",
@@ -4452,18 +4452,18 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
     };
   }
 
-  function matchedRequestRequesterDiegoVolunteerMelanie(
+  function matchedRequestRequesterAnnaVolunteerLukas(
     overrides: Partial<ReceptionRequest> = {},
   ): ReceptionRequest {
     return {
       id: "req_mpmac3o7_sb0isv",
       streetId: "Methfesselstraße",
-      requesterResidentId: "100", // Diego (the requester)
-      requesterName: "Diego de Miguel",
-      requesterHouseNumber: "69",
+      requesterResidentId: "100", // Anna (the requester)
+      requesterName: "Anna Müller",
+      requesterHouseNumber: "12",
       carrier: "DHL",
       expectedAt: null,
-      volunteerResidentId: "300", // Melanie (the volunteer / caller)
+      volunteerResidentId: "300", // Lukas (the volunteer / caller)
       volunteerAvailability: null,
       status: "matched",
       createdAt: Date.now() - 60_000,
@@ -4472,7 +4472,7 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
     };
   }
 
-  function registerPackageResultForDiegoFromMelanie(
+  function registerPackageResultForAnnaFromLukas(
     overrides?: Partial<RegisterPackageResult>,
   ): RegisterPackageResult {
     return {
@@ -4480,8 +4480,8 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
         id: "pkg_new",
         streetId: "Methfesselstraße",
         recipientResidentId: "100",
-        recipientName: "Diego de Miguel",
-        recipientHouseNumber: "69",
+        recipientName: "Anna Müller",
+        recipientHouseNumber: "12",
         holderResidentId: "300",
         carrier: "DHL",
         status: "held",
@@ -4493,7 +4493,7 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
       holder: {
         id: "300",
         platformId: "300",
-        name: "Melanie Torena",
+        name: "Lukas Schmidt",
         houseNumber: "44",
         floor: null,
         buzzerName: null,
@@ -4503,8 +4503,8 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
         kind: "resident",
         resident: {
           id: "100",
-          name: "Diego de Miguel",
-          houseNumber: "69",
+          name: "Anna Müller",
+          houseNumber: "12",
           language: "de",
           floor: null,
           buzzerName: null,
@@ -4536,9 +4536,9 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
       },
       registeredResident: volunteer,
       matchedReceptionRequestsForVolunteer: [
-        matchedRequestRequesterDiegoVolunteerMelanie(),
+        matchedRequestRequesterAnnaVolunteerLukas(),
       ],
-      registerPackageResult: registerPackageResultForDiegoFromMelanie(),
+      registerPackageResult: registerPackageResultForAnnaFromLukas(),
     });
 
     await processInboundTelegramUpdate(
@@ -4559,21 +4559,21 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
     );
     expect(registerPackage).toHaveBeenCalledTimes(1);
     expect(registerPackage).toHaveBeenCalledWith(volunteer, {
-      recipientName: "Diego de Miguel",
-      recipientHouseNumber: "69",
+      recipientName: "Anna Müller",
+      recipientHouseNumber: "12",
       carrier: "DHL",
     });
     expect(sendToAsh).not.toHaveBeenCalled();
 
-    // Two DMs: recipient (Diego, chatId=100) with [Abgeholt] keyboard,
-    // and volunteer (Melanie, chatId=300) with the German ack.
+    // Two DMs: recipient (Anna, chatId=100) with [Abgeholt] keyboard,
+    // and volunteer (Lukas, chatId=300) with the German ack.
     expect(sendDirectMessage).toHaveBeenCalledTimes(2);
 
     // Recipient DM: text + keyboard.
     const recipientCall = sendDirectMessage.mock.calls[0]!;
     expect(recipientCall[0]).toBe(100);
     expect(recipientCall[1]).toBe(
-      "Melanie Torena hat das Paket abgeholt – du kannst es jetzt abholen.",
+      "Lukas Schmidt hat das Paket abgeholt – du kannst es jetzt abholen.",
     );
     // 4th arg is the keyboard.
     expect(recipientCall[3]).toEqual({
@@ -4591,7 +4591,7 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
     const volunteerCall = sendDirectMessage.mock.calls[1]!;
     expect(volunteerCall[0]).toBe(300);
     expect(volunteerCall[1]).toBe(
-      "Alles klar — Diego de Miguel wurde benachrichtigt.",
+      "Alles klar — Anna Müller wurde benachrichtigt.",
     );
   });
 
@@ -4605,15 +4605,15 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
       },
       registeredResident: volunteer,
       matchedReceptionRequestsForVolunteer: [
-        matchedRequestRequesterDiegoVolunteerMelanie(),
+        matchedRequestRequesterAnnaVolunteerLukas(),
       ],
-      registerPackageResult: registerPackageResultForDiegoFromMelanie({
+      registerPackageResult: registerPackageResultForAnnaFromLukas({
         recipientResolution: {
           kind: "resident",
           resident: {
             id: "100",
-            name: "Diego de Miguel",
-            houseNumber: "69",
+            name: "Anna Müller",
+            houseNumber: "12",
             language: "en",
             floor: null,
             buzzerName: null,
@@ -4636,11 +4636,11 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
 
     // Recipient DM in English (their stored language).
     expect(sendDirectMessage.mock.calls[0]![1]).toBe(
-      "Melanie Torena has picked up the package — you can now pick it up.",
+      "Lukas Schmidt has picked up the package — you can now pick it up.",
     );
     // Volunteer ack DM in English (their stored language).
     expect(sendDirectMessage.mock.calls[1]![1]).toBe(
-      "Got it — Diego de Miguel has been notified.",
+      "Got it — Anna Müller has been notified.",
     );
   });
 
@@ -4696,8 +4696,8 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
       },
       registeredResident: volunteer,
       matchedReceptionRequestsForVolunteer: [
-        matchedRequestRequesterDiegoVolunteerMelanie({ id: "req_A" }),
-        matchedRequestRequesterDiegoVolunteerMelanie({
+        matchedRequestRequesterAnnaVolunteerLukas({ id: "req_A" }),
+        matchedRequestRequesterAnnaVolunteerLukas({
           id: "req_B",
           requesterResidentId: "999",
           requesterName: "Other Neighbour",
@@ -4738,7 +4738,7 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
       },
       registeredResident: null,
       matchedReceptionRequestsForVolunteer: [
-        matchedRequestRequesterDiegoVolunteerMelanie(),
+        matchedRequestRequesterAnnaVolunteerLukas(),
       ],
     });
 
@@ -4780,7 +4780,7 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
       },
       registeredResident: volunteer,
       matchedReceptionRequestsForVolunteer: [
-        matchedRequestRequesterDiegoVolunteerMelanie(),
+        matchedRequestRequesterAnnaVolunteerLukas(),
       ],
     });
 
@@ -4847,7 +4847,7 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
       },
       registeredResident: volunteer,
       matchedReceptionRequestsForVolunteer: [
-        matchedRequestRequesterDiegoVolunteerMelanie(),
+        matchedRequestRequesterAnnaVolunteerLukas(),
       ],
       registerPackageError: new Error("redis hiccup on setPackage"),
     });
@@ -4885,9 +4885,9 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
       },
       registeredResident: volunteer,
       matchedReceptionRequestsForVolunteer: [
-        matchedRequestRequesterDiegoVolunteerMelanie({ carrier: "DHL" }),
+        matchedRequestRequesterAnnaVolunteerLukas({ carrier: "DHL" }),
       ],
-      registerPackageResult: registerPackageResultForDiegoFromMelanie(),
+      registerPackageResult: registerPackageResultForAnnaFromLukas(),
     });
 
     await processInboundTelegramUpdate(
@@ -4903,8 +4903,8 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
     );
 
     expect(registerPackage).toHaveBeenCalledWith(volunteer, {
-      recipientName: "Diego de Miguel",
-      recipientHouseNumber: "69",
+      recipientName: "Anna Müller",
+      recipientHouseNumber: "12",
       carrier: "Hermes",
     });
   });
@@ -4919,9 +4919,9 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
       },
       registeredResident: volunteer,
       matchedReceptionRequestsForVolunteer: [
-        matchedRequestRequesterDiegoVolunteerMelanie({ carrier: "DHL" }),
+        matchedRequestRequesterAnnaVolunteerLukas({ carrier: "DHL" }),
       ],
-      registerPackageResult: registerPackageResultForDiegoFromMelanie(),
+      registerPackageResult: registerPackageResultForAnnaFromLukas(),
     });
 
     await processInboundTelegramUpdate(
@@ -4937,8 +4937,8 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
     );
 
     expect(registerPackage).toHaveBeenCalledWith(volunteer, {
-      recipientName: "Diego de Miguel",
-      recipientHouseNumber: "69",
+      recipientName: "Anna Müller",
+      recipientHouseNumber: "12",
       carrier: "DHL",
     });
   });
@@ -4957,9 +4957,9 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
       },
       registeredResident: volunteer,
       matchedReceptionRequestsForVolunteer: [
-        matchedRequestRequesterDiegoVolunteerMelanie(),
+        matchedRequestRequesterAnnaVolunteerLukas(),
       ],
-      registerPackageResult: registerPackageResultForDiegoFromMelanie(),
+      registerPackageResult: registerPackageResultForAnnaFromLukas(),
     });
     // Replace the deps' sendDirectMessage with our mock that rejects
     // the first call (recipient) and resolves the second (volunteer ack).
@@ -4985,7 +4985,7 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
     // Volunteer ack still sent.
     expect(sendDmMock.mock.calls[1]![0]).toBe(300);
     expect(sendDmMock.mock.calls[1]![1]).toBe(
-      "Alles klar — Diego de Miguel wurde benachrichtigt.",
+      "Alles klar — Anna Müller wurde benachrichtigt.",
     );
   });
 
@@ -5004,9 +5004,9 @@ describe("processInboundTelegramUpdate — DM-text Flow 2 → Flow 1 volunteer e
       },
       registeredResident: volunteer,
       matchedReceptionRequestsForVolunteer: [
-        matchedRequestRequesterDiegoVolunteerMelanie(),
+        matchedRequestRequesterAnnaVolunteerLukas(),
       ],
-      registerPackageResult: registerPackageResultForDiegoFromMelanie(),
+      registerPackageResult: registerPackageResultForAnnaFromLukas(),
     });
 
     await processInboundTelegramUpdate(
@@ -5281,7 +5281,7 @@ describe("processInboundTelegramUpdate — /receive slash command (v2.1 Slice 2,
 
 describe("processInboundTelegramUpdate — registration (v2.1 #97 — channel-deterministic DM onboarding)", () => {
   // Live trace 2026-05-22 (#97): a fresh user DM'd
-  // `/register Diego de Miguel Lutterothstrasse 69 Erdgeschoss Links`
+  // `/register Anna Müller Hauptstrasse 12 Erdgeschoss Links`
   // and received 10 bot messages — a freely-generated welcome wall, a
   // trilingual /language brochure, AND a Flow 2 misfire ("Habe in der
   // Gruppe gefragt…") against a registration message that never asked
@@ -5298,7 +5298,7 @@ describe("processInboundTelegramUpdate — registration (v2.1 #97 — channel-de
       makeRequest(
         dmUpdate({
           chatId: 99,
-          text: "/register Diego de Miguel Lutterothstrasse 69 Erdgeschoss Links",
+          text: "/register Anna Müller Hauptstrasse 12 Erdgeschoss Links",
           fromUserId: 99,
           languageCode: "de",
         }),
@@ -5313,9 +5313,9 @@ describe("processInboundTelegramUpdate — registration (v2.1 #97 — channel-de
     // Lib write was driven from the channel.
     expect(registerResident).toHaveBeenCalledTimes(1);
     expect(registerResident.mock.calls[0]![0]).toEqual({
-      name: "Diego de Miguel",
-      street: "Lutterothstrasse",
-      houseNumber: "69",
+      name: "Anna Müller",
+      street: "Hauptstrasse",
+      houseNumber: "12",
       floor: "Erdgeschoss",
       buzzerName: "Links",
       platformId: "99",
@@ -5326,7 +5326,7 @@ describe("processInboundTelegramUpdate — registration (v2.1 #97 — channel-de
     const [chatId, text] = sendDirectMessage.mock.calls[0]!;
     expect(chatId).toBe(99);
     expect(text).toBe(
-      "Vielen Dank, Diego de Miguel! Du bist jetzt unter Lutterothstrasse 69, Erdgeschoss Links registriert.",
+      "Vielen Dank, Anna Müller! Du bist jetzt unter Hauptstrasse 12, Erdgeschoss Links registriert.",
     );
   });
 
@@ -5354,14 +5354,14 @@ describe("processInboundTelegramUpdate — registration (v2.1 #97 — channel-de
     });
   });
 
-  it("free-text `Diego de Miguel, Lutterothstrasse 69 Erdgeschoss Links` is handled deterministically (no agent)", async () => {
+  it("free-text `Anna Müller, Hauptstrasse 12 Erdgeschoss Links` is handled deterministically (no agent)", async () => {
     const { deps, sendToAsh, registerResident, classifyDmIntent } = buildDeps();
 
     await processInboundTelegramUpdate(
       makeRequest(
         dmUpdate({
           chatId: 99,
-          text: "Diego de Miguel, Lutterothstrasse 69 Erdgeschoss Links",
+          text: "Anna Müller, Hauptstrasse 12 Erdgeschoss Links",
           fromUserId: 99,
           languageCode: "de",
         }),
@@ -5479,9 +5479,9 @@ describe("processInboundTelegramUpdate — registration (v2.1 #97 — channel-de
       registerResult: {
         resident: {
           id: "99",
-          name: "Diego de Miguel",
-          street: "Lutterothstrasse",
-          houseNumber: "69",
+          name: "Anna Müller",
+          street: "Hauptstrasse",
+          houseNumber: "12",
           floor: "Erdgeschoss",
           platformId: "99",
           platform: "telegram",
@@ -5499,7 +5499,7 @@ describe("processInboundTelegramUpdate — registration (v2.1 #97 — channel-de
       makeRequest(
         dmUpdate({
           chatId: 99,
-          text: "/register Diego de Miguel Lutterothstrasse 69 Erdgeschoss",
+          text: "/register Anna Müller Hauptstrasse 12 Erdgeschoss",
           fromUserId: 99,
           languageCode: "de", // ← ignored; resident.language=en wins
         }),
@@ -5509,7 +5509,7 @@ describe("processInboundTelegramUpdate — registration (v2.1 #97 — channel-de
 
     const [, text] = sendDirectMessage.mock.calls[0]!;
     expect(text).toBe(
-      "Thanks, Diego de Miguel! You're registered at Lutterothstrasse 69, Erdgeschoss.",
+      "Thanks, Anna Müller! You're registered at Hauptstrasse 12, Erdgeschoss.",
     );
   });
 
@@ -5518,9 +5518,9 @@ describe("processInboundTelegramUpdate — registration (v2.1 #97 — channel-de
       registerResult: {
         resident: {
           id: "99",
-          name: "Diego de Miguel",
-          street: "Lutterothstrasse",
-          houseNumber: "69",
+          name: "Anna Müller",
+          street: "Hauptstrasse",
+          houseNumber: "12",
           platformId: "99",
           platform: "telegram",
           // language deliberately omitted
@@ -5537,7 +5537,7 @@ describe("processInboundTelegramUpdate — registration (v2.1 #97 — channel-de
       makeRequest(
         dmUpdate({
           chatId: 99,
-          text: "/register Diego de Miguel Lutterothstrasse 69",
+          text: "/register Anna Müller Hauptstrasse 12",
           fromUserId: 99,
           languageCode: "tr",
         }),
@@ -5558,7 +5558,7 @@ describe("processInboundTelegramUpdate — registration (v2.1 #97 — channel-de
       makeRequest(
         dmUpdate({
           chatId: 99,
-          text: "/register Diego de Miguel Lutterothstrasse 69 Erdgeschoss",
+          text: "/register Anna Müller Hauptstrasse 12 Erdgeschoss",
           fromUserId: 99,
           languageCode: "de",
         }),
@@ -5596,7 +5596,7 @@ describe("processInboundTelegramUpdate — registration (v2.1 #97 — channel-de
         makeRequest(
           dmUpdate({
             chatId: 99,
-            text: "/register Diego de Miguel Lutterothstrasse 69 Erdgeschoss",
+            text: "/register Anna Müller Hauptstrasse 12 Erdgeschoss",
             fromUserId: 42,
             languageCode: "de",
           }),
@@ -5682,7 +5682,7 @@ describe("processInboundTelegramUpdate — registration (v2.1 #97 — channel-de
         message: {
           message_id: 1,
           date: 1,
-          text: "/register Diego de Miguel Lutterothstrasse 69",
+          text: "/register Anna Müller Hauptstrasse 12",
           chat: { id: -100, type: "supergroup" },
           from: { id: 99, is_bot: false, first_name: "T", language_code: "de" },
         },
@@ -5700,9 +5700,9 @@ describe("processInboundTelegramUpdate — registration (v2.1 #97 — channel-de
         registerResult: {
           resident: {
             id: "99",
-            name: "Diego de Miguel",
-            street: "Lutterothstrasse",
-            houseNumber: "69",
+            name: "Anna Müller",
+            street: "Hauptstrasse",
+            houseNumber: "12",
             platformId: "99",
             platform: "telegram",
             language,
@@ -5718,7 +5718,7 @@ describe("processInboundTelegramUpdate — registration (v2.1 #97 — channel-de
         makeRequest(
           dmUpdate({
             chatId: 99,
-            text: "/register Diego de Miguel Lutterothstrasse 69",
+            text: "/register Anna Müller Hauptstrasse 12",
             fromUserId: 99,
             languageCode: language,
           }),
@@ -5730,13 +5730,13 @@ describe("processInboundTelegramUpdate — registration (v2.1 #97 — channel-de
     }
 
     expect(await runFor("en")).toBe(
-      "Thanks, Diego de Miguel! You're registered at Lutterothstrasse 69.",
+      "Thanks, Anna Müller! You're registered at Hauptstrasse 12.",
     );
     expect(await runFor("es")).toBe(
-      "Gracias, Diego de Miguel! Estás registrado en Lutterothstrasse 69.",
+      "Gracias, Anna Müller! Estás registrado en Hauptstrasse 12.",
     );
     expect(await runFor("tr")).toBe(
-      "Teşekkürler, Diego de Miguel! Lutterothstrasse 69 adresine kaydedildin.",
+      "Teşekkürler, Anna Müller! Hauptstrasse 12 adresine kaydedildin.",
     );
   });
 
@@ -5834,9 +5834,9 @@ describe("processInboundTelegramUpdate — setTriggerAttribute (v2.1 #99)", () =
     const { deps, sendToAsh, setTriggerAttribute } = buildDeps({
       registeredResident: {
         id: "99",
-        name: "Diego",
-        street: "Lutterothstrasse",
-        houseNumber: "69",
+        name: "Anna",
+        street: "Hauptstrasse",
+        houseNumber: "12",
         platformId: "99",
         platform: "telegram",
         language: "de",
@@ -5881,9 +5881,9 @@ describe("processInboundTelegramUpdate — setTriggerAttribute (v2.1 #99)", () =
       },
       registeredResident: {
         id: "99",
-        name: "Diego",
-        street: "Lutterothstrasse",
-        houseNumber: "69",
+        name: "Anna",
+        street: "Hauptstrasse",
+        houseNumber: "12",
         platformId: "99",
         platform: "telegram",
         language: "de",
@@ -6038,7 +6038,7 @@ describe("processInboundTelegramUpdate — setTriggerAttribute (v2.1 #99)", () =
       makeRequest(
         dmUpdate({
           chatId: 1,
-          text: "/register Diego de Miguel, Lutterothstrasse 69 Erdgeschoss",
+          text: "/register Anna Müller, Hauptstrasse 12 Erdgeschoss",
           fromUserId: 99,
           languageCode: "de",
         }),
@@ -6079,9 +6079,9 @@ describe("processInboundTelegramUpdate — Flow 1 group text (v2.1 #106 Slice 1 
   function holderResident(): Resident {
     return {
       id: "100",
-      name: "Diego Demiguel",
-      street: "Lutterothstrasse",
-      houseNumber: "69",
+      name: "Anna Müller",
+      street: "Hauptstrasse",
+      houseNumber: "12",
       platformId: "100",
       platform: "telegram",
       language: "de",
@@ -6133,7 +6133,7 @@ describe("processInboundTelegramUpdate — Flow 1 group text (v2.1 #106 Slice 1 
     const [groupChatId, groupText, groupEntities, groupKeyboard] =
       sendDirectMessage.mock.calls[0]!;
     expect(groupChatId).toBe(-100);
-    expect(groupText).toContain("📦 Paket von Diego de Miguel (69)");
+    expect(groupText).toContain("📦 Paket von Anna Müller (12)");
     expect(groupText).toContain("an Marlene Hartmann (88)");
     expect(groupEntities).toBeUndefined();
     expect(groupKeyboard).toBeUndefined();
@@ -6145,7 +6145,7 @@ describe("processInboundTelegramUpdate — Flow 1 group text (v2.1 #106 Slice 1 
       sendDirectMessage.mock.calls[1]!;
     expect(recipientChatId).toBe(200);
     expect(recipientText).toContain("Hi Marlene Hartmann!");
-    expect(recipientText).toContain("Diego de Miguel hat ein Paket");
+    expect(recipientText).toContain("Anna Müller hat ein Paket");
     expect(recipientText).toContain("[Abgeholt]");
     expect(recipientKeyboard).toBeDefined();
     expect(
@@ -6187,8 +6187,8 @@ describe("processInboundTelegramUpdate — Flow 1 group text (v2.1 #106 Slice 1 
         holder: {
           id: "100",
           platformId: "100",
-          name: "Diego de Miguel",
-          houseNumber: "69",
+          name: "Anna Müller",
+          houseNumber: "12",
           floor: null,
           buzzerName: null,
           language: "de",
@@ -6493,7 +6493,7 @@ describe("processInboundTelegramUpdate — Flow 1 group text (v2.1 #106 Slice 1 
       registerPackageResult: {
         package: {
           id: "pkg_unknown",
-          streetId: "Lutterothstrasse",
+          streetId: "Hauptstrasse",
           recipientResidentId: null,
           recipientName: "Stranger",
           recipientHouseNumber: "999",
@@ -6507,8 +6507,8 @@ describe("processInboundTelegramUpdate — Flow 1 group text (v2.1 #106 Slice 1 
         holder: {
           id: "100",
           platformId: "100",
-          name: "Diego Demiguel",
-          houseNumber: "69",
+          name: "Anna Müller",
+          houseNumber: "12",
           floor: null,
           buzzerName: null,
           language: "de",

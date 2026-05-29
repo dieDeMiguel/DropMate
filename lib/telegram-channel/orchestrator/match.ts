@@ -44,10 +44,10 @@ import type { GroupTextOutcome, State } from "./state.js";
 import type { TelegramSessionAuth } from "../types.js";
 
 const REGISTER_USAGE_HINTS: Readonly<Record<string, string>> = {
-  de: "Bitte schreibe: /register <Name>, <Straße> <Hausnummer> [Etage] [Klingelname]. Beispiel: /register Diego de Miguel, Lutterothstrasse 69 Erdgeschoss Links.",
-  en: "Please write: /register <Name>, <Street> <House number> [Floor] [Buzzer]. Example: /register Diego de Miguel, Lutterothstrasse 69 Erdgeschoss Links.",
-  es: "Por favor escribe: /register <Nombre>, <Calle> <Número> [Piso] [Timbre]. Ejemplo: /register Diego de Miguel, Lutterothstrasse 69 Erdgeschoss Links.",
-  tr: "Lütfen şöyle yaz: /register <Ad>, <Sokak> <Numara> [Kat] [Zil]. Örnek: /register Diego de Miguel, Lutterothstrasse 69 Erdgeschoss Links.",
+  de: "Bitte schreibe: /register <Name>, <Straße> <Hausnummer> [Etage] [Klingelname]. Beispiel: /register Anna Müller, Hauptstrasse 12 Erdgeschoss Links.",
+  en: "Please write: /register <Name>, <Street> <House number> [Floor] [Buzzer]. Example: /register Anna Müller, Hauptstrasse 12 Erdgeschoss Links.",
+  es: "Por favor escribe: /register <Nombre>, <Calle> <Número> [Piso] [Timbre]. Ejemplo: /register Anna Müller, Hauptstrasse 12 Erdgeschoss Links.",
+  tr: "Lütfen şöyle yaz: /register <Ad>, <Sokak> <Numara> [Kat] [Zil]. Örnek: /register Anna Müller, Hauptstrasse 12 Erdgeschoss Links.",
 };
 
 function buildRegisterUsageHint(raw: string | null | undefined): string {
