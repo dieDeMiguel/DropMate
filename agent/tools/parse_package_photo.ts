@@ -55,6 +55,7 @@ import { defineTool } from "experimental-ash/tools";
 import { generateObject } from "ai";
 import { z } from "zod";
 
+import { berlinDayParts, formatBerlinDate } from "../../lib/berlin-time.js";
 import { packageCarrierSchema } from "../../lib/redis.js";
 
 export const PRIMARY_MODEL = "google/gemini-3.1-flash-lite";
@@ -88,31 +89,39 @@ const inputSchema = z.object({
 const shippingLabelSchema = z.object({
   kind: z.literal("shipping_label"),
   carrier: packageCarrierSchema.describe(
-    "Carrier visible on the label (DHL, Hermes, DPD, GLS, UPS, " +
-      "Amazon, or 'unknown' when no carrier branding is legible).",
+    "Carrier visible on the label, read from logo / brand colours / " +
+      "wordmark (examples: yellow+red post horn → 'DHL'; orange 'h' → " +
+      "'Hermes'; red+grey wordmark → 'DPD'; brown shield → 'UPS'). " +
+      "Use 'unknown' when no carrier branding is legible — NEVER guess.",
   ),
   recipientName: z
     .string()
     .optional()
     .describe(
-      "Recipient name printed on the label. The addressee, NOT the " +
-        "sender. Omit when illegible or uncertain — the channel will " +
-        "ask the holder to clarify rather than register a guess.",
+      "Recipient name printed on the label — the addressee, NOT the " +
+        "sender. Return the full name as printed. Omit when illegible " +
+        "or uncertain — the channel will ask the holder to clarify " +
+        "rather than register a guess. NEVER invent a name from " +
+        "context or from the sender's caption.",
     ),
   recipientHouseNumber: z
     .string()
     .optional()
     .describe(
       "House number from the recipient's street address on the label. " +
-        "Strip street name + city — return just the number (and any " +
-        "letter suffix like '12a'). Omit when absent or unreadable.",
+        "Strip the street name and city — return just the number plus " +
+        "any letter suffix (e.g. a 'Hauptstraße 12a' line becomes " +
+        "'12a'; a 'Goethestraße 7' line becomes '7'). Omit when absent " +
+        "or unreadable — NEVER guess a number.",
     ),
   trackingNumber: z
     .string()
     .optional()
     .describe(
-      "Tracking / sendungsnummer printed on the label, if legible. " +
-        "Omit when absent or unreadable.",
+      "Tracking / Sendungsnummer printed on the label, if legible " +
+        "(examples: DHL '00340434161094021899'; Hermes 'H42-998877'). " +
+        "Omit when absent or unreadable — NEVER fabricate a plausible " +
+        "number.",
     ),
   confidence: z
     .enum(["high", "medium", "low"])
@@ -192,70 +201,108 @@ const outputSchema = z.discriminatedUnion("kind", [
 
 export type ParsePackagePhotoResult = z.infer<typeof outputSchema>;
 
-const visionPrompt = [
-  "You are reading a package-related photo for a neighbor-coordination",
-  "bot in Germany. Your single job is to classify the photo into one of",
-  "three kinds and extract the structured fields for that kind. Be",
-  "honest about confidence: if a field is blurry, partially obscured,",
-  "or you are guessing — say so via `confidence` and omit the uncertain",
-  "field rather than invent a plausible value.",
-  "",
-  "Decide first: which `kind` does this photo show?",
-  "",
-  "  shipping_label — a physical shipping label or label sticker. Hard",
-  "    physical artifacts: paper printed by the carrier, attached to a",
-  "    parcel, showing carrier branding + recipient address block +",
-  "    tracking barcode. The photo is taken in the real world (visible",
-  "    parcel surface, lighting, hands).",
-  "",
-  "  tracking_page  — a screenshot of a carrier's tracking page (the",
-  "    'where is my package?' view a courier provides via SMS/email",
-  "    link). Digital artifacts: UI chrome, status timeline, 'arriving",
-  "    today between' text, navigation menus, often a map. NO physical",
-  "    parcel visible. NO recipient name printed (privacy — the page",
-  "    is consumed by the addressee themselves).",
-  "",
-  "  unknown        — anything else, including: photos that aren't",
-  "    package-related at all, package contents (the bot stores carrier",
-  "    + recipient only, not contents), screenshots of unrelated apps,",
-  "    blurry/dark images you can't classify.",
-  "",
-  "Carriers to recognise on either kind (logo / brand colours / page or",
-  "label layout):",
-  "  DHL    — yellow + red, post horn logo",
-  "  Hermes — orange, 'h' wordmark",
-  "  DPD    — red + grey, 'DPD' wordmark",
-  "  GLS    — yellow + blue, 'GLS' wordmark",
-  "  UPS    — brown, shield logo",
-  "  Amazon — black + orange smile, 'amazon' wordmark",
-  "  unknown — any other carrier (e.g. FedEx, Hellofresh, Picnic),",
-  "             or no visible carrier branding",
-  "",
-  "For shipping_label specifically:",
-  "  - Recipient name: the addressee printed on the label, NOT the",
-  "    sender. Omit if illegible or you are uncertain.",
-  "  - House number: just the number (and any letter suffix like '12a').",
-  "    Strip street name and city.",
-  "",
-  "For tracking_page specifically:",
-  "  - Delivery window: many tracking pages show an estimated arrival",
-  "    window ('Lieferung heute 13:00–16:00' / 'arriving today between",
-  "    2pm and 5pm'). Return both endpoints as ISO 8601 datetimes in",
-  "    the page's local timezone. If the page shows only a date with",
-  "    no time, omit both endpoints. If a single time point ('um 14:00'),",
-  "    set both endpoints to that point.",
-  "  - Ignore the recipient address (privacy) and promotional banners.",
-  "",
-  "Confidence levels (within a kind):",
-  "  high   — all fields you returned are clearly legible",
-  "  medium — at least one field is partially obscured but readable",
-  "  low    — fields uncertain, page/label heavily damaged, or you are",
-  "           guessing the kind itself",
-  "",
-  "For `kind: \"unknown\"` confidence is always \"low\" — if you were",
-  "confident enough to extract fields, you'd be on shipping_label or",
-  "tracking_page instead.",
-].join("\n");
+/**
+ * Build the vision system prompt at call time so it can embed today's
+ * Berlin-local date. The date anchor lets the model resolve 2-digit
+ * years on tracking pages against the current year instead of drifting
+ * to a year from its training data (#159 rule 3).
+ *
+ * Exported for direct testing — the same builder runs inside every
+ * `runVisionModel` call.
+ */
+export function buildVisionSystemPrompt(now: number = Date.now()): string {
+  const todayYmd = formatBerlinDate(berlinDayParts(now, 0));
+
+  return [
+    "You are reading a package-related photo for a neighbor-coordination",
+    "bot in Germany. Your single job is to classify the photo into one of",
+    "three kinds and extract the structured fields for that kind.",
+    "",
+    `Today's date is ${todayYmd} (Europe/Berlin). NEVER default to a`,
+    "year from your training data when a 2-digit year appears on a",
+    "tracking page or label — anchor it to the current year.",
+    "",
+    "===== Hard rules =====",
+    "",
+    "1. NEVER invent. If `recipientName`, `recipientHouseNumber`,",
+    "   `trackingNumber`, or any optional field is not legibly visible,",
+    "   OMIT it. Do not guess from context, do not fall back to the",
+    "   sender's caption, do not produce a plausible-looking value. A",
+    "   missing field is cheap (the channel asks a follow-up); a wrong",
+    "   field corrupts canonical state (registers a package against the",
+    "   wrong neighbor).",
+    "",
+    "2. NEVER translate. Free-text fields (the `reason` string on every",
+    "   variant) preserve the SOURCE LANGUAGE of the document verbatim.",
+    "   Do not translate German label copy into English. The only",
+    "   format-pinned fields are `carrier` (enum) and the tracking-page",
+    "   window endpoints (ISO 8601 datetimes) — everything else stays in",
+    "   the language it was written in.",
+    "",
+    "3. Be honest about confidence. If a field is blurry, partially",
+    "   obscured, or you are guessing — say so via `confidence` and omit",
+    "   the uncertain field.",
+    "",
+    "===== Classification =====",
+    "",
+    "Decide first: which `kind` does this photo show?",
+    "",
+    "  shipping_label — a physical shipping label or label sticker. Hard",
+    "    physical artifacts: paper printed by the carrier, attached to a",
+    "    parcel, showing carrier branding + recipient address block +",
+    "    tracking barcode. The photo is taken in the real world (visible",
+    "    parcel surface, lighting, hands).",
+    "",
+    "  tracking_page  — a screenshot of a carrier's tracking page (the",
+    "    'where is my package?' view a courier provides via SMS/email",
+    "    link). Digital artifacts: UI chrome, status timeline, 'arriving",
+    "    today between' text, navigation menus, often a map. NO physical",
+    "    parcel visible. NO recipient name printed (privacy — the page",
+    "    is consumed by the addressee themselves).",
+    "",
+    "  unknown        — anything else, including: photos that aren't",
+    "    package-related at all, package contents (the bot stores carrier",
+    "    + recipient only, not contents), screenshots of unrelated apps,",
+    "    blurry/dark images you can't classify.",
+    "",
+    "Carriers to recognise on either kind (logo / brand colours / page or",
+    "label layout):",
+    "  DHL    — yellow + red, post horn logo",
+    "  Hermes — orange, 'h' wordmark",
+    "  DPD    — red + grey, 'DPD' wordmark",
+    "  GLS    — yellow + blue, 'GLS' wordmark",
+    "  UPS    — brown, shield logo",
+    "  Amazon — black + orange smile, 'amazon' wordmark",
+    "  unknown — any other carrier (e.g. FedEx, Hellofresh, Picnic),",
+    "             or no visible carrier branding",
+    "",
+    "For shipping_label specifically:",
+    "  - Recipient name: the addressee printed on the label, NOT the",
+    "    sender. Omit if illegible or you are uncertain — never invent.",
+    "  - House number: just the number (and any letter suffix like '12a').",
+    "    Strip street name and city. Omit if not legible — never guess.",
+    "",
+    "For tracking_page specifically:",
+    "  - Delivery window: many tracking pages show an estimated arrival",
+    "    window ('Lieferung heute 13:00–16:00' / 'arriving today between",
+    "    2pm and 5pm'). Return both endpoints as ISO 8601 datetimes in",
+    "    the page's local timezone, anchored to today's date above when",
+    "    the page shows only a clock face. If the page shows only a date",
+    "    with no time, omit both endpoints. If a single time point ('um",
+    "    14:00'), set both endpoints to that point.",
+    "  - Ignore the recipient address (privacy) and promotional banners.",
+    "",
+    "Confidence levels (within a kind):",
+    "  high   — all fields you returned are clearly legible",
+    "  medium — at least one field is partially obscured but readable",
+    "  low    — fields uncertain, page/label heavily damaged, or you are",
+    "           guessing the kind itself",
+    "",
+    "For `kind: \"unknown\"` confidence is always \"low\" — if you were",
+    "confident enough to extract fields, you'd be on shipping_label or",
+    "tracking_page instead.",
+  ].join("\n");
+}
 
 interface VisionArgs {
   readonly imageUrl: string;
@@ -274,7 +321,7 @@ async function runVisionModel(
   const { object } = await generateObject({
     model,
     schema: outputSchema,
-    system: visionPrompt,
+    system: buildVisionSystemPrompt(),
     messages: [
       {
         role: "user",
