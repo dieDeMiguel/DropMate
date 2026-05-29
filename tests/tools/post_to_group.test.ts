@@ -97,7 +97,7 @@ describe("post_to_group", () => {
 
   it("emits text_mention entities for `mentions` with the correct UTF-16 offsets (#45)", async () => {
     await runExecute({
-      text: "Paket für Natascha Elter (Hs.71) bei Diego abgegeben.",
+      text: "Paket für Natascha Elter (Hs.71) bei Anna abgegeben.",
       mentions: [
         { name: "Natascha Elter", telegramUserId: 4242 },
       ],

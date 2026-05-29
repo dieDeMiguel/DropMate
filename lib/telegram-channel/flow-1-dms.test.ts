@@ -22,8 +22,8 @@ import type { HolderSummary, ResidentRecipientSummary } from "../package.js";
 const holder: HolderSummary = {
   id: "100",
   platformId: "100",
-  name: "Diego Demiguel",
-  houseNumber: "69",
+  name: "Anna Müller",
+  houseNumber: "12",
   floor: "Erdgeschoss",
   buzzerName: "Wohngemeinschaft",
   language: "de",
@@ -43,7 +43,7 @@ describe("flow-1-dms", () => {
     it("names both parties and their house numbers, no buzzer/floor leak", () => {
       const text = buildGroupAckText({ holder, recipient });
       expect(text).toBe(
-        "📦 Paket von Diego Demiguel (69) an Marlene Hartmann (88).",
+        "📦 Paket von Anna Müller (12) an Marlene Hartmann (88).",
       );
       // PRD §9 privacy: holder's buzzer + floor must never appear in the
       // group ack.
@@ -56,8 +56,8 @@ describe("flow-1-dms", () => {
     it("renders floor + buzzer in the recipient DM when present", () => {
       const text = buildRecipientDmText({ holder, recipient });
       expect(text).toContain("Hi Marlene Hartmann!");
-      expect(text).toContain("Diego Demiguel hat ein Paket für dich angenommen.");
-      expect(text).toContain("📍 69, Stock Erdgeschoss — Klingel Wohngemeinschaft");
+      expect(text).toContain("Anna Müller hat ein Paket für dich angenommen.");
+      expect(text).toContain("📍 12, Stock Erdgeschoss — Klingel Wohngemeinschaft");
       expect(text).toContain("[Abgeholt]");
     });
 
@@ -75,7 +75,7 @@ describe("flow-1-dms", () => {
         holder: { ...holder, floor: null },
         recipient,
       });
-      expect(text).toContain("📍 69 — Klingel Wohngemeinschaft");
+      expect(text).toContain("📍 12 — Klingel Wohngemeinschaft");
       expect(text).not.toContain("Stock");
     });
 
@@ -84,7 +84,7 @@ describe("flow-1-dms", () => {
         holder: { ...holder, buzzerName: null },
         recipient,
       });
-      expect(text).toContain("📍 69, Stock Erdgeschoss");
+      expect(text).toContain("📍 12, Stock Erdgeschoss");
       expect(text).not.toContain("Klingel");
     });
 
@@ -93,7 +93,7 @@ describe("flow-1-dms", () => {
         holder: { ...holder, floor: null, buzzerName: null },
         recipient,
       });
-      expect(text).toContain("📍 69\n");
+      expect(text).toContain("📍 12\n");
     });
   });
 
@@ -259,51 +259,51 @@ describe("flow-1-dms", () => {
     it("renders the German variant naming the volunteer by default", () => {
       expect(
         buildDmTextPickupWaitingOnVolunteerText({
-          volunteerName: "Melanie Torena",
+          volunteerName: "Lukas Schmidt",
           language: null,
         }),
       ).toBe(
-        "Dein Paket ist noch nicht da – Melanie Torena nimmt es für dich an. Ich melde mich, sobald sie es übergibt.",
+        "Dein Paket ist noch nicht da – Lukas Schmidt nimmt es für dich an. Ich melde mich, sobald sie es übergibt.",
       );
     });
     it("renders English for 'en'", () => {
       expect(
         buildDmTextPickupWaitingOnVolunteerText({
-          volunteerName: "Melanie Torena",
+          volunteerName: "Lukas Schmidt",
           language: "en",
         }),
       ).toBe(
-        "Your package isn't here yet — Melanie Torena is collecting it for you. I'll DM you the moment they hand it over.",
+        "Your package isn't here yet — Lukas Schmidt is collecting it for you. I'll DM you the moment they hand it over.",
       );
     });
     it("renders Spanish for 'es'", () => {
       expect(
         buildDmTextPickupWaitingOnVolunteerText({
-          volunteerName: "Melanie Torena",
+          volunteerName: "Lukas Schmidt",
           language: "es",
         }),
       ).toBe(
-        "Tu paquete aún no ha llegado — Melanie Torena lo está recogiendo para ti. Te aviso en cuanto te lo entregue.",
+        "Tu paquete aún no ha llegado — Lukas Schmidt lo está recogiendo para ti. Te aviso en cuanto te lo entregue.",
       );
     });
     it("renders Turkish for 'tr'", () => {
       expect(
         buildDmTextPickupWaitingOnVolunteerText({
-          volunteerName: "Melanie Torena",
+          volunteerName: "Lukas Schmidt",
           language: "tr",
         }),
       ).toBe(
-        "Paketin henüz gelmedi — Melanie Torena onu senin için alıyor. Sana teslim eder etmez yazarım.",
+        "Paketin henüz gelmedi — Lukas Schmidt onu senin için alıyor. Sana teslim eder etmez yazarım.",
       );
     });
     it("falls back to German for unsupported languages", () => {
       expect(
         buildDmTextPickupWaitingOnVolunteerText({
-          volunteerName: "Melanie Torena",
+          volunteerName: "Lukas Schmidt",
           language: "ja",
         }),
       ).toBe(
-        "Dein Paket ist noch nicht da – Melanie Torena nimmt es für dich an. Ich melde mich, sobald sie es übergibt.",
+        "Dein Paket ist noch nicht da – Lukas Schmidt nimmt es für dich an. Ich melde mich, sobald sie es übergibt.",
       );
     });
     it("falls back to the volunteer-name-free phrasing when the volunteer name is null", () => {
@@ -399,8 +399,8 @@ describe("flow-1-dms", () => {
         recipientName: "Foo",
         confidence: "low",
         caption: "Paket für jemanden",
-        holderName: "Diego",
-        holderHouseNumber: "69",
+        holderName: "Anna",
+        holderHouseNumber: "12",
       });
       expect(synthetic).toContain(
         "[FLOW_1 CLARIFICATION language=de reason=low-conf]",
@@ -409,7 +409,7 @@ describe("flow-1-dms", () => {
         "The channel parsed: carrier=DHL recipientName=Foo confidence=low.",
       );
       expect(synthetic).toContain("Caption: Paket für jemanden.");
-      expect(synthetic).toContain("Holder: Diego (house 69).");
+      expect(synthetic).toContain("Holder: Anna (house 12).");
       expect(synthetic).toContain("ONE short clarifying question in de");
       // Hard prohibitions
       expect(synthetic).toContain("Do NOT call any tools");

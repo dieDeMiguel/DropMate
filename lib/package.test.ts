@@ -162,10 +162,10 @@ describe("registerPackage (v2.1 #106 — channel-deterministic Flow 1)", () => {
   it("registers a Package when the holder is a registered resident and the recipient resolves to another registered resident", async () => {
     const holder = seedResident({
       platformId: "100",
-      name: "Diego de Miguel",
-      houseNumber: "69",
+      name: "Anna Müller",
+      houseNumber: "12",
       floor: "Erdgeschoss",
-      buzzerName: "de Miguel",
+      buzzerName: "Müller",
     });
     seedResident({
       platformId: "200",
@@ -194,10 +194,10 @@ describe("registerPackage (v2.1 #106 — channel-deterministic Flow 1)", () => {
       expect(result.recipientResolution.resident.name).toBe("Marlene Hartmann");
       expect(result.recipientResolution.resident.language).toBe("de");
     }
-    expect(result.holder.name).toBe("Diego de Miguel");
-    expect(result.holder.houseNumber).toBe("69");
+    expect(result.holder.name).toBe("Anna Müller");
+    expect(result.holder.houseNumber).toBe("12");
     expect(result.holder.floor).toBe("Erdgeschoss");
-    expect(result.holder.buzzerName).toBe("de Miguel");
+    expect(result.holder.buzzerName).toBe("Müller");
     expect(result.receptionRequestFulfilled).toBeNull();
   });
 
@@ -232,8 +232,8 @@ describe("registerPackage (v2.1 #106 — channel-deterministic Flow 1)", () => {
   it("resolves to known_telegram when the recipient name matches a known TG user but no Resident", async () => {
     const holder = seedResident({
       platformId: "100",
-      name: "Diego de Miguel",
-      houseNumber: "69",
+      name: "Anna Müller",
+      houseNumber: "12",
     });
     seedKnownTg({
       userId: 555,
@@ -260,8 +260,8 @@ describe("registerPackage (v2.1 #106 — channel-deterministic Flow 1)", () => {
   it("resolves to unknown when the recipient name matches neither a Resident nor a known TG user", async () => {
     const holder = seedResident({
       platformId: "100",
-      name: "Diego",
-      houseNumber: "69",
+      name: "Anna",
+      houseNumber: "12",
     });
 
     const { registerPackage } = await loadLib();
@@ -278,8 +278,8 @@ describe("registerPackage (v2.1 #106 — channel-deterministic Flow 1)", () => {
   it("defaults carrier to 'unknown' and omits trackingNumber when both are absent", async () => {
     const holder = seedResident({
       platformId: "100",
-      name: "Diego",
-      houseNumber: "69",
+      name: "Anna",
+      houseNumber: "12",
     });
     seedResident({
       platformId: "200",
@@ -300,8 +300,8 @@ describe("registerPackage (v2.1 #106 — channel-deterministic Flow 1)", () => {
   it("flips an open ReceptionRequest to 'fulfilled' when the package closes out a pending Flow 2 ask", async () => {
     const holder = seedResident({
       platformId: "100",
-      name: "Diego",
-      houseNumber: "69",
+      name: "Anna",
+      houseNumber: "12",
     });
     seedResident({
       platformId: "200",
@@ -337,15 +337,15 @@ describe("registerPackage (v2.1 #106 — channel-deterministic Flow 1)", () => {
   it("v2.1 #116 — exposes previousStatus='matched' when the linked ReceptionRequest had a volunteer accepted via [Ich kann helfen]", async () => {
     const holder = seedResident({
       platformId: "100",
-      name: "Diego",
-      houseNumber: "69",
+      name: "Anna",
+      houseNumber: "12",
     });
     seedResident({
       platformId: "200",
       name: "Patricia Höfer",
       houseNumber: "90",
     });
-    // Volunteer (Diego) already tapped [Ich kann helfen] on the
+    // Volunteer (Anna) already tapped [Ich kann helfen] on the
     // requester's Flow 2 card — request flipped to "matched".
     seedRequest({
       id: "req_matched",
@@ -375,8 +375,8 @@ describe("registerPackage (v2.1 #106 — channel-deterministic Flow 1)", () => {
   it("v2.1 #116 — HolderSummary exposes platformId so the channel can DM the holder a private confirmation", async () => {
     const holder = seedResident({
       platformId: "100",
-      name: "Diego",
-      houseNumber: "69",
+      name: "Anna",
+      houseNumber: "12",
     });
     seedResident({
       platformId: "200",
@@ -397,8 +397,8 @@ describe("registerPackage (v2.1 #106 — channel-deterministic Flow 1)", () => {
   it("does not link to a 'fulfilled' or 'expired' request — only open or matched", async () => {
     const holder = seedResident({
       platformId: "100",
-      name: "Diego",
-      houseNumber: "69",
+      name: "Anna",
+      houseNumber: "12",
     });
     seedResident({
       platformId: "200",

@@ -52,7 +52,7 @@ function makeDmRegistrationInbound(overrides: {
 
 const resident: Resident = {
   id: "res_1",
-  name: "Diego Demo",
+  name: "Anna Demo",
   street: "Teststraße",
   houseNumber: "42",
   platformId: "11111",
@@ -158,7 +158,7 @@ describe("match — dm-registration", () => {
     const state: State = {
       kind: "dm-registration",
       inbound: makeDmRegistrationInbound({
-        text: "/register Diego de Miguel Lutterothstrasse 69 Erdgeschoss Links",
+        text: "/register Anna Müller Hauptstrasse 12 Erdgeschoss Links",
         fromUserId: 42,
         fromLanguageCode: "de",
       }),
@@ -170,9 +170,9 @@ describe("match — dm-registration", () => {
       chatId: 99,
       fallbackLanguageCode: "de",
       input: {
-        name: "Diego de Miguel",
-        street: "Lutterothstrasse",
-        houseNumber: "69",
+        name: "Anna Müller",
+        street: "Hauptstrasse",
+        houseNumber: "12",
         floor: "Erdgeschoss",
         buzzerName: "Links",
         platformId: "42",
@@ -185,7 +185,7 @@ describe("match — dm-registration", () => {
     const state: State = {
       kind: "dm-registration",
       inbound: makeDmRegistrationInbound({
-        text: "Diego de Miguel, Lutterothstrasse 69",
+        text: "Anna Müller, Hauptstrasse 12",
         fromUserId: 7,
         fromLanguageCode: null,
       }),
@@ -194,7 +194,7 @@ describe("match — dm-registration", () => {
     expect(actions).toHaveLength(1);
     expect(actions[0]).toMatchObject({
       kind: "register-and-confirm-resident",
-      input: expect.objectContaining({ name: "Diego de Miguel", platformId: "7" }),
+      input: expect.objectContaining({ name: "Anna Müller", platformId: "7" }),
     });
   });
 
@@ -391,9 +391,9 @@ describe("match — dm-text-agent (legitimate fallthrough)", () => {
 describe("runActions — register-and-confirm-resident", () => {
   const mockResident: Resident = {
     id: "99",
-    name: "Diego de Miguel",
-    street: "Lutterothstrasse",
-    houseNumber: "69",
+    name: "Anna Müller",
+    street: "Hauptstrasse",
+    houseNumber: "12",
     floor: "Erdgeschoss",
     platformId: "99",
     platform: "telegram",
@@ -414,9 +414,9 @@ describe("runActions — register-and-confirm-resident", () => {
     await runWithTrace({ traceId: "t1", kind: "text" }, () =>
       runActions(
         [Action.registerAndConfirmResident(99, {
-          name: "Diego de Miguel",
-          street: "Lutterothstrasse",
-          houseNumber: "69",
+          name: "Anna Müller",
+          street: "Hauptstrasse",
+          houseNumber: "12",
           platformId: "99",
           telegramLanguageCode: "de",
         }, "de")],
@@ -430,7 +430,7 @@ describe("runActions — register-and-confirm-resident", () => {
     const [chatId, text] = (deps.sendDirectMessage as ReturnType<typeof vi.fn>).mock.calls[0]!;
     expect(chatId).toBe(99);
     expect(text).toContain("Vielen Dank");
-    expect(text).toContain("Diego de Miguel");
+    expect(text).toContain("Anna Müller");
     expect(events).toEqual([
       "registration.start",
       "dm.start",
@@ -447,9 +447,9 @@ describe("runActions — register-and-confirm-resident", () => {
 
     await runActions(
       [Action.registerAndConfirmResident(99, {
-        name: "Diego de Miguel",
-        street: "Lutterothstrasse",
-        houseNumber: "69",
+        name: "Anna Müller",
+        street: "Hauptstrasse",
+        houseNumber: "12",
         platformId: "99",
         telegramLanguageCode: "de",
       }, "de")],
@@ -469,9 +469,9 @@ describe("runActions — register-and-confirm-resident", () => {
     await expect(
       runActions(
         [Action.registerAndConfirmResident(99, {
-          name: "Diego de Miguel",
-          street: "Lutterothstrasse",
-          houseNumber: "69",
+          name: "Anna Müller",
+          street: "Hauptstrasse",
+          houseNumber: "12",
           platformId: "99",
           telegramLanguageCode: "de",
         }, "de")],
@@ -491,9 +491,9 @@ describe("runActions — register-and-confirm-resident", () => {
     await expect(
       runActions(
         [Action.registerAndConfirmResident(99, {
-          name: "Diego de Miguel",
-          street: "Lutterothstrasse",
-          houseNumber: "69",
+          name: "Anna Müller",
+          street: "Hauptstrasse",
+          houseNumber: "12",
           platformId: "99",
           telegramLanguageCode: "de",
         }, "de")],
@@ -951,8 +951,8 @@ describe("match — group-text-registered", () => {
     return {
       id: "100",
       platformId: "100",
-      name: "Diego",
-      houseNumber: "69",
+      name: "Anna",
+      houseNumber: "12",
       floor: null,
       buzzerName: null,
       language: "de",
@@ -1214,7 +1214,7 @@ const samplePackage: Package = {
   id: "pkg_1",
   streetId: "street_1",
   recipientResidentId: "res_1",
-  recipientName: "Diego Demo",
+  recipientName: "Anna Demo",
   recipientHouseNumber: "42",
   holderResidentId: "res_holder",
   carrier: "DHL",

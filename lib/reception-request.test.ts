@@ -102,13 +102,13 @@ describe("acceptReceptionRequest (v2.1 Bug 3 / #95 — defensive sparse-field ha
   it("returns a coherent result for the Trace A repro: sparse Bug-1 record (carrier=DHL, window, group-card ids) + valid volunteer", async () => {
     // Pinned to the conditions described in #92 Trace A:
     // Natascha (registered volunteer) taps `[Ich kann helfen]` on
-    // Diego's card after the v2.1 classifier-side fix (#93) populated
+    // Anna's card after the v2.1 classifier-side fix (#93) populated
     // `carrier`, `expectedWindowStartAt`, `expectedWindowEndAt`, and
     // the `groupCardChatId` / `groupCardMessageId` patch.
     const requester = seedResident({
       platformId: "200",
-      name: "Diego de Miguel",
-      houseNumber: "69",
+      name: "Anna Müller",
+      houseNumber: "12",
       language: "de",
     });
     const volunteer = seedResident({
@@ -139,7 +139,7 @@ describe("acceptReceptionRequest (v2.1 Bug 3 / #95 — defensive sparse-field ha
     expect(result.request.volunteerResidentId).toBe(volunteer.id);
     expect(result.request.volunteerAvailability).toBeNull();
     expect(result.requester.id).toBe("200");
-    expect(result.requester.name).toBe("Diego de Miguel");
+    expect(result.requester.name).toBe("Anna Müller");
     expect(result.requester.language).toBe("de");
     expect(result.volunteer.id).toBe("300");
     expect(result.volunteer.platformId).toBe("300");
@@ -400,8 +400,8 @@ describe("acceptReceptionRequest (v2.1 Bug 3 / #95 — defensive sparse-field ha
   it("throws AcceptReceptionRequestError with code=ACCEPT_RECEPTION_SELF_NOT_ALLOWED when caller is the requester (explicit requestId, #98)", async () => {
     const requester = seedResident({
       platformId: "400",
-      name: "Diego de Miguel",
-      houseNumber: "69",
+      name: "Anna Müller",
+      houseNumber: "12",
       street: "Methfesselstraße",
     });
     seedRequest({
@@ -433,8 +433,8 @@ describe("acceptReceptionRequest (v2.1 Bug 3 / #95 — defensive sparse-field ha
     // still fire — same code as the explicit branch.
     const requester = seedResident({
       platformId: "401",
-      name: "Diego",
-      houseNumber: "69",
+      name: "Anna",
+      houseNumber: "12",
       street: "Methfesselstraße",
     });
     seedRequest({
@@ -461,8 +461,8 @@ describe("acceptReceptionRequest (v2.1 Bug 3 / #95 — defensive sparse-field ha
   it("does NOT flip the request to matched when self-accept is rejected (#98 — state stays open)", async () => {
     const requester = seedResident({
       platformId: "402",
-      name: "Diego",
-      houseNumber: "69",
+      name: "Anna",
+      houseNumber: "12",
       street: "Methfesselstraße",
     });
     seedRequest({

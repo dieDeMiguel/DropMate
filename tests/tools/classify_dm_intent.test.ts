@@ -753,7 +753,7 @@ describe("classify_dm_intent — v2.1 #121 flow2-volunteer-early-arrival cases (
     expect(result.confidence).toBe("high");
   });
 
-  it("DE: 'Paket von Diego ist angekommen, ich habs' → kind: 'flow2-volunteer-early-arrival' high confidence", async () => {
+  it("DE: 'Paket von Anna ist angekommen, ich habs' → kind: 'flow2-volunteer-early-arrival' high confidence", async () => {
     generateObjectMock.mockResolvedValueOnce({
       object: {
         kind: "flow2-volunteer-early-arrival",
@@ -764,14 +764,14 @@ describe("classify_dm_intent — v2.1 #121 flow2-volunteer-early-arrival cases (
     });
 
     const result = (await runExecute({
-      text: "Paket von Diego ist angekommen, ich habs",
+      text: "Paket von Anna ist angekommen, ich habs",
       languageHint: "de",
     })) as { kind: string };
 
     expect(result.kind).toBe("flow2-volunteer-early-arrival");
   });
 
-  it("EN: 'package from Diego arrived earlier, I have it already' → kind: 'flow2-volunteer-early-arrival' high confidence", async () => {
+  it("EN: 'package from Anna arrived earlier, I have it already' → kind: 'flow2-volunteer-early-arrival' high confidence", async () => {
     generateObjectMock.mockResolvedValueOnce({
       object: {
         kind: "flow2-volunteer-early-arrival",
@@ -782,7 +782,7 @@ describe("classify_dm_intent — v2.1 #121 flow2-volunteer-early-arrival cases (
     });
 
     const result = (await runExecute({
-      text: "package from Diego arrived earlier, I have it already",
+      text: "package from Anna arrived earlier, I have it already",
       languageHint: "en",
     })) as { kind: string; confidence: string };
 
@@ -989,7 +989,7 @@ describe("classify_dm_intent — negative cases (NOT Flow 2)", () => {
     expect(result.kind).toBe("other");
   });
 
-  it("DE: '/register Diego, Methfesselstraße 90' → isFlow2 false (registration)", async () => {
+  it("DE: '/register Anna, Methfesselstraße 90' → isFlow2 false (registration)", async () => {
     generateObjectMock.mockResolvedValueOnce({
       object: {
         kind: "other",
@@ -1000,7 +1000,7 @@ describe("classify_dm_intent — negative cases (NOT Flow 2)", () => {
     });
 
     const result = (await runExecute({
-      text: "/register Diego, Methfesselstraße 90",
+      text: "/register Anna, Methfesselstraße 90",
     })) as { kind: string };
 
     expect(result.kind).toBe("other");
