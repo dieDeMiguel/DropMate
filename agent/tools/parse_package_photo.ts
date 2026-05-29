@@ -57,6 +57,7 @@ import { z } from "zod";
 
 import { berlinDayParts, formatBerlinDate } from "../../lib/berlin-time.js";
 import { packageCarrierSchema } from "../../lib/redis.js";
+import { repairFencedJson } from "../../lib/structured-output.js";
 
 export const PRIMARY_MODEL = "google/gemini-3.1-flash-lite";
 export const FALLBACK_MODEL = "anthropic/claude-sonnet-4.6";
@@ -322,6 +323,7 @@ async function runVisionModel(
     model,
     schema: outputSchema,
     system: buildVisionSystemPrompt(),
+    experimental_repairText: repairFencedJson,
     messages: [
       {
         role: "user",
